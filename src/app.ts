@@ -1,18 +1,45 @@
 import "dotenv/config";
+import { Bot, type Context } from "grammy";
+import { stream, type StreamFlavor } from "@grammyjs/stream";
+import { autoRetry } from "@grammyjs/auto-retry";
+import { setupHandlers } from "./handlers/index.js";
+import config from "./configs/env.js";
+import { initFirebase } from "./services/index.js";
+import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
+import { logger } from "./libs/logger.js";
 
-/**
- * this is the backend for a personal ai chat bot using in a single groupchat
- * since it is designed for a single group, we only consider the usage in the given group
- * meaning that it will ignore all messages in private chats and other groups if it was added into
- * the final goal is to make this bot reply and send messages as natually as a real person
- * so that these are key features:
- * 1. the bot will memorize every user in the groupchat, storing their uid, nicknames, and memories in firebase
- * 2. the bot will memorize chat histories, understand images and stickers, and send stickers when appropriate
- * 3. the bot will not only reply messages when it is pinged or replyed, but will alse proactively participate the chat
- * meaning that it will decide when to send its messages according to the discussion frequency of the group
- * 4. and some misc features will be added in such as greeting nighty night (to be precised)
- *
- * let's do this step by step like real software engineering, and i am the product manager
- * after repo init, we'll discuss the architechture, tech choices, and progress board
- * good luck my ai dev friend
- */
+initFirebase();
+
+type BotContext = StreamFlavor<Context>;
+
+const bot = new Bot<BotContext>(config.botApiKey);
+
+// Auto-retry: handles 429 rate limit errors so the bot doesn't crash
+bot.api.config.use(autoRetry());
+
+// Stream: adds ctx.replyWithStream for real-time LLM response streaming
+bot.use(stream());
+
+bot.start({
+  onStart(botInfo) {
+    logger.info(`nyarbot started as @${botInfo.username}`);
+
+    // Pass cached botInfo so handlers don't call getMe() on every message
+    setupHandlers(bot, botInfo);
+
+    // Proactive conversation: bot joins when people are talking
+    startProactiveChecker(async (text) => {
+      await bot.api.sendMessage(config.tgGroupId, text);
+    });
+  },
+});
+
+// Graceful shutdown
+process.once("SIGINT", () => {
+  stopProactiveChecker();
+  bot.stop();
+});
+process.once("SIGTERM", () => {
+  stopProactiveChecker();
+  bot.stop();
+});

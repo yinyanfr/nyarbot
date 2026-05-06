@@ -8,13 +8,13 @@ Early development. Core architecture is in place — the bot entrypoint, Firebas
 
 ## Stack
 
-| Layer | Library |
-|---|---|
-| Telegram bot framework | `grammy` |
-| AI / LLM | `ai` (Vercel AI SDK) with DeepSeek |
-| Web search | `@tavily/ai-sdk` |
-| Database | `firebase-admin` (Firestore) |
-| Runtime | Node.js, TypeScript (ESM) |
+| Layer                  | Library                            |
+| ---------------------- | ---------------------------------- |
+| Telegram bot framework | `grammy`                           |
+| AI / LLM               | `ai` (Vercel AI SDK) with DeepSeek |
+| Web search             | `@tavily/ai-sdk`                   |
+| Database               | `firebase-admin` (Firestore)       |
+| Runtime                | Node.js, TypeScript (ESM)          |
 
 ## Setup
 
