@@ -4,6 +4,7 @@ const required = {
   TG_GROUP_ID: process.env.TG_GROUP_ID,
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
+  CF_AIG_TOKEN: process.env.CF_AIG_TOKEN,
 } as const;
 
 for (const [key, value] of Object.entries(required)) {
@@ -19,6 +20,7 @@ const config = {
   tgGroupId: process.env.TG_GROUP_ID!,
   deepseekApiKey: process.env.DEEPSEEK_API_KEY!,
   tavilyApiKey: process.env.TAVILY_API_KEY!,
+  cfAigToken: process.env.CF_AIG_TOKEN!,
 } as const;
 
 export default config;

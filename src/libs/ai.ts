@@ -1,5 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateObject, generateText, streamText, tool, type ModelMessage } from "ai";
+import { createAiGateway } from "ai-gateway-provider";
+import { createUnified } from "ai-gateway-provider/providers/unified";
+import { generateText, streamText, tool, type LanguageModel, stepCountIs } from "ai";
 import { tavilySearch, tavilyExtract } from "@tavily/ai-sdk";
 import { z } from "zod/v4";
 import config from "../configs/env.js";
@@ -53,12 +55,25 @@ const deepseekThink = createOpenAI({
 });
 
 // ---------------------------------------------------------------------------
+// Gemini provider via Cloudflare AI Gateway (vision only — DeepSeek has no vision)
+// ---------------------------------------------------------------------------
+
+const aigateway = createAiGateway({
+  accountId: "5b2af39cf1c595a34ffa9057bbf17f0b",
+  gateway: "gem",
+  apiKey: config.cfAigToken,
+});
+
+const unified = createUnified();
+const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-2.5-flash"));
+
+// ---------------------------------------------------------------------------
 // Model instances
 // ---------------------------------------------------------------------------
 
-const flashNoThinkModel = deepseekNoThinking("deepseek-v4-flash");
-const flashThinkModel = deepseekThink("deepseek-v4-flash");
-const proThinkModel = deepseekThink("deepseek-v4-pro");
+const flashNoThinkModel = deepseekNoThinking.chat("deepseek-v4-flash");
+const flashThinkModel = deepseekThink.chat("deepseek-v4-flash");
+const proThinkModel = deepseekThink.chat("deepseek-v4-pro");
 
 // ---------------------------------------------------------------------------
 // Message classification (中文 prompt, fast model, thinking disabled)
@@ -71,7 +86,10 @@ const classificationPrompt = `请把下面的用户消息归到以下三个层�
 - "tech" —— 编程、数学、学术、技术分析、专业领域问题
 
 同时判断是否需要联网搜索：
-- needsSearch: true —— 仅当消息涉及最新事件、实时信息、当前事实时才为 true`;
+- needsSearch: true —— 仅当消息涉及最新事件、实时信息、当前事实时才为 true
+
+请严格以JSON格式回复，不要加任何其他内容：
+{"tier":"simple/complex/tech","needsSearch":true/false}`;
 
 interface ClassificationResult {
   tier: "simple" | "complex" | "tech";
@@ -85,15 +103,17 @@ const classificationSchema = z.object({
 
 export async function classifyMessage(text: string): Promise<ClassificationResult> {
   try {
-    const { object } = await generateObject({
+    const { text: raw } = await generateText({
       model: flashNoThinkModel,
       system: classificationPrompt,
       prompt: text,
-      schema: classificationSchema,
       temperature: 0,
       maxOutputTokens: 100,
     });
-    return object;
+    const parsed = classificationSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) return parsed.data;
+    logger.warn({ raw }, "classification JSON parse failed, defaulting to simple");
+    return { tier: "simple", needsSearch: false };
   } catch (err) {
     logger.warn({ err }, "classification failed, defaulting to simple");
     return { tier: "simple", needsSearch: false };
@@ -107,8 +127,6 @@ export async function classifyMessage(text: string): Promise<ClassificationResul
 export interface GenerateOptions {
   userContext: User;
   userMessage: string;
-  /** Array of image inputs — either `data:` URLs or `https:` URLs. Never include bot-token URLs. */
-  imageInputs: string[];
   recentConversation: string;
   recentMembers: { uid: string; name: string }[];
   tier: ClassificationResult["tier"];
@@ -123,7 +141,6 @@ export function generateResponse(opts: GenerateOptions) {
   const {
     userContext,
     userMessage,
-    imageInputs,
     recentConversation,
     recentMembers,
     tier,
@@ -134,7 +151,7 @@ export function generateResponse(opts: GenerateOptions) {
 
   const systemPrompt = buildSystemPrompt(userContext, recentConversation, recentMembers);
 
-  let model: ReturnType<typeof deepseekNoThinking>;
+  let model: LanguageModel;
 
   if (tier === "tech") {
     model = proThinkModel;
@@ -144,16 +161,8 @@ export function generateResponse(opts: GenerateOptions) {
     model = flashNoThinkModel;
   }
 
-  // Build chat message: text + optional images as vision input.
-  // imageInputs should be data URLs (preferred) or safe public URLs — never bot-token URLs.
   const promptText = systemHint ? `${systemHint}\n\n${userMessage}` : userMessage;
-  const content: ({ type: "text"; text: string } | { type: "image"; image: string })[] = [
-    { type: "text", text: promptText },
-  ];
-  for (const img of imageInputs) {
-    content.push({ type: "image", image: img });
-  }
-  const messages: ModelMessage[] = [{ role: "user" as const, content } as ModelMessage];
+  const messages = [{ role: "user" as const, content: promptText }];
 
   const saveMemoryTool = tool({
     description:
@@ -259,7 +268,7 @@ export function generateResponse(opts: GenerateOptions) {
     messages,
   };
 
-  const result = streamText({ ...baseParams, tools });
+  const result = streamText({ ...baseParams, tools, stopWhen: stepCountIs(5) });
 
   // Resolves with the selected emoji (or null) after all text and tool calls finish
   const stickerPromise = result.text.then(() => stickerEmoji);
@@ -359,7 +368,7 @@ ${recentHistory}
 
 export async function describeImage(imageInput: string): Promise<string> {
   const { text } = await generateText({
-    model: flashNoThinkModel,
+    model: geminiFlashModel,
     system: "用中文简短描述这张图片的内容。只输出描述本身，不要加引号或任何前缀。",
     messages: [
       {
@@ -367,8 +376,8 @@ export async function describeImage(imageInput: string): Promise<string> {
         content: [
           { type: "text" as const, text: "请用一句话（不超过50字）描述这张图片的内容和氛围。" },
           { type: "image" as const, image: imageInput },
-        ] as ModelMessage["content"],
-      } as ModelMessage,
+        ],
+      },
     ],
     maxOutputTokens: 80,
     temperature: 0,

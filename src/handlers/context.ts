@@ -1,8 +1,7 @@
 import type { Context } from "grammy";
-import type { StreamFlavor } from "@grammyjs/stream";
 import type { User } from "../global.d.ts";
 
-export type BotContext = StreamFlavor<Context>;
+export type BotContext = Context;
 
 export interface BotInfo {
   id: number;
