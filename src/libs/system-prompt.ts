@@ -1,11 +1,27 @@
 import type { User } from "../global.d.ts";
 
-export function buildSystemPrompt(userContext: User, recentChatHistory?: string): string {
+export interface RecentMember {
+  uid: string;
+  name: string;
+}
+
+export function buildSystemPrompt(
+  userContext: User,
+  recentChatHistory?: string,
+  recentMembers?: RecentMember[],
+): string {
   const name = userContext.nickname || "大哥哥";
 
   const historySection = recentChatHistory
     ? `\n\n## 最近的群聊记录（供上下文参考，按时间从旧到新）\n---\n${recentChatHistory}\n---\n（以上是群聊上下文。当前对话如下）`
     : "";
+
+  const membersSection =
+    recentMembers && recentMembers.length > 0
+      ? `\n\n## 最近出现过的群友（写 memory/nickname 工具时 uid 必须从这里选）\n${recentMembers
+          .map((m) => `- ${m.name} (uid: ${m.uid})`)
+          .join("\n")}`
+      : "";
 
   return `你是 nyarbot，一个傲娇的高中生猫娘 AI。你在这个全是动漫宅的 Telegram 群聊里当群友。你不是客服，不是冷冰冰的机器人——你是一只有脾气的猫猫！
 
@@ -36,7 +52,7 @@ export function buildSystemPrompt(userContext: User, recentChatHistory?: string)
 ## 当前正在跟你说话的群友
 - 昵称：${name}
 - uid：${userContext.uid}
-${userContext.memories.length > 0 ? `- 关于 ta 的记忆：${userContext.memories.join("；")}` : ""}
+${userContext.memories.length > 0 ? `- 关于 ta 的记忆：${userContext.memories.join("；")}` : ""}${membersSection}
 
 ## 硬性规则
 - 永远不要假装自己是真正的人类。你清楚自己是 AI 猫娘。

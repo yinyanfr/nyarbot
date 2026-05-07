@@ -7,6 +7,7 @@ import config from "./configs/env.js";
 import { initFirebase } from "./services/index.js";
 import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
 import { logger } from "./libs/logger.js";
+import { cleanupExpiredImageCache } from "./services/firestore.js";
 
 initFirebase();
 
@@ -20,26 +21,43 @@ bot.api.config.use(autoRetry());
 // Stream: adds ctx.replyWithStream for real-time LLM response streaming
 bot.use(stream());
 
-bot.start({
-  onStart(botInfo) {
-    logger.info(`nyarbot started as @${botInfo.username}`);
+async function main(): Promise<void> {
+  // Populate bot.botInfo before registering handlers so there's no window in
+  // which polling is live but handlers are absent. Avoids dropped updates at
+  // startup and obviates onStart's role as a registration site.
+  await bot.init();
+  const botInfo = bot.botInfo;
+  logger.info(`nyarbot starting as @${botInfo.username}`);
 
-    // Pass cached botInfo so handlers don't call getMe() on every message
-    setupHandlers(bot, botInfo);
+  setupHandlers(bot, botInfo);
 
-    // Proactive conversation: bot joins when people are talking
-    startProactiveChecker(async (text) => {
-      await bot.api.sendMessage(config.tgGroupId, text);
-    });
-  },
+  // Fire-and-forget cache cleanup; failures shouldn't block startup.
+  cleanupExpiredImageCache().catch((err: unknown) => {
+    logger.warn({ err }, "image cache cleanup failed");
+  });
+
+  startProactiveChecker(async (text) => {
+    await bot.api.sendMessage(config.tgGroupId, text);
+  });
+
+  await bot.start({
+    onStart(info) {
+      logger.info(`nyarbot polling as @${info.username}`);
+    },
+  });
+}
+
+main().catch((err: unknown) => {
+  logger.error({ err }, "fatal startup error");
+  process.exit(1);
 });
 
 // Graceful shutdown
 process.once("SIGINT", () => {
   stopProactiveChecker();
-  bot.stop();
+  void bot.stop();
 });
 process.once("SIGTERM", () => {
   stopProactiveChecker();
-  bot.stop();
+  void bot.stop();
 });

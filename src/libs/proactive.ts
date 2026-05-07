@@ -46,9 +46,10 @@ async function check(sendMessage: (text: string) => Promise<void>): Promise<void
     const now = Date.now();
     const history = getHistory(config.tgGroupId);
 
-    // Count recent non-bot messages in the window
+    // Count recent messages from real users (excluding the bot itself and
+    // synthetic "system" entries such as URL content summaries).
     const recentCount = history.filter(
-      (e) => e.timestamp > now - WINDOW_MS && e.uid !== "bot",
+      (e) => e.timestamp > now - WINDOW_MS && e.uid !== "bot" && e.uid !== "system",
     ).length;
 
     if (recentCount === 0) return;
