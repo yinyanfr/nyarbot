@@ -1,6 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, streamText, tool, type ModelMessage } from "ai";
-import { tavilySearch } from "@tavily/ai-sdk";
+import { tavilySearch, tavilyExtract } from "@tavily/ai-sdk";
 import { z } from "zod/v4";
 import config from "../configs/env.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -251,7 +251,7 @@ export function generateResponse(opts: GenerateOptions) {
 // ---------------------------------------------------------------------------
 
 export async function generateMorningGreeting(userContext: User): Promise<string> {
-  const name = userContext.nickname || "群友";
+  const name = userContext.nickname || "大哥哥";
 
   const memoriesBlock =
     userContext.memories.length > 0
@@ -265,6 +265,39 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 要求：一句话，不要超过两行。语气自然，像朋友之间的日常问候。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
     temperature: 0.8,
     maxOutputTokens: 80,
+  });
+
+  return text.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Love rejection:傲娇好人卡
+// ---------------------------------------------------------------------------
+
+export async function generateLoveRejection(userContext: User): Promise<string> {
+  const name = userContext.nickname || "大哥哥";
+
+  const memoriesBlock =
+    userContext.memories.length > 0
+      ? `关于 ${name} 的记忆：${userContext.memories.join("；")}。`
+      : `我对 ${name} 还不太了解，几乎没有什么记忆。`;
+
+  const { text } = await generateText({
+    model: flashNoThinkModel,
+    system:
+      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。",
+    prompt: `${name} 向你告白了！请傲娇地拒绝 ta。
+
+拒绝策略：
+- 如果我对 ta 几乎不了解、记忆很少或没有，就说"我还不了解你呢"，不能随便接受。
+- 如果记忆里提到了 ta 的爱好、特点或做过的事，就根据那条记忆编一个俏皮的拒绝理由。
+- 无论怎样，最后都要补一句好人卡：告诉 ta 是个好人，一定能找到适合 ta 的女孩子（或适合 ta 的人）。
+
+${memoriesBlock}
+
+要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。只输出拒绝语本身，不要加引号或解释。`,
+    temperature: 0.9,
+    maxOutputTokens: 150,
   });
 
   return text.trim();
@@ -317,4 +350,32 @@ export async function describeImage(imageUrl: string): Promise<string> {
     temperature: 0,
   });
   return text.trim();
+}
+
+// ---------------------------------------------------------------------------
+// URL content extraction (for shared links)
+// ---------------------------------------------------------------------------
+
+export async function fetchUrlContent(url: string): Promise<string | null> {
+  try {
+    const { text } = await generateText({
+      model: flashNoThinkModel,
+      tools: {
+        urlExtract: tavilyExtract({
+          apiKey: config.tavilyApiKey,
+          extractDepth: "basic",
+        }),
+      },
+      system:
+        "你是一个网页内容提取工具。必须使用 urlExtract 工具访问给定的链接，提取其核心内容，然后用中文简短总结（不超过80字）。",
+      prompt: `提取并总结这个链接的内容：${url}\n\n注意：必须先调用 urlExtract 工具获取内容！如果无法访问或没有有意义的内容，只输出 NULL（大写）。`,
+      maxOutputTokens: 150,
+      temperature: 0,
+    });
+    const cleaned = text.trim();
+    if (cleaned === "NULL" || cleaned === "null" || !cleaned) return null;
+    return cleaned;
+  } catch {
+    return null;
+  }
 }

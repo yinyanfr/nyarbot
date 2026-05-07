@@ -13,6 +13,8 @@ import {
   generateResponse,
   generateMorningGreeting,
   describeImage,
+  generateLoveRejection,
+  fetchUrlContent,
 } from "../libs/ai.js";
 import {
   pushMessage,
@@ -47,11 +49,29 @@ export function setupHandlers(
 
     // ---- 2. Get or create user ----
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
-    const displayName = user.nickname || from.first_name || "群友";
+    const displayName = user.nickname || from.first_name || "大哥哥";
 
     // ---- 3. Extract text & entities ----
     const rawText = msg.text ?? msg.caption ?? "";
     const msgEntities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+
+    // ---- 3b. Extract URLs ----
+    const urlEntities = msgEntities.filter((e) => e.type === "url");
+    const urls: string[] = urlEntities.map((e) => rawText.slice(e.offset, e.offset + e.length));
+    // Regex fallback for bare URLs not captured as entities
+    if (urls.length === 0 && rawText) {
+      const matches = rawText.match(/https?:\/\/[^\s]+/g);
+      if (matches) urls.push(...matches);
+    }
+    const urlFetchPromise: Promise<Map<string, string | null>> =
+      urls.length > 0
+        ? Promise.all(
+            urls.map(async (u) => {
+              const content = await fetchUrlContent(u);
+              return [u, content] as const;
+            }),
+          ).then((entries) => new Map(entries))
+        : Promise.resolve(new Map());
 
     // ---- 4. Process images ----
     const photos = msg.photo ?? [];
@@ -105,30 +125,39 @@ export function setupHandlers(
       return;
     }
 
-    // ---- 5c. Admin commands ----
-    if (from.id.toString() === config.tgAdminUid) {
-      const isStatusCommand = msgEntities.some(
-        (e) =>
-          e.type === "bot_command" && rawText.slice(e.offset, e.offset + e.length) === "/status",
-      );
-      if (isStatusCommand) {
-        const historyLen = getHistory(config.tgGroupId).length;
-        const uptime = process.uptime();
-        const mins = Math.floor(uptime / 60);
-        const statusText = `📊 nyarbot 状态\n运行时间: ${mins} 分钟\n缓冲区消息数: ${historyLen}\n记忆用户数: (需要查 DB)`;
-        await ctx.reply(statusText, { reply_to_message_id: msg.message_id });
-        return;
-      }
+    // ---- 5c. /love command ----
+    const isLoveCommand = msgEntities.some(
+      (e) => e.type === "bot_command" && rawText.slice(e.offset, e.offset + e.length) === "/love",
+    );
+    if (isLoveCommand) {
+      const rejection = await generateLoveRejection(user);
+      await ctx.reply(rejection, { reply_to_message_id: msg.message_id });
+      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection);
+      touchBotActivity();
+      return;
+    }
 
-      const isResetCommand = msgEntities.some(
-        (e) =>
-          e.type === "bot_command" && rawText.slice(e.offset, e.offset + e.length) === "/reset",
-      );
-      if (isResetCommand) {
-        clearHistory(config.tgGroupId);
-        await ctx.reply("对话历史已清除喵~", { reply_to_message_id: msg.message_id });
-        return;
-      }
+    // ---- 5d. Admin commands ----
+    // I'll leave these commands for all group members since i trust them
+    const isStatusCommand = msgEntities.some(
+      (e) => e.type === "bot_command" && rawText.slice(e.offset, e.offset + e.length) === "/status",
+    );
+    if (isStatusCommand) {
+      const historyLen = getHistory(config.tgGroupId).length;
+      const uptime = process.uptime();
+      const mins = Math.floor(uptime / 60);
+      const statusText = `📊 nyarbot 状态\n运行时间: ${mins} 分钟\n缓冲区消息数: ${historyLen}\n记忆用户数: (需要查 DB)`;
+      await ctx.reply(statusText, { reply_to_message_id: msg.message_id });
+      return;
+    }
+
+    const isResetCommand = msgEntities.some(
+      (e) => e.type === "bot_command" && rawText.slice(e.offset, e.offset + e.length) === "/reset",
+    );
+    if (isResetCommand) {
+      clearHistory(config.tgGroupId);
+      await ctx.reply("对话历史已清除喵~", { reply_to_message_id: msg.message_id });
+      return;
     }
 
     // ---- 6. Goodnight detection ----
@@ -176,6 +205,7 @@ export function setupHandlers(
     if (rawText) bufferParts.push(rawText);
     if (stickerEmoji) bufferParts.push(`[贴纸: ${stickerEmoji}]`);
     if (imageContexts.length > 0) bufferParts.push("[图片]");
+    if (urls.length > 0) bufferParts.push(`[链接: ${urls.join(" ")}]`);
     const bufferText = bufferParts.join(" ").slice(0, MAX_BUFFER_TEXT);
     if (bufferText) {
       pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferText);
@@ -197,13 +227,57 @@ export function setupHandlers(
       replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
       replyTo?.from?.id === botId;
 
-    if (!isMentioned && !isRepliedToBot) return;
+    if (!isMentioned && !isRepliedToBot) {
+      // Push URL content to buffer when ready (for proactive context)
+      urlFetchPromise
+        .then((map) => {
+          for (const [, content] of map) {
+            if (content) {
+              pushMessage(
+                config.tgGroupId,
+                "system",
+                "链接",
+                `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+              );
+            }
+          }
+        })
+        .catch(() => {
+          /* ignore */
+        });
+      return;
+    }
 
-    // ---- 10. Build recent conversation context ----
+    // ---- 10. Await URL content ----
+    const urlContents = await urlFetchPromise;
+    // Push fetched URL content to buffer
+    for (const [, content] of urlContents) {
+      if (content) {
+        pushMessage(
+          config.tgGroupId,
+          "system",
+          "链接",
+          `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+        );
+      }
+    }
+
+    // ---- 11. Love confession detection ----
+    const loveRegex =
+      /我喜欢你|我爱你|我们结婚|嫁给我|做我女|当我女|交往|love\s*you|跟我在一起|和我在一起/i;
+    if (loveRegex.test(rawText)) {
+      const rejection = await generateLoveRejection(user);
+      await ctx.reply(rejection, { reply_to_message_id: msg.message_id });
+      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection);
+      touchBotActivity();
+      return;
+    }
+
+    // ---- 12. Build recent conversation context ----
     const history = getHistory(config.tgGroupId);
     const recentConversation = formatHistoryAsContext(history);
 
-    // ---- 11. Build user message with media context ----
+    // ---- 13. Build user message with media context ----
     let userMessage = rawText;
     if (imageContexts.length > 0) {
       const imgLine = imageContexts.map((ic) => `[图片: ${ic}]`).join("\n");
@@ -218,11 +292,19 @@ export function setupHandlers(
         userMessage = `[回复: "${repliedText}"]\n${userMessage}`;
       }
     }
+    // Add URL content to user message
+    for (const [url, content] of urlContents) {
+      if (content) {
+        userMessage = `[链接 ${url}: ${content}]\n${userMessage}`;
+      } else {
+        userMessage = `[链接 ${url}: 无法获取内容]\n${userMessage}`;
+      }
+    }
 
-    // ---- 12. Classify message ----
+    // ---- 14. Classify message ----
     const { tier, needsSearch } = await classifyMessage(userMessage);
 
-    // ---- 13. Generate & stream response ----
+    // ---- 15. Generate & stream response ----
     const {
       textStream,
       stickerPromise,
@@ -258,9 +340,8 @@ export function setupHandlers(
       stickerPromise.then((emoji) => {
         if (emoji && MIAOHAHA_STICKERS[emoji]) {
           ctx.api
-            .sendSticker(ctx.chat.id!, MIAOHAHA_STICKERS[emoji]!, {
-              reply_to_message_id: msg.message_id,
-            })
+            .sendSticker(ctx.chat.id!, MIAOHAHA_STICKERS[emoji]!)
+            // would be natural that stickers don't reply to messages
             .catch(() => {
               /* ignore */
             });
@@ -303,6 +384,23 @@ export function setupHandlers(
 
     const msgEntities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
+    // Extract URLs
+    const urlEntities = msgEntities.filter((e) => e.type === "url");
+    const urls: string[] = urlEntities.map((e) => rawText.slice(e.offset, e.offset + e.length));
+    if (urls.length === 0 && rawText) {
+      const matches = rawText.match(/https?:\/\/[^\s]+/g);
+      if (matches) urls.push(...matches);
+    }
+    const urlFetchPromise: Promise<Map<string, string | null>> =
+      urls.length > 0
+        ? Promise.all(
+            urls.map(async (u) => {
+              const content = await fetchUrlContent(u);
+              return [u, content] as const;
+            }),
+          ).then((entries) => new Map(entries))
+        : Promise.resolve(new Map());
+
     // Check trigger: @mention or replied to
     const isMentioned = msgEntities.some((e) => {
       if (e.type !== "mention") return false;
@@ -320,8 +418,34 @@ export function setupHandlers(
 
     if (!isMentioned && !isRepliedToBot) return;
 
+    // Await URL content
+    const urlContents = await urlFetchPromise;
+    // Push fetched URL content to buffer
+    for (const [, content] of urlContents) {
+      if (content) {
+        pushMessage(
+          config.tgGroupId,
+          "system",
+          "链接",
+          `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+        );
+      }
+    }
+
+    // Love confession detection
+    const loveRegex =
+      /我喜欢你|我爱你|我们结婚|嫁给我|做我女|当我女|交往|love\s*you|跟我在一起|和我在一起/i;
+    if (loveRegex.test(rawText)) {
+      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const rejection = await generateLoveRejection(user);
+      await ctx.reply(rejection, { reply_to_message_id: msg.message_id });
+      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection);
+      touchBotActivity();
+      return;
+    }
+
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
-    const displayName = user.nickname || from.first_name || "群友";
+    const displayName = user.nickname || from.first_name || "大哥哥";
 
     // Push edited message to buffer
     pushMessage(
@@ -339,6 +463,14 @@ export function setupHandlers(
       const repliedText = replyTo.text ?? replyTo.caption ?? "";
       if (repliedText) {
         userMessage = `[回复: "${repliedText}"]\n${userMessage}`;
+      }
+    }
+    // Add URL content to user message
+    for (const [url, content] of urlContents) {
+      if (content) {
+        userMessage = `[链接 ${url}: ${content}]\n${userMessage}`;
+      } else {
+        userMessage = `[链接 ${url}: 无法获取内容]\n${userMessage}`;
       }
     }
 
@@ -375,13 +507,9 @@ export function setupHandlers(
 
       stickerPromise.then((emoji) => {
         if (emoji && MIAOHAHA_STICKERS[emoji]) {
-          ctx.api
-            .sendSticker(ctx.chat.id!, MIAOHAHA_STICKERS[emoji]!, {
-              reply_to_message_id: msg.message_id,
-            })
-            .catch(() => {
-              /* ignore */
-            });
+          ctx.api.sendSticker(ctx.chat.id!, MIAOHAHA_STICKERS[emoji]!).catch(() => {
+            /* ignore */
+          });
         }
       });
     } catch (err) {

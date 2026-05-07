@@ -4,6 +4,8 @@ export {
   generateMorningGreeting,
   shouldSpeak,
   describeImage,
+  generateLoveRejection,
+  fetchUrlContent,
 } from "./ai.js";
 export type { GenerateOptions } from "./ai.js";
 export {
