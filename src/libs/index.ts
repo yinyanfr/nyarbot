@@ -1,13 +1,13 @@
 export {
   classifyMessage,
-  generateResponse,
+  generateAiTurn,
+  probeGate,
   generateMorningGreeting,
-  shouldSpeak,
   describeImage,
   generateLoveRejection,
   fetchUrlContent,
 } from "./ai.js";
-export type { GenerateOptions } from "./ai.js";
+export type { AiTurnResult, GenerateOptions, ProbeGateOptions } from "./ai.js";
 export {
   pushMessage,
   getHistory,

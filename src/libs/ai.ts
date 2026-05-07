@@ -1,15 +1,19 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAiGateway } from "ai-gateway-provider";
 import { createUnified } from "ai-gateway-provider/providers/unified";
-import { generateText, streamText, tool, type LanguageModel, stepCountIs } from "ai";
+import { generateText, tool, type LanguageModel, stepCountIs } from "ai";
 import { tavilySearch, tavilyExtract } from "@tavily/ai-sdk";
 import { z } from "zod/v4";
 import config from "../configs/env.js";
-import { buildSystemPrompt } from "./system-prompt.js";
+import {
+  buildSystemPrompt,
+  buildLateBindingPrompt,
+  buildProbeSystemPrompt,
+} from "./system-prompt.js";
 import { updateUserMemory, removeUserMemory, updateUserNickname } from "../services/firestore.js";
 import { STICKER_EMOJIS, STICKER_DESCRIPTIONS } from "./stickers.js";
 import { logger } from "./logger.js";
-import type { User } from "../global.d.ts";
+import type { User } from "../global.d.js";
 
 // ---------------------------------------------------------------------------
 // DeepSeek providers (OpenAI-compatible, base URL without /v1)
@@ -128,7 +132,25 @@ export async function classifyMessage(text: string): Promise<ClassificationResul
 }
 
 // ---------------------------------------------------------------------------
-// Response generation
+// Max tokens per tier
+// ---------------------------------------------------------------------------
+
+const MAX_TOKENS_BY_TIER: Record<ClassificationResult["tier"], number | undefined> = {
+  simple: 200,
+  complex: 500,
+  tech: undefined, // no hard limit for technical answers
+};
+
+// ---------------------------------------------------------------------------
+// AiTurnResult — what generateAiTurn returns
+// ---------------------------------------------------------------------------
+
+export type AiTurnResult =
+  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "dismiss"; rawText?: string };
+
+// ---------------------------------------------------------------------------
+// Response generation (tool-call architecture)
 // ---------------------------------------------------------------------------
 
 export interface GenerateOptions {
@@ -141,10 +163,15 @@ export interface GenerateOptions {
   /** UIDs the LLM is allowed to reference in memory tools. */
   allowedUids: Set<string>;
   /** Optional system hint injected before the user message, e.g. "user just woke up". */
-  systemHint?: string;
+  systemHint?: string | null;
+  /** Whether the bot was mentioned or replied-to (for late-binding prompt). */
+  wasMentioned?: boolean;
+  wasRepliedTo?: boolean;
+  /** Recent bot messages for human-likeness feedback (last N send_message texts). */
+  recentBotMessages?: string[];
 }
 
-export function generateResponse(opts: GenerateOptions) {
+export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResult> {
   const {
     userContext,
     userMessage,
@@ -154,6 +181,9 @@ export function generateResponse(opts: GenerateOptions) {
     needsSearch,
     allowedUids,
     systemHint,
+    wasMentioned,
+    wasRepliedTo,
+    recentBotMessages,
   } = opts;
 
   const systemPrompt = buildSystemPrompt(userContext, recentConversation, recentMembers);
@@ -168,8 +198,50 @@ export function generateResponse(opts: GenerateOptions) {
     model = flashNoThinkModel;
   }
 
-  const promptText = systemHint ? `${systemHint}\n\n${userMessage}` : userMessage;
+  const maxTokens = MAX_TOKENS_BY_TIER[tier];
+
+  // Build the late-binding prompt that goes at the end of the user message
+  const lateBinding = buildLateBindingPrompt({
+    wasMentioned: wasMentioned ?? false,
+    wasRepliedTo: wasRepliedTo ?? false,
+    recentBotMessages: recentBotMessages ?? [],
+  });
+
+  const promptText = systemHint
+    ? `${systemHint}\n\n${userMessage}\n\n${lateBinding}`
+    : `${userMessage}\n\n${lateBinding}`;
+
   const messages = [{ role: "user" as const, content: promptText }];
+
+  // Mutable state captured by tool closures
+  const sentMessages: string[] = [];
+  let stickerEmoji: string | null = null;
+  let dismissed = false;
+
+  const sendMessageTool = tool({
+    description:
+      "向群聊发送一条消息。这是你向群里说话的唯一方式——不调用这个工具就是沉默。" +
+      "你可以多次调用 send_message 来发送多条短消息（像真人打字一样一条一条发），但大部分时候一条就够了。" +
+      "每条消息应该简短自然，一条消息说一个想法。",
+    inputSchema: z.object({
+      text: z.string().describe("要发送的消息文本。要像真人在群聊里打字一样自然简短。"),
+    }),
+    execute: async ({ text }) => {
+      sentMessages.push(text);
+      return "消息已发送 ✓";
+    },
+  });
+
+  const dismissTool = tool({
+    description:
+      "选择不回复。当你觉得没什么值得说的、对话与你无关、或者只是礼貌性附和时，调用这个工具。" +
+      "沉默往往是正确的选择。犹豫时选择 dismiss。",
+    inputSchema: z.object({}),
+    execute: async () => {
+      dismissed = true;
+      return "已选择沉默 ✓";
+    },
+  });
 
   const saveMemoryTool = tool({
     description:
@@ -237,12 +309,10 @@ export function generateResponse(opts: GenerateOptions) {
     },
   });
 
-  // Sticker: selected emoji is captured in closure, sent after streaming completes
-  let stickerEmoji: string | null = null;
-
   const sendStickerTool = tool({
     description:
       "当你的回复内容很简短（如 噢、好的、很棒、哈哈），或者对话已经自然结束，可以发送一个贴纸代替或结束对话。" +
+      "不要在 send_message 的文本中只发一个 emoji——想发贴纸就用 sendSticker。" +
       "可用贴纸含义：" +
       STICKER_EMOJIS.map((e) => `${e}(${STICKER_DESCRIPTIONS[e] || ""})`).join(" "),
     inputSchema: z.object({
@@ -254,33 +324,146 @@ export function generateResponse(opts: GenerateOptions) {
     },
   });
 
-  const tools = {
-    saveMemory: saveMemoryTool,
-    setNickname: setNicknameTool,
-    deleteMemory: deleteMemoryTool,
-    sendSticker: sendStickerTool,
-    ...(needsSearch
-      ? {
-          webSearch: tavilySearch({
-            apiKey: config.tavilyApiKey,
-            maxResults: 3,
-          }),
-        }
-      : {}),
-  };
-
-  const baseParams = {
+  const generateParams: Parameters<typeof generateText>[0] = {
     model,
     system: systemPrompt,
     messages,
+    tools: {
+      send_message: sendMessageTool,
+      dismiss: dismissTool,
+      saveMemory: saveMemoryTool,
+      setNickname: setNicknameTool,
+      deleteMemory: deleteMemoryTool,
+      sendSticker: sendStickerTool,
+      ...(needsSearch
+        ? {
+            webSearch: tavilySearch({
+              apiKey: config.tavilyApiKey,
+              maxResults: 3,
+            }),
+          }
+        : {}),
+    },
+    stopWhen: stepCountIs(5),
+  };
+  if (maxTokens != null) {
+    generateParams.maxOutputTokens = maxTokens;
+  }
+
+  const result = await generateText(generateParams);
+
+  // Determine the outcome
+  const rawText = result.text?.trim();
+  const rawTextProp = rawText || undefined;
+
+  // If the model called dismiss but also produced output (e.g. sticker),
+  // prefer the output over silence.
+  if (dismissed && sentMessages.length === 0 && !stickerEmoji) {
+    return rawTextProp
+      ? { action: "dismiss" as const, rawText: rawTextProp }
+      : { action: "dismiss" as const };
+  }
+
+  if (sentMessages.length > 0) {
+    return {
+      action: "send" as const,
+      messages: sentMessages,
+      stickerEmoji,
+    };
+  }
+
+  // Sticker-only: model called sendSticker but not send_message
+  if (stickerEmoji) {
+    return { action: "send" as const, messages: [], stickerEmoji };
+  }
+
+  // Edge case: no send_message and no dismiss — the model just output text
+  // (inner monologue). Treat as dismiss, but pass rawText as fallback.
+  if (!rawText) {
+    return { action: "dismiss" as const };
+  }
+
+  logger.info(
+    { textContent: rawText.slice(0, 100) },
+    "AI generated text without tool call, dismissing",
+  );
+  return { action: "dismiss" as const, rawText };
+}
+
+// ---------------------------------------------------------------------------
+// Probe gate (proactive message filtering)
+// ---------------------------------------------------------------------------
+
+export interface ProbeGateOptions {
+  recentConversation: string;
+  recentMembers: { uid: string; name: string }[];
+}
+
+/**
+ * Cheap model check to determine whether the bot should speak proactively.
+ * Returns true if the bot should proceed with the full model, false if it
+ * should stay silent.
+ */
+export async function probeGate(opts: ProbeGateOptions): Promise<boolean> {
+  const { recentConversation, recentMembers } = opts;
+
+  const systemPrompt = buildProbeSystemPrompt(recentConversation, recentMembers);
+
+  // Lightweight version of the late-binding prompt for probe context
+  const lateBinding =
+    "你没有被直接提及。你只是在浏览群聊，决定是否有值得说的话。" +
+    "大部分时候你应该选择 dismiss。只有当你真的有独特且有趣的东西可补充时才调用 send_message。";
+
+  let probedDismiss = false;
+
+  const probeDismissTool = tool({
+    description: "选择不回复。当你没什么值得说的时就选这个。犹豫时选 dismiss。",
+    inputSchema: z.object({}),
+    execute: async () => {
+      probedDismiss = true;
+      return "已选择沉默 ✓";
+    },
+  });
+
+  const probeSendMessageTool = tool({
+    description: "决定回复。仅当你确实有独特且有价值的东西要说时才选这个。",
+    inputSchema: z.object({
+      text: z.string().describe("你打算说的话的草稿，供参考"),
+    }),
+    execute: async () => {
+      return "探测通过，将使用完整模型生成回复";
+    },
+  });
+
+  const probeTools = {
+    send_message: probeSendMessageTool,
+    dismiss: probeDismissTool,
   };
 
-  const result = streamText({ ...baseParams, tools, stopWhen: stepCountIs(5) });
+  const messages = [
+    {
+      role: "user" as const,
+      content: `${lateBinding}\n\n请浏览以下群聊记录，决定是否有值得回复的内容。`,
+    },
+  ];
 
-  // Resolves with the selected emoji (or null) after all text and tool calls finish
-  const stickerPromise = result.text.then(() => stickerEmoji);
+  try {
+    await generateText({
+      model: flashNoThinkModel,
+      system: systemPrompt,
+      messages,
+      tools: probeTools,
+      stopWhen: stepCountIs(1),
+      maxOutputTokens: 60,
+      temperature: 0.85,
+    });
 
-  return { textStream: result.textStream, stickerPromise, text: result.text };
+    // If the probe dismissed, stay silent
+    return !probedDismiss;
+  } catch (err) {
+    logger.warn({ err }, "probe gate failed, defaulting to silent");
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +480,9 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system: `你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。`,
+    system: `你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。像朋友之间的日常问候，不是客服打招呼。`,
     prompt: `${name} 刚刚睡醒上线了。请给 ta 发一句傲娇的问候语，欢迎 ta 回来。${memoriesBlock}
-要求：一句话，不要超过两行。语气自然，像朋友之间的日常问候。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
+要求：一句话，不要超过两行。语气自然，像朋友在群聊里随口打招呼，绝对不要像客服。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
     temperature: 0.8,
     maxOutputTokens: 80,
   });
@@ -322,7 +505,7 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
   const { text } = await generateText({
     model: flashNoThinkModel,
     system:
-      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。",
+      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。像聊天，不是写作文。",
     prompt: `${name} 向你告白了！请傲娇地拒绝 ta。
 
 拒绝策略：
@@ -332,41 +515,12 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
 
 ${memoriesBlock}
 
-要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。只输出拒绝语本身，不要加引号或解释。`,
+要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。像聊天一样说，不要写成长篇大论。只输出拒绝语本身，不要加引号或解释。`,
     temperature: 0.9,
     maxOutputTokens: 150,
   });
 
   return text.trim();
-}
-
-// ---------------------------------------------------------------------------
-// Proactive conversation check: LLM decides whether to jump in
-// ---------------------------------------------------------------------------
-
-export async function shouldSpeak(recentHistory: string): Promise<string | null> {
-  const { text } = await generateText({
-    model: flashNoThinkModel,
-    system: "你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气自然、随意、有猫娘口癖，像群友一样。",
-    prompt: `以下是最近的群聊记录。作为一只傲娇猫娘，看看有没有你想傲娇地插话的内容？
-
-注意：以「[${config.botUsername}]:」开头的那几行是你自己之前说过的话，不要接自己的话、不要附和自己。
-如果刚刚你已经说过了，或者没什么值得插的，就只输出 SILENT。
-如果确实有想说的，写一句自然简短的猫娘回复（用中文，不超过两行，带猫娘口癖）。
-
-群聊记录：
----
-${recentHistory}
----
-
-你的回复（或 SILENT）：`,
-    temperature: 0.85,
-    maxOutputTokens: 100,
-  });
-
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.toUpperCase() === "SILENT") return null;
-  return trimmed;
 }
 
 // ---------------------------------------------------------------------------
