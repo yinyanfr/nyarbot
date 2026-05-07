@@ -27,11 +27,12 @@ import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.ts";
 import type { BotContext, BotInfo } from "./context.js";
-import { MAX_BUFFER_TEXT, LOVE_REGEX, NIGHTY_REGEX, EIGHT_HOURS_MS } from "./constants.js";
+import { MAX_BUFFER_TEXT, LOVE_REGEX, EIGHT_HOURS_MS } from "./constants.js";
 import { matchCommand } from "./match-command.js";
 import { extractContent } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
+import { formatForTelegramHtml } from "../libs/format-telegram.js";
 
 /**
  * Build the user-facing text for the AI call by stitching together the raw
@@ -150,10 +151,19 @@ async function streamAiReply(params: {
   userMessage: string;
   photoFileIds: string[];
   imageDataUrls: string[];
+  caption: string;
   systemHint: string | null;
 }): Promise<void> {
-  const { ctx, replyToMessageId, user, userMessage, photoFileIds, imageDataUrls, systemHint } =
-    params;
+  const {
+    ctx,
+    replyToMessageId,
+    user,
+    userMessage,
+    photoFileIds,
+    imageDataUrls,
+    caption,
+    systemHint,
+  } = params;
 
   const history = getHistory(config.tgGroupId);
   const recentConversation = formatHistoryAsContext(history);
@@ -202,11 +212,18 @@ async function streamAiReply(params: {
       }
     }
 
-    // Final edit to ensure the complete text is displayed.
+    // Final edit: try HTML-formatted version first, fall back to plain text.
     try {
-      await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
+      const formatted = formatForTelegramHtml(accumulated);
+      await ctx.api.editMessageText(chatId, msg.message_id, formatted, {
+        parse_mode: "HTML",
+      });
     } catch {
-      // Already up-to-date is fine.
+      try {
+        await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
+      } catch {
+        // Already up-to-date is fine.
+      }
     }
 
     touchBotActivity();
@@ -229,7 +246,7 @@ async function streamAiReply(params: {
       const fileId = photoFileIds[i];
       const img = imageDataUrls[i];
       if (!fileId || !img) continue;
-      describeImage(img)
+      describeImage(img, caption)
         .then((desc) => cacheImage(fileId, { description: desc }))
         .catch((err: unknown) => {
           logger.warn({ err, fileId }, "streamAiReply: image cache failed");
@@ -285,7 +302,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const imageDescriptions = [...cachedImageDescriptions];
     for (const imgUrl of imageDataUrls) {
       try {
-        const desc = await describeImage(imgUrl);
+        const desc = await describeImage(imgUrl, rawText);
         imageDescriptions.push(desc);
       } catch (err) {
         logger.warn({ err }, "failed to describe image");
@@ -323,7 +340,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 6. /love — public
     if (matchCommand(entities, rawText, "/love", botUsername)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
       return;
     }
 
@@ -373,10 +390,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    // 8. Goodnight — /nighty command or matching Chinese/English text
-    const isNightyCommand = matchCommand(entities, rawText, "/nighty", botUsername);
-    const isNightyText = rawText ? NIGHTY_REGEX.test(rawText) : false;
-    if (isNightyCommand || isNightyText) {
+    // 8. Goodnight — /nighty command only
+    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
       await setNightyTimestamp(user.uid, Date.now());
       await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id);
       return;
@@ -420,7 +435,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         try {
           const greeting = await generateMorningGreeting(user);
           await setMorningGreeted(user.uid, now);
-          await replyAndTrack(ctx, greeting, msg.message_id);
+          await replyAndTrack(ctx, greeting, msg.message_id, true);
         } catch (err) {
           logger.error({ err, uid: user.uid }, "failed to send morning greeting");
         }
@@ -447,7 +462,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 13. Love confession → templated rejection (no full AI pipeline needed)
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
       return;
     }
 
@@ -470,6 +485,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       userMessage,
       photoFileIds,
       imageDataUrls,
+      caption: rawText,
       systemHint,
     });
   });
@@ -553,7 +569,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
       return;
     }
 
@@ -575,6 +591,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       userMessage,
       photoFileIds: [],
       imageDataUrls: [],
+      caption: rawText,
       systemHint: null,
     });
   });

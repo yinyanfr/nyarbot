@@ -28,6 +28,13 @@ function injectThinking(init: RequestInit | undefined, type: "enabled" | "disabl
   try {
     const body = JSON.parse(init.body);
     body.thinking = { type };
+    if (type === "enabled" && Array.isArray(body.messages)) {
+      for (const msg of body.messages) {
+        if (msg.role === "assistant" && !("reasoning_content" in msg)) {
+          msg.reasoning_content = "";
+        }
+      }
+    }
     return { ...init, body: JSON.stringify(body) };
   } catch {
     return init ?? {};
@@ -65,7 +72,7 @@ const aigateway = createAiGateway({
 });
 
 const unified = createUnified();
-const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-2.5-flash"));
+const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3-flash-preview"));
 
 // ---------------------------------------------------------------------------
 // Model instances
@@ -366,20 +373,27 @@ ${recentHistory}
 // Image description (for caching)
 // ---------------------------------------------------------------------------
 
-export async function describeImage(imageInput: string): Promise<string> {
+export async function describeImage(imageInput: string, caption?: string): Promise<string> {
+  const captionNote = caption
+    ? `\n4. 用户给图片附加了说明文字：「${caption}」，请结合说明来理解图片。`
+    : "";
   const { text } = await generateText({
     model: geminiFlashModel,
-    system: "用中文简短描述这张图片的内容。只输出描述本身，不要加引号或任何前缀。",
+    system: `请用中文详细描述这张图片，要求：
+1. 详细描述图片的内容、细节和氛围，描述要充分具体
+2. 如果图片中包含文字，把所有文字完整提取出来
+3. 如果图片是一道题目，尝试解题并给出解答过程${captionNote}
+只输出描述本身，不要加引号或任何前缀。`,
     messages: [
       {
         role: "user" as const,
         content: [
-          { type: "text" as const, text: "请用一句话（不超过50字）描述这张图片的内容和氛围。" },
+          { type: "text" as const, text: "请详细描述这张图片。" },
           { type: "image" as const, image: imageInput },
         ],
       },
     ],
-    maxOutputTokens: 80,
+    maxOutputTokens: 8000,
     temperature: 0,
   });
   return text.trim();

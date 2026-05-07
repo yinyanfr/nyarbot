@@ -7,6 +7,7 @@ import { initFirebase } from "./services/index.js";
 import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
 import { logger } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
+import { formatForTelegramHtml } from "./libs/format-telegram.js";
 
 initFirebase();
 
@@ -33,7 +34,12 @@ async function main(): Promise<void> {
   });
 
   startProactiveChecker(async (text) => {
-    await bot.api.sendMessage(config.tgGroupId, text);
+    const formatted = formatForTelegramHtml(text);
+    try {
+      await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
+    } catch {
+      await bot.api.sendMessage(config.tgGroupId, text);
+    }
   });
 
   await bot.start({
