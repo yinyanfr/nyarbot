@@ -1,6 +1,5 @@
 import "dotenv/config";
-import { Bot, type Context } from "grammy";
-import { stream, type StreamFlavor } from "@grammyjs/stream";
+import { Bot } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
@@ -11,15 +10,12 @@ import { cleanupExpiredImageCache } from "./services/firestore.js";
 
 initFirebase();
 
-type BotContext = StreamFlavor<Context>;
+type BotContext = import("./handlers/context.js").BotContext;
 
 const bot = new Bot<BotContext>(config.botApiKey);
 
 // Auto-retry: handles 429 rate limit errors so the bot doesn't crash
 bot.api.config.use(autoRetry());
-
-// Stream: adds ctx.replyWithStream for real-time LLM response streaming
-bot.use(stream());
 
 async function main(): Promise<void> {
   // Populate bot.botInfo before registering handlers so there's no window in

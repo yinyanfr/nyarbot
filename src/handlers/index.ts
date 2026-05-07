@@ -66,7 +66,8 @@ function buildUserMessage(params: {
     const desc = imageDescriptions.map((d) => `[图片: ${d}]`).join("\n");
     msg = msg ? `${desc}\n${displayName}说: ${msg}` : desc;
   } else if (hasImage) {
-    // Fresh image: the bytes are attached via `imageInputs`, so we just hint here.
+    // Fallback: image description failed (e.g. Gemini vision error).
+    // Tell DeepSeek there was an image but we couldn't see it.
     msg = msg ? `[图片见上]\n${displayName}说: ${msg}` : "[图片见上]";
   }
 
@@ -131,8 +132,12 @@ function collectRecentMembers(groupId: string): {
   return { recentMembers, allowedUids: new Set(map.keys()) };
 }
 
+const STREAM_EDIT_INTERVAL_MS = 800;
+const STREAM_PLACEHOLDER = "…";
+
 /**
- * Stream an AI reply back to Telegram and bookkeep:
+ * Stream an AI reply back to Telegram using sendMessage + editMessageText,
+ * then bookkeep:
  *   - push the completed text into the group buffer
  *   - dispatch any sticker the model chose
  *   - cache image descriptions in Firestore for future reuse
@@ -143,11 +148,11 @@ async function streamAiReply(params: {
   replyToMessageId: number;
   user: User;
   userMessage: string;
-  imageInputs: string[];
   photoFileIds: string[];
+  imageDataUrls: string[];
   systemHint: string | null;
 }): Promise<void> {
-  const { ctx, replyToMessageId, user, userMessage, imageInputs, photoFileIds, systemHint } =
+  const { ctx, replyToMessageId, user, userMessage, photoFileIds, imageDataUrls, systemHint } =
     params;
 
   const history = getHistory(config.tgGroupId);
@@ -165,7 +170,6 @@ async function streamAiReply(params: {
   const gen = generateResponse({
     userContext: user,
     userMessage,
-    imageInputs,
     recentConversation,
     recentMembers,
     tier,
@@ -175,25 +179,45 @@ async function streamAiReply(params: {
   });
 
   try {
-    await ctx.replyWithStream(gen.textStream, undefined, {
+    // Send a placeholder message immediately so the user sees feedback.
+    const chatId = ctx.chatId;
+    if (chatId === undefined) throw new Error("no chat in context");
+    const msg = await ctx.reply(STREAM_PLACEHOLDER, {
       reply_parameters: { message_id: replyToMessageId },
     });
+
+    let accumulated = "";
+    let lastEdited = 0;
+
+    for await (const chunk of gen.textStream) {
+      accumulated += chunk;
+      const now = Date.now();
+      if (now - lastEdited >= STREAM_EDIT_INTERVAL_MS) {
+        try {
+          await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
+          lastEdited = now;
+        } catch {
+          // Telegram may reject edits if content unchanged or rate-limited; skip.
+        }
+      }
+    }
+
+    // Final edit to ensure the complete text is displayed.
+    try {
+      await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
+    } catch {
+      // Already up-to-date is fine.
+    }
+
     touchBotActivity();
 
-    gen.text.then(
-      (t) => {
-        pushMessage(config.tgGroupId, "bot", config.botUsername, t.slice(0, MAX_BUFFER_TEXT));
-      },
-      (err: unknown) => {
-        logger.warn({ err }, "streamAiReply: final text promise rejected");
-      },
-    );
+    pushMessage(config.tgGroupId, "bot", config.botUsername, accumulated.slice(0, MAX_BUFFER_TEXT));
 
     void (async () => {
       try {
         const emoji = await gen.stickerPromise;
-        if (emoji && MIAOHAHA_STICKERS[emoji] && ctx.chat) {
-          await ctx.api.sendSticker(ctx.chat.id, MIAOHAHA_STICKERS[emoji]);
+        if (emoji && MIAOHAHA_STICKERS[emoji]) {
+          await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[emoji]);
         }
       } catch (err: unknown) {
         logger.warn({ err }, "streamAiReply: sticker dispatch failed");
@@ -203,7 +227,7 @@ async function streamAiReply(params: {
     // Cache image descriptions for future updates that reference the same file_id.
     for (let i = 0; i < photoFileIds.length; i++) {
       const fileId = photoFileIds[i];
-      const img = imageInputs[i];
+      const img = imageDataUrls[i];
       if (!fileId || !img) continue;
       describeImage(img)
         .then((desc) => cacheImage(fileId, { description: desc }))
@@ -246,8 +270,27 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const rawText = msg.text ?? msg.caption ?? "";
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
-    const { urls, photoFileIds, imageDataUrls, imageDescriptions, stickerEmoji, urlFetchPromise } =
-      await extractContent(ctx, msg, { rawText, entities });
+    const {
+      urls,
+      photoFileIds,
+      imageDataUrls,
+      imageDescriptions: cachedImageDescriptions,
+      stickerEmoji,
+      urlFetchPromise,
+    } = await extractContent(ctx, msg, { rawText, entities });
+
+    // Merge cached descriptions with fresh Gemini-described images.
+    // Images not in cache (imageDataUrls) need real-time description since
+    // DeepSeek has no vision capability.
+    const imageDescriptions = [...cachedImageDescriptions];
+    for (const imgUrl of imageDataUrls) {
+      try {
+        const desc = await describeImage(imgUrl);
+        imageDescriptions.push(desc);
+      } catch (err) {
+        logger.warn({ err }, "failed to describe image");
+      }
+    }
 
     // 4. Push user's message into the buffer ONCE, up front. Every later branch
     // now only needs to worry about pushing its own bot output.
@@ -425,8 +468,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      imageInputs: imageDataUrls,
       photoFileIds,
+      imageDataUrls,
       systemHint,
     });
   });
@@ -530,8 +573,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      imageInputs: [],
       photoFileIds: [],
+      imageDataUrls: [],
       systemHint: null,
     });
   });
