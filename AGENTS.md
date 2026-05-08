@@ -36,13 +36,15 @@ node dist/app.js   # run the compiled bot
 
 ## Architecture
 
-- `src/app.ts` — bot entrypoint (imports `dotenv/config`, creates Bot, registers handlers, starts)
+- `src/app.ts` — bot entrypoint (imports `dotenv/config`, creates Bot, registers handlers, creates ProactiveCallbacks, starts proactive checker)
 - `src/configs/env.ts` — typed config reader from `process.env`
-- `src/handlers/index.ts` — message handler: group filter, user lookup, image/sticker extraction, trigger detection, AI routing, stream reply
-- `src/libs/system-prompt.ts` — bot persona system prompt builder (Chinese)
-- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking), `classifyMessage()`, `generateResponse()` with model + reasoning routing
+- `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, AI routing, tool-call architecture, dismiss retry, typing indicator, sendAiMessages
+- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking), `classifyMessage()`, `generateAiTurn()` with tool-call architecture, `probeGate()` for proactive, `describeImage()`, `fetchUrlContent()`
+- `src/libs/system-prompt.ts` — `buildSystemPrompt()` (persona + naturalness), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (per-turn human-likeness feedback)
 - `src/libs/conversation-buffer.ts` — in-memory ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
-- `src/libs/stickers.ts` — Miaohaha sticker pack mapping (emoji → file_id), `STICKER_EMOJIS` array
+- `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
+- `src/libs/stickers.ts` — Miaohaha sticker pack mapping (emoji → file_id), `STICKER_EMOJIS` array, `STICKER_DESCRIPTIONS`
+- `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization
 - `src/services/firestore.ts` — Firestore operations: `getOrCreateUser`, `cacheImage`, `getCachedImage`
@@ -62,3 +64,10 @@ node dist/app.js   # run the compiled bot
 - **Language**: The group chat is in Simplified Chinese. System prompt, classification prompt, and bot responses are in Chinese. Match the user's language if they switch.
 - **DeepSeek API**: Base URL is `https://api.deepseek.com` (no `/v1` suffix). Thinking mode is **ON by default** — must explicitly send `thinking: { type: "disabled" }` for simple/fast responses.
 - **Auto-retry**: `@grammyjs/auto-retry` is applied on `bot.api.config` before stream middleware to handle 429 rate limits.
+- **Tool-call architecture**: The model must call `send_message` to speak; raw text output is invisible inner monologue. The `dismiss` tool is a binary speak/silence choice.
+- **Dismiss retry**: When triggered (@/reply) but model chooses dismiss, retries up to 3 times with escalating hints. Falls back to raw text or sticker.
+- **Proactive two-stage probe**: Cheap model first, full model only if probe activates.
+- **`formatForTelegramHtml`**: All bot output is converted from Markdown to Telegram HTML before sending.
+- **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
+- **`tavilySearch` tool**: Must be conditionally included via spread syntax (`...(needsSearch ? { webSearch: ... } : {})`) not set to `undefined`.
+- **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.

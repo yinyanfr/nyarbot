@@ -211,7 +211,13 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ? `${systemHint}\n\n${userMessage}\n\n${lateBinding}`
     : `${userMessage}\n\n${lateBinding}`;
 
-  const messages = [{ role: "user" as const, content: promptText }];
+  // When search is needed, inject a mandatory instruction so the model
+  // doesn't skip the webSearch tool call.
+  const finalPromptText = needsSearch
+    ? `${promptText}\n\n<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
+    : promptText;
+
+  const messages = [{ role: "user" as const, content: finalPromptText }];
 
   // Mutable state captured by tool closures
   const sentMessages: string[] = [];
@@ -234,8 +240,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   const dismissTool = tool({
     description:
-      "选择不回复。当你觉得没什么值得说的、对话与你无关、或者只是礼貌性附和时，调用这个工具。" +
-      "沉默往往是正确的选择。犹豫时选择 dismiss。",
+      "选择不回复。只有当你真的完全无话可说、话题与你毫无关系时才选这个。" +
+      "大部分时候你应该用 send_message 回复——你是群友，不是旁观者。",
     inputSchema: z.object({}),
     execute: async () => {
       dismissed = true;
@@ -351,6 +357,18 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   }
 
   const result = await generateText(generateParams);
+
+  // Log tool call summary for diagnostics
+  const toolCallNames = result.steps.flatMap((s) => s.toolCalls.map((tc) => tc.toolName));
+  if (toolCallNames.length > 0) {
+    logger.info({ toolCallNames, tier, needsSearch }, "generateAiTurn: tool calls made");
+  }
+  if (needsSearch && !toolCallNames.includes("webSearch")) {
+    logger.warn(
+      { tier, needsSearch, toolCallNames },
+      "generateAiTurn: search was needed but webSearch was not called",
+    );
+  }
 
   // Determine the outcome
   const rawText = result.text?.trim();
