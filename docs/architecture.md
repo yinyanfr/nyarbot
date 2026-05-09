@@ -19,8 +19,11 @@ handlers/index.ts (setupHandlers)
     ├─ Content extraction (extract-content.ts)
     │     ├─ URL detection (entity + regex fallback)
     │     ├─ Image: cache lookup → download → Gemini description
+    │     │     (includes reply-to images: msg.reply_to_message.photo)
     │     └─ Sticker emoji extraction
     ├─ Buffer push (conversation-buffer.ts)
+    │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
+    ├─ Image caching (firestore.ts) — cache ALL images immediately after Gemini describes them
     ├─ Command routing (match-command.ts)
     │     ├─ /help
     │     ├─ /love → generateLoveRejection()
@@ -29,7 +32,13 @@ handlers/index.ts (setupHandlers)
     ├─ Nighty detection → setNightyTimestamp()
     ├─ Morning greeting logic → generateMorningGreeting()
     ├─ Trigger detection (@mention / reply-to-bot)
-    ├─ Await URL content (ai.ts → tavilyExtract)
+    ├─ Await URL content (ai.ts → fetchUrlContent)
+    │     ├─ Twitter/X status links → fxtwitter API (free) → Gemini photo descriptions
+    │     ├─ Other links → direct fetch (extract <title> + <meta description>)
+    │     └─ Fallback → Tavily Extract (ai-powered summarization)
+    ├─ URL content buffer push
+    │     ├─ Successful fetches → pushed as system entries ("[推文]" or "[链接]")
+    │     └─ Failed fetches → silently ignored (no buffer entry, no proactive noise)
     ├─ Fresh image description (ai.ts → Gemini)
     ├─ AI classification (classifyMessage)
     │     └─ simple → flashNoThinkModel
@@ -118,6 +127,7 @@ If all retries still dismiss:
 │  Cloudflare AI Gateway → Gemini 2.5 Flash              │
 │                                                          │
 │  • describeImage() — vision descriptions for DeepSeek    │
+│  • describeTweetPhotos() — tweet photo descriptions      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -136,7 +146,7 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart.
+- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Image cache**: Firestore `images/{fileId}` with 30-day TTL. On cache hit, the stored description is reused instead of re-downloading and re-describing the image.
 

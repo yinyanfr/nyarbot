@@ -73,6 +73,29 @@ When the user @mentions or replies to the bot, silence is almost always wrong �
 
 The conversation buffer, user cache, update dedup set, and proactive timer state are all in-process memory. A restart loses all conversation context and the proactive checker stops. This is acceptable for a single-group personal bot.
 
+### Logger architecture
+
+The logger (`src/libs/logger.ts`) uses pino with `pino.multistream()` in both dev and production modes:
+
+- **Dev**: Loads `pino-pretty` as a direct `Transform` stream (main thread, no worker), combined with an admin DM stream for warn/error forwarding.
+- **Production**: JSON to stdout + admin DM stream.
+
+This avoids the previous monkey-patching of `logger.error`/`.warn` and the fragile `as unknown as NodeJS.WritableStream` cast. The `AdminDmHandler` returns a plain `{ write(msg: string): void }` adapter compatible with pino's multistream.
+
+### Image caching timing
+
+Images are described via Gemini and cached to Firestore immediately in the main handler — before the `if (!isMentioned && !isRepliedToBot) return` gate. Previously caching was deferred to `handleAiTurn()`, meaning non-triggered images were described but never cached. This ensures proactive context is always available.
+
+### URL fetching (three-tier)
+
+`fetchUrlContent()` in `ai.ts` uses a three-tier strategy:
+
+1. **Twitter/X** → fxtwitter API (free, no auth) with batch Gemini photo descriptions
+2. **Direct fetch** → HTML title/meta extraction
+3. **Tavily Extract** → fallback
+
+Only successful results enter the conversation buffer; failed fetches are silently ignored. Raw URLs never enter the buffer to avoid proactive noise.
+
 ## Firestore Schema
 
 ### `users/{uid}`

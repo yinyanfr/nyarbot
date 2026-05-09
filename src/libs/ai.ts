@@ -70,7 +70,7 @@ const deepseekThink = createOpenAI({
 // ---------------------------------------------------------------------------
 
 const aigateway = createAiGateway({
-  accountId: "5b2af39cf1c595a34ffa9057bbf17f0b",
+  accountId: config.cfAccountId,
   gateway: "gem",
   apiKey: config.cfAigToken,
 });
@@ -575,7 +575,155 @@ export async function describeImage(imageInput: string, caption?: string): Promi
 // URL content extraction (for shared links)
 // ---------------------------------------------------------------------------
 
-export async function fetchUrlContent(url: string): Promise<string | null> {
+const TWITTER_STATUS_REGEX =
+  /https?:\/\/(?:twitter\.com|x\.com|mobile\.twitter\.com)\/(\w+)\/status\/(\d+)/i;
+
+/** Download an arbitrary URL as a base64 data URL (max 10 MB). Returns null on failure. */
+async function downloadUrlAsDataUrl(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    const buf = Buffer.from(await res.arrayBuffer());
+    const MAX_BYTES = 10 * 1024 * 1024;
+    if (buf.length > MAX_BYTES) return null;
+    return `data:${contentType};base64,${buf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Describe multiple tweet photos in a single Gemini call.
+ * Returns one description per photo (same order), ≤150 Chinese chars each.
+ */
+async function describeTweetPhotos(
+  dataUrls: string[],
+  photos: { altText?: string }[],
+): Promise<string[]> {
+  try {
+    const altHints = photos
+      .map((p, i) => (p.altText ? `图${i + 1} alt: "${p.altText}"` : ""))
+      .filter(Boolean)
+      .join("; ");
+    const hint = altHints ? ` (已知信息: ${altHints})` : "";
+
+    const content: ({ type: "text"; text: string } | { type: "image"; image: string })[] = [
+      {
+        type: "text",
+        text: `请用中文分别描述以下推文配图，每条不超过150字，简洁准确。${hint}\n\n按图片顺序输出，每行一条描述，不编号不前缀。`,
+      },
+    ];
+    for (const dataUrl of dataUrls) {
+      content.push({ type: "image", image: dataUrl });
+    }
+
+    const { text } = await generateText({
+      model: geminiFlashModel,
+      messages: [{ role: "user", content }],
+      maxOutputTokens: 200 * dataUrls.length,
+      temperature: 0,
+    });
+
+    return text
+      .split("\n")
+      .map((s: string) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+interface FxTweetResponse {
+  code: number;
+  tweet?: {
+    text?: string;
+    author?: { name?: string; screen_name?: string };
+    media?: { photos?: { url: string; altText?: string }[] };
+    qrt?: {
+      text?: string;
+      author?: { name?: string; screen_name?: string };
+    };
+  };
+}
+
+async function fetchTwitterContent(
+  url: string,
+  username: string,
+  tweetId: string,
+): Promise<string | null> {
+  try {
+    const apiUrl = `https://api.fxtwitter.com/${username}/status/${tweetId}`;
+    const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as FxTweetResponse;
+    if (data.code !== 200 || !data.tweet) return null;
+
+    const tweet = data.tweet;
+    const author = `${tweet.author?.name ?? username} (@${tweet.author?.screen_name ?? username})`;
+
+    let mediaDesc = "";
+    const photos = tweet.media?.photos;
+    if (photos?.length) {
+      const photoSlice = photos.slice(0, 4);
+      const dataUrls: string[] = [];
+      for (const photo of photoSlice) {
+        const dataUrl = await downloadUrlAsDataUrl(photo.url);
+        if (dataUrl) dataUrls.push(dataUrl);
+      }
+      if (dataUrls.length > 0) {
+        const descriptions = await describeTweetPhotos(
+          dataUrls,
+          photoSlice.slice(0, dataUrls.length),
+        );
+        mediaDesc = ` | 配图: ${descriptions.join("; ")}`;
+      } else {
+        mediaDesc = ` | [${photos.length}张图]`;
+      }
+    }
+
+    let qrtDesc = "";
+    if (tweet.qrt) {
+      const qrt = tweet.qrt;
+      const qrtAuthor = qrt.author?.screen_name ?? "";
+      qrtDesc = ` | 引用 @${qrtAuthor}: ${qrt.text ?? ""}`;
+    }
+
+    return `[Tweet ${url} | ${author}: ${tweet.text ?? ""}${mediaDesc}${qrtDesc}]`;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDirectPageInfo(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") ?? "";
+
+    if (contentType.includes("text/html")) {
+      const html = await res.text();
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const descMatch =
+        html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ??
+        html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i);
+
+      const parts: string[] = [];
+      const title = titleMatch?.[1]?.trim();
+      const desc = descMatch?.[1]?.trim();
+      if (title) parts.push(`标题: ${title}`);
+      if (desc) parts.push(desc);
+
+      return parts.length > 0 ? parts.join(" — ") : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTavilyContent(url: string): Promise<string | null> {
   try {
     const { text } = await generateText({
       model: flashNoThinkModel,
@@ -597,4 +745,16 @@ export async function fetchUrlContent(url: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function fetchUrlContent(url: string): Promise<string | null> {
+  const twitterMatch = url.match(TWITTER_STATUS_REGEX);
+  if (twitterMatch) {
+    return fetchTwitterContent(url, twitterMatch[1]!, twitterMatch[2]!);
+  }
+
+  const directResult = await fetchDirectPageInfo(url);
+  if (directResult) return directResult;
+
+  return fetchTavilyContent(url);
 }

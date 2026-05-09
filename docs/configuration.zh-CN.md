@@ -12,6 +12,7 @@
 | `DEEPSEEK_API_KEY` | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
 | `TAVILY_API_KEY`   | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
 | `CF_AIG_TOKEN`     | ✅   | Cloudflare AI Gateway token，用于 Gemini 图片识别调用                       |
+| `CF_ACCOUNT_ID`    | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
 | `BOT_USERNAME`     | ❌   | Bot 用户名（默认：`nyarbot`）                                               |
 | `LOG_LEVEL`        | ❌   | Pino 日志级别（默认：`info`）                                               |
 | `PORT`             | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
@@ -44,9 +45,9 @@ Bot 使用两个模型，各有两种思考模式变体：
 
 ## Cloudflare AI Gateway
 
-Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关 ID `gem` 和账户 ID 硬编码在 `ai.ts` 中。API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
+Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称 `gem` 在 `ai.ts` 中设置；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-使用的模型：`google-ai-studio/gemini-2.5-flash` — 快速、便宜，且支持视觉输入。
+使用的模型：`google-ai-studio/gemini-2.5-flash` — 快速、便宜，且支持视觉输入。也用于 `describeTweetPhotos()` 中的批量推文配图描述。
 
 ## 工具调用架构
 

@@ -11,8 +11,8 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 💬 **Natural Chat** — @mention or reply to trigger a conversation with tsundere catgirl quirks (喵, 哼!, 笨蛋!), intentional mispronunciations (机器人→姬器人, AI→猫工智能)
 - 🧠 **Serious Mode** — Automatically drops the catgirl persona for programming, math, and technical questions
 - 🔍 **Web Search** — Auto-searches for current events and real-time information when needed (forced search mechanism ensures the model doesn't skip it)
-- 🔗 **URL Understanding** — Automatically extracts content from shared links using Tavily
-- 🖼️ **Image Roasting** — Gemini identifies image content, catgirl-style commentary, descriptions auto-cached
+- 🔗 **URL Understanding** — Tweet links auto-fetched via fxtwitter API (with Gemini photo recognition); other links try direct HTML fetch for title/description, falling back to Tavily; only successful results enter context
+- 🖼️ **Image Roasting** — Gemini identifies image content (including images in replied-to messages), catgirl-style commentary, descriptions auto-cached and written to conversation context for proactive chatter
 - 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
 - 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
@@ -137,6 +137,7 @@ See [Configuration Docs](docs/configuration.md) for details.
 | `DEEPSEEK_API_KEY` | ✅       | DeepSeek API Key                                |
 | `TAVILY_API_KEY`   | ✅       | Tavily Search API Key                           |
 | `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway Token (for Gemini vision) |
+| `CF_ACCOUNT_ID`    | ✅       | Cloudflare Account ID (for Gemini vision)       |
 | `BOT_USERNAME`     | ❌       | Bot username, default `nyarbot`                 |
 | `LOG_LEVEL`        | ❌       | Log level, default `info`                       |
 

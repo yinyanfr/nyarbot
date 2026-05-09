@@ -12,6 +12,7 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 | `DEEPSEEK_API_KEY` | ✅       | DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))           |
 | `TAVILY_API_KEY`   | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
 | `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway token for Gemini vision calls                                 |
+| `CF_ACCOUNT_ID`    | ✅       | Cloudflare account ID for AI Gateway                                                |
 | `BOT_USERNAME`     | ❌       | Bot username (default: `nyarbot`)                                                   |
 | `LOG_LEVEL`        | ❌       | Pino log level (default: `info`)                                                    |
 | `PORT`             | ❌       | Unused (long polling, no webhook server)                                            |
@@ -44,9 +45,9 @@ Thinking mode is injected via a custom `fetch` wrapper that modifies the request
 
 ## Cloudflare AI Gateway
 
-Gemini vision calls are routed through Cloudflare AI Gateway for caching and observability. The gateway ID `gem` and account ID are hardcoded in `ai.ts`. The API token (`CF_AIG_TOKEN`) must be set in `.env`.
+Gemini vision calls are routed through Cloudflare AI Gateway for caching and observability. The gateway name `gem` is set in `ai.ts`; the account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
-Model used: `google-ai-studio/gemini-2.5-flash` — fast, cheap, and supports vision input.
+Model used: `google-ai-studio/gemini-2.5-flash` — fast, cheap, and supports vision input. Also used for batch tweet photo description in `describeTweetPhotos()`.
 
 ## Tool-Call Architecture
 

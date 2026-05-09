@@ -1,57 +1,54 @@
 import pino from "pino";
+import { createRequire } from "node:module";
 import type { Api, RawApi } from "grammy";
 import config from "../configs/env.js";
 
 const isDev = process.env.NODE_ENV !== "production";
 
 // ---------------------------------------------------------------------------
-// Admin DM stream — forwards error/warn logs to the admin via Telegram
+// Admin DM stream — forwards warn/error logs to the admin via Telegram
 // ---------------------------------------------------------------------------
 
-const MIN_DM_INTERVAL_MS = 5_000; // rate-limit: max 1 DM per 5 seconds
+const MIN_DM_INTERVAL_MS = 5_000;
 
-class AdminDmStream {
+class AdminDmHandler {
   private botApi: Api<RawApi> | null = null;
   private lastDmTime = 0;
   private pending: string[] = [];
 
-  /** Call after bot.init() to activate admin DM forwarding. */
   setBot(api: Api<RawApi>): void {
     this.botApi = api;
-    // Flush any messages buffered before the bot was ready
     for (const msg of this.pending) {
       this.send(msg).catch(() => void 0);
     }
     this.pending = [];
   }
 
-  /** Pino stream write handler. */
-  write(chunk: string): boolean {
+  /** pino-compatible write handler — called once per log line. */
+  write(chunk: string): void {
     let level: number;
     try {
       level = JSON.parse(chunk).level;
     } catch {
-      return true;
+      return;
     }
-
-    if (level < 40) return true; // only warn (40) and error (50)
+    if (level < 40) return; // only warn (40) and error (50)
 
     const msg = this.formatChunk(chunk);
-    if (!msg) return true;
+    if (!msg) return;
 
     if (!this.botApi) {
       if (this.pending.length < 10) this.pending.push(msg);
-      return true;
+      return;
     }
 
     this.send(msg).catch(() => void 0);
-    return true;
   }
 
   private formatChunk(chunk: string): string | null {
     try {
       const obj = JSON.parse(chunk);
-      const levelName = obj.level >= 50 ? "🔴" : "🟡";
+      const levelName = obj.level >= 50 ? "\uD83D\uDD34" : "\uD83D\uDFE1";
       const msg = obj.msg ?? "";
       const errPart = obj.err
         ? `\n${obj.err.message ?? ""}${obj.err.stack ? "\n" + obj.err.stack.split("\n").slice(0, 3).join("\n") : ""}`
@@ -86,77 +83,70 @@ class AdminDmStream {
     try {
       await this.botApi!.sendMessage(config.tgAdminUid, text);
     } catch {
-      // Silently ignore — admin DM is best-effort
+      // Admin DM is best-effort
     }
   }
 }
 
-const adminDmStream = new AdminDmStream();
+const adminDm = new AdminDmHandler();
+
+/**
+ * Return a writable stream-compatible object for pino's multistream.
+ * Pino v10 calls `stream.write(chunk)` and expects no return value.
+ */
+function adminDmStream(): { write(msg: string): void } {
+  return { write: (msg: string) => adminDm.write(msg) };
+}
 
 // ---------------------------------------------------------------------------
-// Logger setup
+// Logger factory
 // ---------------------------------------------------------------------------
 
-const baseOptions: pino.LoggerOptions = {
-  name: "nyarbot",
-  level: process.env.LOG_LEVEL ?? "info",
-};
-
-const adminStream: pino.StreamEntry = {
-  stream: adminDmStream as unknown as NodeJS.WritableStream,
-  level: "warn",
-};
-
-export const logger: pino.Logger = isDev
-  ? pino({ ...baseOptions, transport: { target: "pino-pretty", options: { colorize: true } } })
-  : pino(baseOptions, pino.multistream([{ stream: process.stdout }, adminStream]));
-
-// In dev mode, pino-pretty uses worker transport which doesn't support multistream.
-// We add admin DM forwarding via a child logger approach instead.
-if (isDev) {
-  const origError = logger.error.bind(logger);
-  const origWarn = logger.warn.bind(logger);
-
-  const forwardToAdmin = (
-    level: number,
-    mergingObjectOrMsg: unknown,
-    msgOrInterpolation: unknown,
-  ) => {
-    try {
-      const obj =
-        typeof mergingObjectOrMsg === "object" && mergingObjectOrMsg !== null
-          ? { ...(mergingObjectOrMsg as Record<string, unknown>) }
-          : {};
-      const msg =
-        typeof mergingObjectOrMsg === "string"
-          ? mergingObjectOrMsg
-          : typeof msgOrInterpolation === "string"
-            ? msgOrInterpolation
-            : (obj.msg ?? "");
-      adminDmStream.write(JSON.stringify({ ...obj, level, msg }));
-    } catch {
-      // best-effort
-    }
+function createLogger(): pino.Logger {
+  const baseOptions: pino.LoggerOptions = {
+    name: "nyarbot",
+    level: process.env.LOG_LEVEL ?? "info",
   };
 
-  logger.error = ((...args: unknown[]) => {
-    forwardToAdmin(50, args[0], args[1]);
-    return origError(
-      args[0] as Parameters<typeof origError>[0],
-      args[1] as Parameters<typeof origError>[1],
-    );
-  }) as typeof logger.error;
+  // In dev mode, try to load pino-pretty as a direct transform stream (main
+  // thread, no worker). Falls back to plain JSON stdout if pino-pretty isn't
+  // available.
+  const primaryStream = isDev ? getPrettyStream() : undefined;
 
-  logger.warn = ((...args: unknown[]) => {
-    forwardToAdmin(40, args[0], args[1]);
-    return origWarn(
-      args[0] as Parameters<typeof origWarn>[0],
-      args[1] as Parameters<typeof origWarn>[1],
-    );
-  }) as typeof logger.warn;
+  return pino(
+    baseOptions,
+    pino.multistream([
+      { stream: primaryStream ?? process.stdout },
+      { level: "warn", stream: adminDmStream() },
+    ]),
+  );
 }
+
+/**
+ * Conditionally load pino-pretty (dev only). Returns a Transform stream that
+ * pretty-prints JSON logs, or undefined if pino-pretty isn't installed.
+ */
+function getPrettyStream(): NodeJS.WritableStream | undefined {
+  try {
+    const req = createRequire(import.meta.url);
+    const prettyFactory = req("pino-pretty") as
+      | { default?: (opts?: object) => NodeJS.WritableStream }
+      | ((opts?: object) => NodeJS.WritableStream);
+    const factory = typeof prettyFactory === "function" ? prettyFactory : prettyFactory.default;
+    if (typeof factory !== "function") return undefined;
+    return factory({ colorize: true });
+  } catch {
+    return undefined;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Exports
+// ---------------------------------------------------------------------------
+
+export const logger = createLogger();
 
 /** Call after bot.init() to start forwarding warn/error logs to admin DM. */
 export function initAdminNotify(api: Api<RawApi>): void {
-  adminDmStream.setBot(api);
+  adminDm.setBot(api);
 }

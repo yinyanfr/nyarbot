@@ -85,7 +85,12 @@ function buildUserMessage(params: {
 
   const urlLines: string[] = [];
   for (const [url, content] of urlContents) {
-    urlLines.push(content ? `[链接 ${url}: ${content}]` : `[链接 ${url}: 无法获取内容]`);
+    if (content) {
+      // Tweet content from fetchUrlContent is already self-contained: [Tweet url | ...]
+      urlLines.push(content.startsWith("[Tweet ") ? content : `[链接 ${url}: ${content}]`);
+    } else {
+      urlLines.push(`[链接 ${url}: 无法获取内容]`);
+    }
   }
   if (urlLines.length > 0) {
     msg = `${msg}\n${urlLines.join("\n")}`;
@@ -103,13 +108,20 @@ function buildBufferLine(params: {
   rawText: string;
   stickerEmoji: string;
   hasImageContext: boolean;
+  imageDescriptions: string[];
   urls: string[];
 }): string {
   const parts: string[] = [];
   if (params.rawText) parts.push(params.rawText);
   if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
-  if (params.hasImageContext) parts.push("[图片]");
-  if (params.urls.length > 0) parts.push(`[链接: ${params.urls.join(" ")}]`);
+  if (params.hasImageContext) {
+    if (params.imageDescriptions.length > 0) {
+      const desc = params.imageDescriptions.join(" | ");
+      parts.push(`[图片: ${desc}]`);
+    } else {
+      parts.push("[图片]");
+    }
+  }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
 }
 
@@ -236,25 +248,12 @@ async function handleAiTurn(params: {
   replyToMessageId: number;
   user: User;
   userMessage: string;
-  photoFileIds: string[];
-  imageDataUrls: string[];
-  caption: string;
   systemHint: string | null;
   isMentioned: boolean;
   isRepliedToBot: boolean;
 }): Promise<void> {
-  const {
-    ctx,
-    replyToMessageId,
-    user,
-    userMessage,
-    photoFileIds,
-    imageDataUrls,
-    caption,
-    systemHint,
-    isMentioned,
-    isRepliedToBot,
-  } = params;
+  const { ctx, replyToMessageId, user, userMessage, systemHint, isMentioned, isRepliedToBot } =
+    params;
 
   const chatId = ctx.chatId;
   if (chatId === undefined) throw new Error("no chat in context");
@@ -364,18 +363,6 @@ async function handleAiTurn(params: {
           }
         }
 
-        // Cache image descriptions even on fallback path
-        for (let i = 0; i < photoFileIds.length; i++) {
-          const fileId = photoFileIds[i];
-          const img = imageDataUrls[i];
-          if (!fileId || !img) continue;
-          describeImage(img, caption)
-            .then((desc) => cacheImage(fileId, { description: desc }))
-            .catch((err: unknown) => {
-              logger.warn({ err, fileId }, "handleAiTurn: image cache failed");
-            });
-        }
-
         return;
       }
     }
@@ -405,18 +392,6 @@ async function handleAiTurn(params: {
       messages: result.messages,
       stickerEmoji: result.stickerEmoji,
     });
-
-    // Cache image descriptions for future updates that reference the same file_id.
-    for (let i = 0; i < photoFileIds.length; i++) {
-      const fileId = photoFileIds[i];
-      const img = imageDataUrls[i];
-      if (!fileId || !img) continue;
-      describeImage(img, caption)
-        .then((desc) => cacheImage(fileId, { description: desc }))
-        .catch((err: unknown) => {
-          logger.warn({ err, fileId }, "handleAiTurn: image cache failed");
-        });
-    }
   } catch (err) {
     logger.error({ err }, "handleAiTurn: AI turn failed");
     await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
@@ -477,10 +452,23 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       rawText,
       stickerEmoji,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
+      imageDescriptions,
       urls,
     });
     if (bufferLine) {
       pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferLine);
+    }
+
+    // 4b. Cache fresh image descriptions so future turns (and proactive) see them
+    for (let i = 0; i < photoFileIds.length; i++) {
+      const fileId = photoFileIds[i];
+      const descIdx = cachedImageDescriptions.length + i;
+      const desc = imageDescriptions[descIdx];
+      if (fileId && desc) {
+        cacheImage(fileId, { description: desc }).catch((err: unknown) => {
+          logger.warn({ err, fileId }, "image cache failed");
+        });
+      }
     }
 
     // 5. /help — public
@@ -609,12 +597,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const urlContents = await urlFetchPromise;
     for (const [, content] of urlContents) {
       if (content) {
-        pushMessage(
-          config.tgGroupId,
-          "system",
-          "链接",
-          `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
-        );
+        if (content.startsWith("[Tweet ")) {
+          pushMessage(config.tgGroupId, "system", "推文", content.slice(0, MAX_BUFFER_TEXT));
+        } else {
+          pushMessage(
+            config.tgGroupId,
+            "system",
+            "链接",
+            `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+          );
+        }
       }
     }
 
@@ -647,9 +639,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      photoFileIds,
-      imageDataUrls,
-      caption: rawText,
       systemHint,
       isMentioned,
       isRepliedToBot,
@@ -722,12 +711,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       for (const [u, c] of entries) {
         urlContents.set(u, c);
         if (c) {
-          pushMessage(
-            config.tgGroupId,
-            "system",
-            "链接",
-            `[链接内容: ${c.slice(0, MAX_BUFFER_TEXT)}]`,
-          );
+          if (c.startsWith("[Tweet ")) {
+            pushMessage(config.tgGroupId, "system", "推文", c.slice(0, MAX_BUFFER_TEXT));
+          } else {
+            pushMessage(
+              config.tgGroupId,
+              "system",
+              "链接",
+              `[链接内容: ${c.slice(0, MAX_BUFFER_TEXT)}]`,
+            );
+          }
         }
       }
     }
@@ -757,9 +750,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      photoFileIds: [],
-      imageDataUrls: [],
-      caption: rawText,
       systemHint: null,
       isMentioned,
       isRepliedToBot,

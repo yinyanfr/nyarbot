@@ -5,6 +5,7 @@ const required = {
   DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   CF_AIG_TOKEN: process.env.CF_AIG_TOKEN,
+  CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
 } as const;
 
 for (const [key, value] of Object.entries(required)) {
@@ -21,6 +22,7 @@ const config = {
   deepseekApiKey: process.env.DEEPSEEK_API_KEY!,
   tavilyApiKey: process.env.TAVILY_API_KEY!,
   cfAigToken: process.env.CF_AIG_TOKEN!,
+  cfAccountId: process.env.CF_ACCOUNT_ID!,
 } as const;
 
 export default config;

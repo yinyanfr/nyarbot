@@ -19,8 +19,11 @@ handlers/index.ts（setupHandlers）
     ├─ 内容提取（extract-content.ts）
     │     ├─ URL 检测（entity + 正则回退）
     │     ├─ 图片：缓存查询 → 下载 → Gemini 描述
+    │     │     （含回复消息中的图片：msg.reply_to_message.photo）
     │     └─ 贴纸 emoji 提取
     ├─ 缓冲区推送（conversation-buffer.ts）
+    │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
+    ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
     ├─ 命令路由（match-command.ts）
     │     ├─ /help
     │     ├─ /love → generateLoveRejection()
@@ -29,7 +32,13 @@ handlers/index.ts（setupHandlers）
     ├─ 晚安检测 → setNightyTimestamp()
     ├─ 早安逻辑 → generateMorningGreeting()
     ├─ 触发检测（@提及 / 回复bot）
-    ├─ 等待 URL 内容（ai.ts → tavilyExtract）
+    ├─ 等待 URL 内容（ai.ts → fetchUrlContent）
+    │     ├─ Twitter/X 推文链接 → fxtwitter API（免费）→ Gemini 配图描述
+    │     ├─ 其他链接 → 直接抓取（提取 <title> + <meta description>）
+    │     └─ 回退 → Tavily Extract（AI 摘要）
+    ├─ URL 内容缓冲区推送
+    │     ├─ 成功抓取 → 作为系统条目推送（"[推文]" 或 "[链接]"）
+    │     └─ 抓取失败 → 静默忽略（无缓冲区条目，无主动插话噪音）
     ├─ 新鲜图片描述（ai.ts → Gemini）
     ├─ AI 分类（classifyMessage）
     │     └─ simple → flashNoThinkModel
@@ -118,6 +127,7 @@ type AiTurnResult =
 │  Cloudflare AI Gateway → Gemini 2.5 Flash              │
 │                                                          │
 │  • describeImage() — 为 DeepSeek 生成图片描述            │
+│  • describeTweetPhotos() — 推文配图描述                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -136,7 +146,7 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **对话缓冲区**：内存环形缓冲区（每组最多 30 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。
+- **对话缓冲区**：内存环形缓冲区（每组最多 30 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。图片条目包含 Gemini 行内描述（如 `[图片: 一只猫在睡觉]`）；URL 条目仅包含成功抓取的内容（推文：`[推文]: [Tweet url | @x: 文本 | 配图: ...]`，普通链接：`[链接内容]: 标题 — 描述`）。原始 URL 绝不进入缓冲区，避免对无法抓取的链接产生主动噪音。
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **图片缓存**：Firestore `images/{fileId}`，30 天 TTL。缓存命中时直接使用存储的描述，避免重新下载和重新描述图片。
 
