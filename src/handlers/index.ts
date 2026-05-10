@@ -11,7 +11,7 @@ import {
 } from "../services/firestore.js";
 import {
   classifyMessage,
-  generateResponse,
+  generateAiTurn,
   generateMorningGreeting,
   describeImage,
   generateLoveRejection,
@@ -22,16 +22,20 @@ import {
   formatHistoryAsContext,
   clearHistory,
 } from "../libs/conversation-buffer.js";
-import { MIAOHAHA_STICKERS } from "../libs/stickers.js";
+import { MIAOHAHA_STICKERS, STICKER_EMOJIS } from "../libs/stickers.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
-import type { User } from "../global.d.ts";
+import type { User } from "../global.d.js";
 import type { BotContext, BotInfo } from "./context.js";
-import { MAX_BUFFER_TEXT, LOVE_REGEX, NIGHTY_REGEX, EIGHT_HOURS_MS } from "./constants.js";
+import { MAX_BUFFER_TEXT, LOVE_REGEX, EIGHT_HOURS_MS } from "./constants.js";
 import { matchCommand } from "./match-command.js";
 import { extractContent } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
+import { formatForTelegramHtml } from "../libs/format-telegram.js";
+
+// Delay between consecutive bot messages (ms) — mimics human typing rhythm.
+const MESSAGE_DELAY_MS = 400;
 
 /**
  * Build the user-facing text for the AI call by stitching together the raw
@@ -61,13 +65,9 @@ function buildUserMessage(params: {
   let msg = rawText;
 
   if (imageDescriptions.length > 0) {
-    // Cache-hit path: feed the stored description so the model has context
-    // without re-doing vision.
     const desc = imageDescriptions.map((d) => `[图片: ${d}]`).join("\n");
     msg = msg ? `${desc}\n${displayName}说: ${msg}` : desc;
   } else if (hasImage) {
-    // Fallback: image description failed (e.g. Gemini vision error).
-    // Tell DeepSeek there was an image but we couldn't see it.
     msg = msg ? `[图片见上]\n${displayName}说: ${msg}` : "[图片见上]";
   }
 
@@ -83,10 +83,14 @@ function buildUserMessage(params: {
     }
   }
 
-  // Append (not prepend) URL contents so the user's own words remain the headline.
   const urlLines: string[] = [];
   for (const [url, content] of urlContents) {
-    urlLines.push(content ? `[链接 ${url}: ${content}]` : `[链接 ${url}: 无法获取内容]`);
+    if (content) {
+      // Tweet content from fetchUrlContent is already self-contained: [Tweet url | ...]
+      urlLines.push(content.startsWith("[Tweet ") ? content : `[链接 ${url}: ${content}]`);
+    } else {
+      urlLines.push(`[链接 ${url}: 无法获取内容]`);
+    }
   }
   if (urlLines.length > 0) {
     msg = `${msg}\n${urlLines.join("\n")}`;
@@ -104,13 +108,20 @@ function buildBufferLine(params: {
   rawText: string;
   stickerEmoji: string;
   hasImageContext: boolean;
+  imageDescriptions: string[];
   urls: string[];
 }): string {
   const parts: string[] = [];
   if (params.rawText) parts.push(params.rawText);
   if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
-  if (params.hasImageContext) parts.push("[图片]");
-  if (params.urls.length > 0) parts.push(`[链接: ${params.urls.join(" ")}]`);
+  if (params.hasImageContext) {
+    if (params.imageDescriptions.length > 0) {
+      const desc = params.imageDescriptions.join(" | ");
+      parts.push(`[图片: ${desc}]`);
+    } else {
+      parts.push("[图片]");
+    }
+  }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
 }
 
@@ -132,28 +143,125 @@ function collectRecentMembers(groupId: string): {
   return { recentMembers, allowedUids: new Set(map.keys()) };
 }
 
-const STREAM_EDIT_INTERVAL_MS = 800;
-const STREAM_PLACEHOLDER = "…";
+/**
+ * Collect recent bot messages from the buffer for human-likeness feedback.
+ */
+function collectRecentBotMessages(groupId: string, count: number): string[] {
+  const history = getHistory(groupId);
+  const botMessages: string[] = [];
+  for (let i = history.length - 1; i >= 0 && botMessages.length < count; i--) {
+    const entry = history[i];
+    if (entry && entry.uid === "bot") {
+      botMessages.unshift(entry.text);
+    }
+  }
+  return botMessages;
+}
 
 /**
- * Stream an AI reply back to Telegram using sendMessage + editMessageText,
- * then bookkeep:
- *   - push the completed text into the group buffer
- *   - dispatch any sticker the model chose
- *   - cache image descriptions in Firestore for future reuse
- *   - reset proactive cooldown
+ * Send one or more messages from the AI turn to Telegram, formatting as HTML
+ * where appropriate and dispatching any sticker selected by the model.
  */
-async function streamAiReply(params: {
+async function sendAiMessages(params: {
+  ctx: BotContext;
+  chatId: number;
+  replyToMessageId: number;
+  messages: string[];
+  stickerEmoji: string | null;
+}): Promise<void> {
+  const { ctx, chatId, replyToMessageId, messages, stickerEmoji } = params;
+
+  if (messages.length === 0) {
+    // No text messages — if there's a sticker, send it with a reply reference
+    if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+      try {
+        await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji], {
+          reply_parameters: { message_id: replyToMessageId },
+        });
+      } catch (err) {
+        logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+      }
+    }
+    return;
+  }
+
+  // First message replies to the user's message; subsequent messages are
+  // sent standalone (like a human typing follow-up lines).
+  for (let i = 0; i < messages.length; i++) {
+    const text = messages[i]!;
+    const formatted = formatForTelegramHtml(text);
+    const sendParams: Record<string, unknown> = {};
+
+    if (i === 0) {
+      sendParams.reply_parameters = { message_id: replyToMessageId };
+    }
+
+    try {
+      // Try HTML formatting first, fall back to plain text
+      try {
+        await ctx.api.sendMessage(chatId, formatted, {
+          ...sendParams,
+          parse_mode: "HTML",
+        });
+      } catch {
+        await ctx.api.sendMessage(chatId, text, sendParams);
+      }
+    } catch (err) {
+      logger.warn({ err, i }, "sendAiMessages: failed to send message");
+    }
+
+    // Stagger messages to mimic human typing rhythm, but not after the last one
+    if (i < messages.length - 1) {
+      await new Promise((resolve) => setTimeout(resolve, MESSAGE_DELAY_MS));
+    }
+  }
+
+  // Dispatch sticker after all text messages, if any
+  if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+    try {
+      await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji]);
+    } catch (err) {
+      logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+    }
+  }
+}
+
+const MAX_DISMISS_RETRIES = 3;
+
+const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]";
+
+function pickRandomStickerEmoji(): string {
+  return STICKER_EMOJIS[Math.floor(Math.random() * STICKER_EMOJIS.length)]!;
+}
+
+/**
+ * Handle an AI turn: classify the message, run the full AI pipeline with
+ * tool-call architecture, and send results to Telegram.
+ *
+ * When the user explicitly @-mentioned or replied to the bot, dismiss results
+ * are retried up to MAX_DISMISS_RETRIES times with escalating hints. If all
+ * retries still dismiss, a fallback message or sticker is sent instead of
+ * silence.
+ */
+async function handleAiTurn(params: {
   ctx: BotContext;
   replyToMessageId: number;
   user: User;
   userMessage: string;
-  photoFileIds: string[];
-  imageDataUrls: string[];
   systemHint: string | null;
+  isMentioned: boolean;
+  isRepliedToBot: boolean;
 }): Promise<void> {
-  const { ctx, replyToMessageId, user, userMessage, photoFileIds, imageDataUrls, systemHint } =
+  const { ctx, replyToMessageId, user, userMessage, systemHint, isMentioned, isRepliedToBot } =
     params;
+
+  const chatId = ctx.chatId;
+  if (chatId === undefined) throw new Error("no chat in context");
+
+  // Signal "typing..." while the AI generates
+  await ctx.api.sendChatAction(chatId, "typing").catch(() => {
+    // Best-effort; typing indicators are non-critical
+  });
 
   const history = getHistory(config.tgGroupId);
   const recentConversation = formatHistoryAsContext(history);
@@ -165,80 +273,129 @@ async function streamAiReply(params: {
     recentMembers.push({ uid: user.uid, name: user.nickname || "大哥哥" });
   }
 
-  const { tier, needsSearch } = await classifyMessage(userMessage);
+  const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
 
-  const gen = generateResponse({
-    userContext: user,
-    userMessage,
-    recentConversation,
-    recentMembers,
-    tier,
-    needsSearch,
-    allowedUids,
-    ...(systemHint ? { systemHint } : {}),
-  });
+  const { tier, needsSearch } = await classifyMessage(userMessage);
+  const isTriggered = isMentioned || isRepliedToBot;
 
   try {
-    // Send a placeholder message immediately so the user sees feedback.
-    const chatId = ctx.chatId;
-    if (chatId === undefined) throw new Error("no chat in context");
-    const msg = await ctx.reply(STREAM_PLACEHOLDER, {
-      reply_parameters: { message_id: replyToMessageId },
+    // Build the base systemHint, appending the mandatory-reply hint for
+    // retries when the user explicitly triggered the bot.
+    let currentHint = systemHint;
+    let result = await generateAiTurn({
+      userContext: user,
+      userMessage,
+      recentConversation,
+      recentMembers,
+      tier,
+      needsSearch,
+      allowedUids,
+      systemHint: currentHint,
+      wasMentioned: isMentioned,
+      wasRepliedTo: isRepliedToBot,
+      recentBotMessages,
     });
 
-    let accumulated = "";
-    let lastEdited = 0;
+    // Retry on dismiss when the user explicitly triggered the bot
+    if (result.action === "dismiss" && isTriggered) {
+      for (let attempt = 1; attempt <= MAX_DISMISS_RETRIES; attempt++) {
+        logger.info(
+          { attempt, rawText: result.rawText?.slice(0, 80) },
+          "handleAiTurn: dismissing, retrying",
+        );
 
-    for await (const chunk of gen.textStream) {
-      accumulated += chunk;
-      const now = Date.now();
-      if (now - lastEdited >= STREAM_EDIT_INTERVAL_MS) {
-        try {
-          await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
-          lastEdited = now;
-        } catch {
-          // Telegram may reject edits if content unchanged or rate-limited; skip.
+        // Refresh typing indicator before each retry
+        await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+
+        currentHint = currentHint
+          ? `${currentHint}\n${MANDATORY_REPLY_HINT}`
+          : MANDATORY_REPLY_HINT;
+
+        result = await generateAiTurn({
+          userContext: user,
+          userMessage,
+          recentConversation,
+          recentMembers,
+          tier,
+          needsSearch,
+          allowedUids,
+          systemHint: currentHint,
+          wasMentioned: isMentioned,
+          wasRepliedTo: isRepliedToBot,
+          recentBotMessages,
+        });
+
+        if (result.action === "send") break;
+      }
+
+      // All retries exhausted — fallback to rawText or a sticker
+      if (result.action === "dismiss") {
+        logger.warn("handleAiTurn: all retries dismissed, sending fallback");
+        const fallbackEmoji = pickRandomStickerEmoji();
+
+        if (result.rawText) {
+          touchBotActivity();
+          pushMessage(
+            config.tgGroupId,
+            "bot",
+            config.botUsername,
+            result.rawText.slice(0, MAX_BUFFER_TEXT),
+          );
+          await sendAiMessages({
+            ctx,
+            chatId,
+            replyToMessageId,
+            messages: [result.rawText],
+            stickerEmoji: fallbackEmoji,
+          });
+        } else {
+          touchBotActivity();
+          pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${fallbackEmoji}]`);
+          const stickerFileId = MIAOHAHA_STICKERS[fallbackEmoji];
+          if (stickerFileId) {
+            try {
+              await ctx.api.sendSticker(chatId, stickerFileId, {
+                reply_parameters: { message_id: replyToMessageId },
+              });
+            } catch (err) {
+              logger.warn({ err, emoji: fallbackEmoji }, "handleAiTurn: fallback sticker failed");
+            }
+          }
         }
+
+        return;
       }
     }
 
-    // Final edit to ensure the complete text is displayed.
-    try {
-      await ctx.api.editMessageText(chatId, msg.message_id, accumulated);
-    } catch {
-      // Already up-to-date is fine.
+    if (result.action === "dismiss") {
+      logger.info("handleAiTurn: model chose to dismiss (silence)");
+      return;
     }
 
+    // result.action === "send"
     touchBotActivity();
 
-    pushMessage(config.tgGroupId, "bot", config.botUsername, accumulated.slice(0, MAX_BUFFER_TEXT));
-
-    void (async () => {
-      try {
-        const emoji = await gen.stickerPromise;
-        if (emoji && MIAOHAHA_STICKERS[emoji]) {
-          await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[emoji]);
-        }
-      } catch (err: unknown) {
-        logger.warn({ err }, "streamAiReply: sticker dispatch failed");
-      }
-    })();
-
-    // Cache image descriptions for future updates that reference the same file_id.
-    for (let i = 0; i < photoFileIds.length; i++) {
-      const fileId = photoFileIds[i];
-      const img = imageDataUrls[i];
-      if (!fileId || !img) continue;
-      describeImage(img)
-        .then((desc) => cacheImage(fileId, { description: desc }))
-        .catch((err: unknown) => {
-          logger.warn({ err, fileId }, "streamAiReply: image cache failed");
-        });
+    // Push all messages to the conversation buffer
+    for (const msg of result.messages) {
+      pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
     }
+
+    // Sticker-only: push a sticker marker so the buffer stays coherent
+    if (result.messages.length === 0 && result.stickerEmoji) {
+      pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${result.stickerEmoji}]`);
+    }
+
+    await sendAiMessages({
+      ctx,
+      chatId,
+      replyToMessageId,
+      messages: result.messages,
+      stickerEmoji: result.stickerEmoji,
+    });
   } catch (err) {
-    logger.error({ err }, "streamAiReply: stream failed");
+    logger.error({ err }, "handleAiTurn: AI turn failed");
     await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
-      logger.warn({ err: replyErr }, "streamAiReply: fallback reply failed");
+      logger.warn({ err: replyErr }, "handleAiTurn: fallback reply failed");
     });
   }
 }
@@ -280,28 +437,38 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     } = await extractContent(ctx, msg, { rawText, entities });
 
     // Merge cached descriptions with fresh Gemini-described images.
-    // Images not in cache (imageDataUrls) need real-time description since
-    // DeepSeek has no vision capability.
     const imageDescriptions = [...cachedImageDescriptions];
     for (const imgUrl of imageDataUrls) {
       try {
-        const desc = await describeImage(imgUrl);
+        const desc = await describeImage(imgUrl, rawText);
         imageDescriptions.push(desc);
       } catch (err) {
         logger.warn({ err }, "failed to describe image");
       }
     }
 
-    // 4. Push user's message into the buffer ONCE, up front. Every later branch
-    // now only needs to worry about pushing its own bot output.
+    // 4. Push user's message into the buffer ONCE, up front.
     const bufferLine = buildBufferLine({
       rawText,
       stickerEmoji,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
+      imageDescriptions,
       urls,
     });
     if (bufferLine) {
       pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferLine);
+    }
+
+    // 4b. Cache fresh image descriptions so future turns (and proactive) see them
+    for (let i = 0; i < photoFileIds.length; i++) {
+      const fileId = photoFileIds[i];
+      const descIdx = cachedImageDescriptions.length + i;
+      const desc = imageDescriptions[descIdx];
+      if (fileId && desc) {
+        cacheImage(fileId, { description: desc }).catch((err: unknown) => {
+          logger.warn({ err, fileId }, "image cache failed");
+        });
+      }
     }
 
     // 5. /help — public
@@ -323,7 +490,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 6. /love — public
     if (matchCommand(entities, rawText, "/love", botUsername)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
       return;
     }
 
@@ -340,7 +507,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
       const mem = process.memoryUsage();
       const rssMb = Math.round(mem.rss / 1024 / 1024);
-      // Fetch Firestore counts in parallel; if either fails, fall back to "?"
       const [memUsers, cachedImgs] = await Promise.all([
         countUsersWithMemories().catch((err: unknown) => {
           logger.warn({ err }, "countUsersWithMemories failed");
@@ -373,10 +539,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    // 8. Goodnight — /nighty command or matching Chinese/English text
-    const isNightyCommand = matchCommand(entities, rawText, "/nighty", botUsername);
-    const isNightyText = rawText ? NIGHTY_REGEX.test(rawText) : false;
-    if (isNightyCommand || isNightyText) {
+    // 8. Goodnight — /nighty command only
+    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
       await setNightyTimestamp(user.uid, Date.now());
       await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id);
       return;
@@ -397,12 +561,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyTo?.from?.id === botId;
 
     // 10. Morning greeting logic
-    //
-    // Condition: user went to bed ≥ 8h ago and we haven't greeted them yet this cycle.
-    //
-    // When the user is ALSO actively pinging the bot, we don't want to send two
-    // separate replies. Instead we mark the greeting as delivered and pass a
-    // systemHint down to the AI so the reply naturally opens with a wake-up line.
     let systemHint: string | null = null;
     const now = Date.now();
     const needsMorningGreet =
@@ -420,7 +578,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         try {
           const greeting = await generateMorningGreeting(user);
           await setMorningGreeted(user.uid, now);
-          await replyAndTrack(ctx, greeting, msg.message_id);
+          await replyAndTrack(ctx, greeting, msg.message_id, true);
+          touchBotActivity();
+          pushMessage(
+            config.tgGroupId,
+            "bot",
+            config.botUsername,
+            greeting.slice(0, MAX_BUFFER_TEXT),
+          );
         } catch (err) {
           logger.error({ err, uid: user.uid }, "failed to send morning greeting");
         }
@@ -432,12 +597,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const urlContents = await urlFetchPromise;
     for (const [, content] of urlContents) {
       if (content) {
-        pushMessage(
-          config.tgGroupId,
-          "system",
-          "链接",
-          `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
-        );
+        if (content.startsWith("[Tweet ")) {
+          pushMessage(config.tgGroupId, "system", "推文", content.slice(0, MAX_BUFFER_TEXT));
+        } else {
+          pushMessage(
+            config.tgGroupId,
+            "system",
+            "链接",
+            `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+          );
+        }
       }
     }
 
@@ -447,11 +616,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 13. Love confession → templated rejection (no full AI pipeline needed)
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
+      touchBotActivity();
+      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
       return;
     }
 
-    // 14. Main AI path
+    // 14. Main AI path — tool-call architecture
     const userMessage = buildUserMessage({
       rawText,
       displayName,
@@ -463,14 +634,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urlContents,
     });
 
-    await streamAiReply({
+    await handleAiTurn({
       ctx,
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      photoFileIds,
-      imageDataUrls,
       systemHint,
+      isMentioned,
+      isRepliedToBot,
     });
   });
 
@@ -540,12 +711,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       for (const [u, c] of entries) {
         urlContents.set(u, c);
         if (c) {
-          pushMessage(
-            config.tgGroupId,
-            "system",
-            "链接",
-            `[链接内容: ${c.slice(0, MAX_BUFFER_TEXT)}]`,
-          );
+          if (c.startsWith("[Tweet ")) {
+            pushMessage(config.tgGroupId, "system", "推文", c.slice(0, MAX_BUFFER_TEXT));
+          } else {
+            pushMessage(
+              config.tgGroupId,
+              "system",
+              "链接",
+              `[链接内容: ${c.slice(0, MAX_BUFFER_TEXT)}]`,
+            );
+          }
         }
       }
     }
@@ -553,7 +728,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveRejection(user);
-      await replyAndTrack(ctx, rejection, msg.message_id);
+      await replyAndTrack(ctx, rejection, msg.message_id, true);
+      touchBotActivity();
+      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
       return;
     }
 
@@ -568,14 +745,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urlContents,
     });
 
-    await streamAiReply({
+    await handleAiTurn({
       ctx,
       replyToMessageId: msg.message_id,
       user,
       userMessage,
-      photoFileIds: [],
-      imageDataUrls: [],
       systemHint: null,
+      isMentioned,
+      isRepliedToBot,
     });
   });
 }

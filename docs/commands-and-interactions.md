@@ -20,23 +20,40 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
 2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
-3. **Tool-augmented streaming** — `generateResponse()` streams a reply with optional tool calls (memory, nickname, sticker, web search).
-4. **Post-processing** — Sticker dispatch, image cache write.
+3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
+4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail.
+5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
 
 ### Images
 
+- **Direct & reply-to**: Images from the user's own message (`msg.photo`) and from the replied-to message (`msg.reply_to_message.photo`) are both processed.
 - **Cached**: If the Telegram `file_id` was seen before and a Firestore description exists, the description is injected as `[图片: description]` text.
 - **Fresh**: The image is downloaded as a data URL, sent to **Gemini 2.5 Flash** for description, and the description is injected into DeepSeek's prompt as text. The description is then cached in Firestore (30-day TTL).
+- **Buffer enrichment**: Image descriptions are included inline in the conversation buffer (`[图片: desc]` instead of bare `[图片]`), giving the proactive checker and subsequent triggered turns full image context.
+- **Caching is unconditional**: All images are described and cached immediately, regardless of whether the bot was triggered — this ensures proactive context is always available.
 
 ### URLs
 
 - URLs are extracted from both Telegram entities and a regex fallback.
-- When the bot is triggered (@mention/reply), `fetchUrlContent()` uses Tavily's `urlExtract` tool + DeepSeek summarization.
-- When the bot is NOT triggered, URL content is still extracted asynchronously and pushed to the conversation buffer as a system entry — this gives the proactive checker context.
+- `fetchUrlContent()` uses a three-tier strategy:
+  1. **Twitter/X status links** (`twitter.com`/`x.com`/`*/status/*`) → **fxtwitter API** (free, no auth). Extracts author, text, and up to 4 photos. Photos are sent to **Gemini 2.5 Flash** in a single batch for ≤150-char Chinese descriptions. Quoted tweets are also extracted.
+  2. **Other links** → direct `fetch()` with 8s timeout, extracting `<title>` and `<meta name="description">` from HTML.
+  3. **Fallback** → Tavily Extract (AI-powered summarization).
+- **Success**: Content is pushed to the conversation buffer:
+  - Tweets → `[推文]: [Tweet url | @handle (Name): text | 配图: desc1; desc2]`
+  - Normal links → `[链接]: [链接内容: title — desc]`
+- **Failure**: Nothing is pushed to the buffer. In proactive mode, the bot stays silent. In triggered (passive) mode, the LLM sees `[链接 url: 无法获取内容]` and can ask the user to describe the link.
+- **No persistent storage**: Link descriptions live only in the in-memory conversation buffer (max 30 entries).
 
 ### Stickers
 
-Telegram sticker emoji are extracted and sent to the LLM as `[贴纸: emoji]`. The LLM can respond with a `sendSticker` tool call using one of the Miaohaha pack emojis.
+Telegram sticker emoji are extracted and sent to the LLM as `[贴纸: emoji]`. The LLM can respond with:
+
+- **Text + sticker**: Calls `send_message` then `sendSticker` — sticker is dispatched after text messages.
+- **Sticker only**: Calls only `sendSticker` without `send_message` — sticker is sent with a reply reference.
+- **No sticker**: Calls only `send_message` — plain text reply.
+
+The `sendSticker` tool description includes all available Miaohaha sticker emojis and their meanings. The system prompt tells the model not to send bare emoji as text — use `sendSticker` instead.
 
 ### Goodnight / Good Morning
 
@@ -51,14 +68,63 @@ Text matching `LOVE_REGEX` (我爱你, 喜欢你, 嫁给我, love, etc.) trigger
 
 ## LLM Tools
 
-The `generateResponse()` function exposes these tools to the model:
+The `generateAiTurn()` function exposes these tools to the model:
 
-| Tool           | Description                                                                     |
-| -------------- | ------------------------------------------------------------------------------- |
-| `saveMemory`   | Record a memory about a group member (uid must be from the recent members list) |
-| `setNickname`  | Set/update a group member's preferred nickname                                  |
-| `deleteMemory` | Remove a specific memory about a group member                                   |
-| `sendSticker`  | Select a Miaohaha sticker emoji to send alongside the reply                     |
-| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)       |
+| Tool           | Description                                                                       |
+| -------------- | --------------------------------------------------------------------------------- |
+| `send_message` | Send a message to the group — the only way to speak; can be called multiple times |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                                 |
+| `saveMemory`   | Record a memory about a group member (uid must be from the recent members list)   |
+| `setNickname`  | Set/update a group member's preferred nickname                                    |
+| `deleteMemory` | Remove a specific memory about a group member                                     |
+| `sendSticker`  | Select a Miaohaha sticker emoji to send (standalone or alongside text)            |
+| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)         |
 
 All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
+
+### Tool Call Flow
+
+```
+User message → classifyMessage() → generateAiTurn()
+                                        │
+                                        ├─ Model calls send_message → text added to messages[]
+                                        ├─ Model calls dismiss → dismissed = true
+                                        ├─ Model calls saveMemory → Firestore write
+                                        ├─ Model calls setNickname → Firestore write
+                                        ├─ Model calls deleteMemory → Firestore delete
+                                        ├─ Model calls sendSticker → emoji saved
+                                        ├─ Model calls webSearch → Tavily search executed
+                                        │
+                                        ▼
+                                 AiTurnResult
+                                  ├─ { action: "send", messages, stickerEmoji }
+                                  └─ { action: "dismiss", rawText? }
+```
+
+### Dismiss Retry (Triggered Path Only)
+
+When the user explicitly @mentions or replies to the bot and the model chooses `dismiss`:
+
+1. Retry up to 3 times, each time appending `[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]` to `systemHint`.
+2. After all retries, if still `dismiss`:
+   - If `rawText` exists (model produced inner monologue) → send `rawText` as message + random sticker as fallback.
+   - If `rawText` is empty → send only a random sticker (with reply reference).
+
+Proactive messages are NOT retried — silence is a valid and expected outcome when the bot speaks unprompted.
+
+## Message Formatting
+
+All bot output is processed through `formatForTelegramHtml()` before sending:
+
+- **Code blocks**: ` ```code``` ` → `<pre><code>`
+- **Inline code**: `` `code` `` → `<code>`
+- **Bold**: `**text**` → `<b>text</b>`
+- **Italic**: `*text*` → `<i>text</i>`
+- **Strikethrough**: `~~text~~` → `<s>text</s>`
+- **Links**: `[text](url)` → `<a href="url">text</a>`
+- **LaTeX math**: `$...$` → `<code>` with Unicode conversion, `$$...$$` → `<pre><code>`
+- Falls back to plain text if HTML parsing fails
+
+## Typing Indicator
+
+A `sendChatAction("typing")` is sent at the start of `handleAiTurn()` and after each dismiss retry, so users see "typing..." while the AI generates.

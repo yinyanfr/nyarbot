@@ -10,14 +10,17 @@
 
 - 💬 **自然聊天** — @她或回复她就能触发对话，傲娇猫娘口癖（喵、哼！、笨蛋！），会故意念错词（机器人→姬器人，AI→猫工智能）
 - 🧠 **严肃模式** — 编程/数学/技术问题自动收起猫娘模式，认真回答
-- 🔍 **联网搜索** — 涉及时事或实时信息时自动搜索，搜索结果融入回复
-- 🔗 **链接理解** — 群友分享链接时自动用 Tavily 提取内容
-- 🖼️ **看图吐槽** — Gemini 识别图片内容，猫娘视角吐槽或夸夸，描述自动缓存
+- 🔍 **联网搜索** — 涉及时事或实时信息时自动搜索（强制搜索机制确保模型不会跳过）
+- 🔗 **链接理解** — 推文链接自动通过 fxtwitter API 提取（含 Gemini 配图识别），其他链接先尝试直接抓取标题/描述，再回退到 Tavily；仅成功获取的链接内容写入上下文
+- 🖼️ **看图吐槽** — Gemini 识别图片内容（含回复消息中的图片），猫娘视角吐槽或夸夸，描述自动缓存并写入对话上下文供主动插话使用
 - 🌅 **早安问候** — `/nighty` 或说晚安后，8 小时后下次发言自动收到个性化早安
 - 💔 **好人卡** — `/love` 或告白时根据记忆傲娇地发好人卡
 - 🏷️ **昵称 & 记忆** — 跟她说「叫我XX」设置昵称，「记住XXX」记录记忆
-- 🎯 **主动插话** — 每 15 秒扫描群聊，话题有趣时主动跳进来
-- 🎨 **贴纸回复** — 简短对话结束时自动发送 Miaohaha 贴纸
+- 🎯 **主动插话** — 两阶段探测：廉价模型判断话题相关性，通过后完整模型生成回复
+- 🎨 **贴纸回复** — 可单独发贴纸或随文字发送 Miaohaha 贴纸
+- 🔄 **沉默重试** — 被触发但模型选择沉默时自动重试最多 3 次，附加强制回复提示；仍沉默则发送原始文本或贴纸兜底
+- ⌨️ **打字指示** — AI 生成时显示"正在输入…"
+- 📝 **Markdown→Telegram HTML** — 回复自动转换 Markdown 粗体/斜体/代码/链接等为 Telegram HTML
 
 ---
 
@@ -38,25 +41,30 @@
 
 ```
 src/
-├── app.ts                      # 入口：加载 dotenv、初始化 Firebase、注册 handler、启动主动插话
+├── app.ts                      # 入口：加载 dotenv、初始化 Firebase、注册 handler、
+│                               #   创建 ProactiveCallbacks、启动主动插话
 ├── configs/
 │   └── env.ts                  # 环境变量读取与校验
 ├── handlers/
-│   ├── index.ts                # 消息处理器（过滤、命令、触发检测、AI 路由、流式回复）
+│   ├── index.ts                # 消息处理器：分类→AI 轮次→发送（含沉默重试、打字指示）
 │   ├── context.ts              # BotContext 和 RequestState 类型
-│   ├── constants.ts             # 正则、常量
+│   ├── constants.ts             # 常量（MAX_BUFFER_TEXT、LOVE_REGEX 等）
 │   ├── match-command.ts        # 命令匹配工具
 │   ├── extract-content.ts      # URL/图片/贴纸提取
-│   ├── reply-and-track.ts      # 回复 + 缓冲区推送 + 主动插话冷却重置
+│   ├── reply-and-track.ts      # 回复 + 缓冲区推送
 │   └── update-dedup.ts         # LRU 去重
 ├── libs/
-│   ├── ai.ts                   # DeepSeek providers、Gemini provider、classifyMessage()、
-│   │                           #   generateResponse()（streamText + 工具）、
-│   │                           #   describeImage()（Gemini）、fetchUrlContent() 等
+│   ├── ai.ts                   # DeepSeek providers、classifyMessage()、
+│   │                           #   generateAiTurn()（工具调用架构）、
+│   │                           #   probeGate()（主动插话探测）、
+│   │                           #   describeImage()、fetchUrlContent() 等
 │   ├── conversation-buffer.ts  # 内存环形缓冲区（30 条/组）
-│   ├── system-prompt.ts        # 猫娘人设 system prompt 构建
-│   ├── stickers.ts             # Miaohaha 贴纸包（emoji → file_id 映射）
-│   ├── proactive.ts            # 主动插话定时器 + 动态冷却
+│   ├── system-prompt.ts        # 猫娘人设 system prompt、探测 prompt、
+│   │                           #   自然度 late-binding prompt
+│   ├── stickers.ts             # Miaohaha 贴纸包（emoji → file_id 映射 + 描述）
+│   ├── format-telegram.ts      # Markdown→Telegram HTML 转换（LaTeX→Unicode）
+│   ├── proactive.ts            # 主动插话：ProactiveCallbacks 接口、
+│   │                           #   两阶段探测、冷却逻辑、贴纸/打字指示分发
 │   ├── telegram-image.ts       # Telegram 文件下载 → base64 data URL
 │   ├── logger.ts                # pino 日志
 │   └── index.ts                # barrel 重导出
@@ -67,7 +75,7 @@ src/
 └── global.d.ts                 # User 类型定义
 ```
 
-详见 [架构文档](docs/architecture.md)。
+详见 [架构文档](docs/architecture.zh-CN.md)。
 
 ---
 
@@ -95,7 +103,7 @@ node dist/app.js
 
 ## 命令 & 交互
 
-详见 [命令与交互文档](docs/commands-and-interactions.md)。
+详见 [命令与交互文档](docs/commands-and-interactions.zh-CN.md)。
 
 | 命令      | 说明                               |
 | --------- | ---------------------------------- |
@@ -118,7 +126,7 @@ node dist/app.js
 
 ## 配置
 
-详见 [配置文档](docs/configuration.md)。
+详见 [配置文档](docs/configuration.zh-CN.md)。
 
 | 变量               | 必填 | 说明                                           |
 | ------------------ | ---- | ---------------------------------------------- |
@@ -128,6 +136,7 @@ node dist/app.js
 | `DEEPSEEK_API_KEY` | ✅   | DeepSeek API Key                               |
 | `TAVILY_API_KEY`   | ✅   | Tavily Search API Key                          |
 | `CF_AIG_TOKEN`     | ✅   | Cloudflare AI Gateway Token（Gemini 图片识别） |
+| `CF_ACCOUNT_ID`    | ✅   | Cloudflare 账户 ID（Gemini 图片识别）          |
 | `BOT_USERNAME`     | ❌   | Bot 用户名，默认 `nyarbot`                     |
 | `LOG_LEVEL`        | ❌   | 日志级别，默认 `info`                          |
 
@@ -135,7 +144,7 @@ node dist/app.js
 
 ## 开发
 
-详见 [开发文档](docs/development.md)。
+详见 [开发文档](docs/development.zh-CN.md)。
 
 ```bash
 npm run typecheck  # TypeScript 类型检查（tsc --noEmit）
@@ -150,10 +159,17 @@ npm run build      # 编译 src/ → dist/
 
 ## 文档
 
-- [架构文档](docs/architecture.md) — 数据流、AI 路由、流式回复、主动插话机制
-- [配置文档](docs/configuration.md) — 环境变量、Firebase、模型选择、AI Gateway
-- [命令与交互](docs/commands-and-interactions.md) — 命令、自然语言触发、LLM 工具
-- [开发文档](docs/development.md) — 设计决策、Firestore schema、常见问题
+- [架构文档](docs/architecture.zh-CN.md) — 工具调用架构、主动插话两阶段探测、沉默重试、Markdown 渲染
+- [配置文档](docs/configuration.zh-CN.md) — 环境变量、Firebase、模型选择、AI Gateway
+- [命令与交互](docs/commands-and-interactions.zh-CN.md) — 命令、自然语言触发、LLM 工具、沉默重试
+- [开发文档](docs/development.zh-CN.md) — 设计决策、Firestore schema、常见问题
+
+English docs:
+
+- [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Commands & Interactions](docs/commands-and-interactions.md)
+- [Development](docs/development.md)
 
 ---
 

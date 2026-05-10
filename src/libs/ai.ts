@@ -1,15 +1,19 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAiGateway } from "ai-gateway-provider";
 import { createUnified } from "ai-gateway-provider/providers/unified";
-import { generateText, streamText, tool, type LanguageModel, stepCountIs } from "ai";
+import { generateText, tool, type LanguageModel, stepCountIs } from "ai";
 import { tavilySearch, tavilyExtract } from "@tavily/ai-sdk";
 import { z } from "zod/v4";
 import config from "../configs/env.js";
-import { buildSystemPrompt } from "./system-prompt.js";
+import {
+  buildSystemPrompt,
+  buildLateBindingPrompt,
+  buildProbeSystemPrompt,
+} from "./system-prompt.js";
 import { updateUserMemory, removeUserMemory, updateUserNickname } from "../services/firestore.js";
 import { STICKER_EMOJIS, STICKER_DESCRIPTIONS } from "./stickers.js";
 import { logger } from "./logger.js";
-import type { User } from "../global.d.ts";
+import type { User } from "../global.d.js";
 
 // ---------------------------------------------------------------------------
 // DeepSeek providers (OpenAI-compatible, base URL without /v1)
@@ -28,6 +32,13 @@ function injectThinking(init: RequestInit | undefined, type: "enabled" | "disabl
   try {
     const body = JSON.parse(init.body);
     body.thinking = { type };
+    if (type === "enabled" && Array.isArray(body.messages)) {
+      for (const msg of body.messages) {
+        if (msg.role === "assistant" && !("reasoning_content" in msg)) {
+          msg.reasoning_content = "";
+        }
+      }
+    }
     return { ...init, body: JSON.stringify(body) };
   } catch {
     return init ?? {};
@@ -59,13 +70,13 @@ const deepseekThink = createOpenAI({
 // ---------------------------------------------------------------------------
 
 const aigateway = createAiGateway({
-  accountId: "5b2af39cf1c595a34ffa9057bbf17f0b",
+  accountId: config.cfAccountId,
   gateway: "gem",
   apiKey: config.cfAigToken,
 });
 
 const unified = createUnified();
-const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-2.5-flash"));
+const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3-flash-preview"));
 
 // ---------------------------------------------------------------------------
 // Model instances
@@ -121,7 +132,25 @@ export async function classifyMessage(text: string): Promise<ClassificationResul
 }
 
 // ---------------------------------------------------------------------------
-// Response generation
+// Max tokens per tier
+// ---------------------------------------------------------------------------
+
+const MAX_TOKENS_BY_TIER: Record<ClassificationResult["tier"], number | undefined> = {
+  simple: 200,
+  complex: 500,
+  tech: undefined, // no hard limit for technical answers
+};
+
+// ---------------------------------------------------------------------------
+// AiTurnResult — what generateAiTurn returns
+// ---------------------------------------------------------------------------
+
+export type AiTurnResult =
+  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "dismiss"; rawText?: string };
+
+// ---------------------------------------------------------------------------
+// Response generation (tool-call architecture)
 // ---------------------------------------------------------------------------
 
 export interface GenerateOptions {
@@ -134,10 +163,15 @@ export interface GenerateOptions {
   /** UIDs the LLM is allowed to reference in memory tools. */
   allowedUids: Set<string>;
   /** Optional system hint injected before the user message, e.g. "user just woke up". */
-  systemHint?: string;
+  systemHint?: string | null;
+  /** Whether the bot was mentioned or replied-to (for late-binding prompt). */
+  wasMentioned?: boolean;
+  wasRepliedTo?: boolean;
+  /** Recent bot messages for human-likeness feedback (last N send_message texts). */
+  recentBotMessages?: string[];
 }
 
-export function generateResponse(opts: GenerateOptions) {
+export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResult> {
   const {
     userContext,
     userMessage,
@@ -147,6 +181,9 @@ export function generateResponse(opts: GenerateOptions) {
     needsSearch,
     allowedUids,
     systemHint,
+    wasMentioned,
+    wasRepliedTo,
+    recentBotMessages,
   } = opts;
 
   const systemPrompt = buildSystemPrompt(userContext, recentConversation, recentMembers);
@@ -161,8 +198,56 @@ export function generateResponse(opts: GenerateOptions) {
     model = flashNoThinkModel;
   }
 
-  const promptText = systemHint ? `${systemHint}\n\n${userMessage}` : userMessage;
-  const messages = [{ role: "user" as const, content: promptText }];
+  const maxTokens = MAX_TOKENS_BY_TIER[tier];
+
+  // Build the late-binding prompt that goes at the end of the user message
+  const lateBinding = buildLateBindingPrompt({
+    wasMentioned: wasMentioned ?? false,
+    wasRepliedTo: wasRepliedTo ?? false,
+    recentBotMessages: recentBotMessages ?? [],
+  });
+
+  const promptText = systemHint
+    ? `${systemHint}\n\n${userMessage}\n\n${lateBinding}`
+    : `${userMessage}\n\n${lateBinding}`;
+
+  // When search is needed, inject a mandatory instruction so the model
+  // doesn't skip the webSearch tool call.
+  const finalPromptText = needsSearch
+    ? `${promptText}\n\n<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
+    : promptText;
+
+  const messages = [{ role: "user" as const, content: finalPromptText }];
+
+  // Mutable state captured by tool closures
+  const sentMessages: string[] = [];
+  let stickerEmoji: string | null = null;
+  let dismissed = false;
+
+  const sendMessageTool = tool({
+    description:
+      "向群聊发送一条消息。这是你向群里说话的唯一方式——不调用这个工具就是沉默。" +
+      "你可以多次调用 send_message 来发送多条短消息（像真人打字一样一条一条发），但大部分时候一条就够了。" +
+      "每条消息应该简短自然，一条消息说一个想法。",
+    inputSchema: z.object({
+      text: z.string().describe("要发送的消息文本。要像真人在群聊里打字一样自然简短。"),
+    }),
+    execute: async ({ text }) => {
+      sentMessages.push(text);
+      return "消息已发送 ✓";
+    },
+  });
+
+  const dismissTool = tool({
+    description:
+      "选择不回复。只有当你真的完全无话可说、话题与你毫无关系时才选这个。" +
+      "大部分时候你应该用 send_message 回复——你是群友，不是旁观者。",
+    inputSchema: z.object({}),
+    execute: async () => {
+      dismissed = true;
+      return "已选择沉默 ✓";
+    },
+  });
 
   const saveMemoryTool = tool({
     description:
@@ -230,12 +315,10 @@ export function generateResponse(opts: GenerateOptions) {
     },
   });
 
-  // Sticker: selected emoji is captured in closure, sent after streaming completes
-  let stickerEmoji: string | null = null;
-
   const sendStickerTool = tool({
     description:
       "当你的回复内容很简短（如 噢、好的、很棒、哈哈），或者对话已经自然结束，可以发送一个贴纸代替或结束对话。" +
+      "不要在 send_message 的文本中只发一个 emoji——想发贴纸就用 sendSticker。" +
       "可用贴纸含义：" +
       STICKER_EMOJIS.map((e) => `${e}(${STICKER_DESCRIPTIONS[e] || ""})`).join(" "),
     inputSchema: z.object({
@@ -247,33 +330,158 @@ export function generateResponse(opts: GenerateOptions) {
     },
   });
 
-  const tools = {
-    saveMemory: saveMemoryTool,
-    setNickname: setNicknameTool,
-    deleteMemory: deleteMemoryTool,
-    sendSticker: sendStickerTool,
-    ...(needsSearch
-      ? {
-          webSearch: tavilySearch({
-            apiKey: config.tavilyApiKey,
-            maxResults: 3,
-          }),
-        }
-      : {}),
-  };
-
-  const baseParams = {
+  const generateParams: Parameters<typeof generateText>[0] = {
     model,
     system: systemPrompt,
     messages,
+    tools: {
+      send_message: sendMessageTool,
+      dismiss: dismissTool,
+      saveMemory: saveMemoryTool,
+      setNickname: setNicknameTool,
+      deleteMemory: deleteMemoryTool,
+      sendSticker: sendStickerTool,
+      ...(needsSearch
+        ? {
+            webSearch: tavilySearch({
+              apiKey: config.tavilyApiKey,
+              maxResults: 3,
+            }),
+          }
+        : {}),
+    },
+    stopWhen: stepCountIs(5),
+  };
+  if (maxTokens != null) {
+    generateParams.maxOutputTokens = maxTokens;
+  }
+
+  const result = await generateText(generateParams);
+
+  // Log tool call summary for diagnostics
+  const toolCallNames = result.steps.flatMap((s) => s.toolCalls.map((tc) => tc.toolName));
+  if (toolCallNames.length > 0) {
+    logger.info({ toolCallNames, tier, needsSearch }, "generateAiTurn: tool calls made");
+  }
+  if (needsSearch && !toolCallNames.includes("webSearch")) {
+    logger.warn(
+      { tier, needsSearch, toolCallNames },
+      "generateAiTurn: search was needed but webSearch was not called",
+    );
+  }
+
+  // Determine the outcome
+  const rawText = result.text?.trim();
+  const rawTextProp = rawText || undefined;
+
+  // If the model called dismiss but also produced output (e.g. sticker),
+  // prefer the output over silence.
+  if (dismissed && sentMessages.length === 0 && !stickerEmoji) {
+    return rawTextProp
+      ? { action: "dismiss" as const, rawText: rawTextProp }
+      : { action: "dismiss" as const };
+  }
+
+  if (sentMessages.length > 0) {
+    return {
+      action: "send" as const,
+      messages: sentMessages,
+      stickerEmoji,
+    };
+  }
+
+  // Sticker-only: model called sendSticker but not send_message
+  if (stickerEmoji) {
+    return { action: "send" as const, messages: [], stickerEmoji };
+  }
+
+  // Edge case: no send_message and no dismiss — the model just output text
+  // (inner monologue). Treat as dismiss, but pass rawText as fallback.
+  if (!rawText) {
+    return { action: "dismiss" as const };
+  }
+
+  logger.info(
+    { textContent: rawText.slice(0, 100) },
+    "AI generated text without tool call, dismissing",
+  );
+  return { action: "dismiss" as const, rawText };
+}
+
+// ---------------------------------------------------------------------------
+// Probe gate (proactive message filtering)
+// ---------------------------------------------------------------------------
+
+export interface ProbeGateOptions {
+  recentConversation: string;
+  recentMembers: { uid: string; name: string }[];
+}
+
+/**
+ * Cheap model check to determine whether the bot should speak proactively.
+ * Returns true if the bot should proceed with the full model, false if it
+ * should stay silent.
+ */
+export async function probeGate(opts: ProbeGateOptions): Promise<boolean> {
+  const { recentConversation, recentMembers } = opts;
+
+  const systemPrompt = buildProbeSystemPrompt(recentConversation, recentMembers);
+
+  // Lightweight version of the late-binding prompt for probe context
+  const lateBinding =
+    "你没有被直接提及。你只是在浏览群聊，决定是否有值得说的话。" +
+    "大部分时候你应该选择 dismiss。只有当你真的有独特且有趣的东西可补充时才调用 send_message。";
+
+  let probedDismiss = false;
+
+  const probeDismissTool = tool({
+    description: "选择不回复。当你没什么值得说的时就选这个。犹豫时选 dismiss。",
+    inputSchema: z.object({}),
+    execute: async () => {
+      probedDismiss = true;
+      return "已选择沉默 ✓";
+    },
+  });
+
+  const probeSendMessageTool = tool({
+    description: "决定回复。仅当你确实有独特且有价值的东西要说时才选这个。",
+    inputSchema: z.object({
+      text: z.string().describe("你打算说的话的草稿，供参考"),
+    }),
+    execute: async () => {
+      return "探测通过，将使用完整模型生成回复";
+    },
+  });
+
+  const probeTools = {
+    send_message: probeSendMessageTool,
+    dismiss: probeDismissTool,
   };
 
-  const result = streamText({ ...baseParams, tools, stopWhen: stepCountIs(5) });
+  const messages = [
+    {
+      role: "user" as const,
+      content: `${lateBinding}\n\n请浏览以下群聊记录，决定是否有值得回复的内容。`,
+    },
+  ];
 
-  // Resolves with the selected emoji (or null) after all text and tool calls finish
-  const stickerPromise = result.text.then(() => stickerEmoji);
+  try {
+    await generateText({
+      model: flashNoThinkModel,
+      system: systemPrompt,
+      messages,
+      tools: probeTools,
+      stopWhen: stepCountIs(1),
+      maxOutputTokens: 60,
+      temperature: 0.85,
+    });
 
-  return { textStream: result.textStream, stickerPromise, text: result.text };
+    // If the probe dismissed, stay silent
+    return !probedDismiss;
+  } catch (err) {
+    logger.warn({ err }, "probe gate failed, defaulting to silent");
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -290,9 +498,9 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system: `你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。`,
+    system: `你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。像朋友之间的日常问候，不是客服打招呼。`,
     prompt: `${name} 刚刚睡醒上线了。请给 ta 发一句傲娇的问候语，欢迎 ta 回来。${memoriesBlock}
-要求：一句话，不要超过两行。语气自然，像朋友之间的日常问候。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
+要求：一句话，不要超过两行。语气自然，像朋友在群聊里随口打招呼，绝对不要像客服。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
     temperature: 0.8,
     maxOutputTokens: 80,
   });
@@ -315,7 +523,7 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
   const { text } = await generateText({
     model: flashNoThinkModel,
     system:
-      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。",
+      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。像聊天，不是写作文。",
     prompt: `${name} 向你告白了！请傲娇地拒绝 ta。
 
 拒绝策略：
@@ -325,7 +533,7 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
 
 ${memoriesBlock}
 
-要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。只输出拒绝语本身，不要加引号或解释。`,
+要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。像聊天一样说，不要写成长篇大论。只输出拒绝语本身，不要加引号或解释。`,
     temperature: 0.9,
     maxOutputTokens: 150,
   });
@@ -334,52 +542,30 @@ ${memoriesBlock}
 }
 
 // ---------------------------------------------------------------------------
-// Proactive conversation check: LLM decides whether to jump in
-// ---------------------------------------------------------------------------
-
-export async function shouldSpeak(recentHistory: string): Promise<string | null> {
-  const { text } = await generateText({
-    model: flashNoThinkModel,
-    system: "你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气自然、随意、有猫娘口癖，像群友一样。",
-    prompt: `以下是最近的群聊记录。作为一只傲娇猫娘，看看有没有你想傲娇地插话的内容？
-
-注意：以「[${config.botUsername}]:」开头的那几行是你自己之前说过的话，不要接自己的话、不要附和自己。
-如果刚刚你已经说过了，或者没什么值得插的，就只输出 SILENT。
-如果确实有想说的，写一句自然简短的猫娘回复（用中文，不超过两行，带猫娘口癖）。
-
-群聊记录：
----
-${recentHistory}
----
-
-你的回复（或 SILENT）：`,
-    temperature: 0.85,
-    maxOutputTokens: 100,
-  });
-
-  const trimmed = text.trim();
-  if (!trimmed || trimmed.toUpperCase() === "SILENT") return null;
-  return trimmed;
-}
-
-// ---------------------------------------------------------------------------
 // Image description (for caching)
 // ---------------------------------------------------------------------------
 
-export async function describeImage(imageInput: string): Promise<string> {
+export async function describeImage(imageInput: string, caption?: string): Promise<string> {
+  const captionNote = caption
+    ? `\n4. 用户给图片附加了说明文字：「${caption}」，请结合说明来理解图片。`
+    : "";
   const { text } = await generateText({
     model: geminiFlashModel,
-    system: "用中文简短描述这张图片的内容。只输出描述本身，不要加引号或任何前缀。",
+    system: `请用中文详细描述这张图片，要求：
+1. 详细描述图片的内容、细节和氛围，描述要充分具体
+2. 如果图片中包含文字，把所有文字完整提取出来
+3. 如果图片是一道题目，尝试解题并给出解答过程${captionNote}
+只输出描述本身，不要加引号或任何前缀。`,
     messages: [
       {
         role: "user" as const,
         content: [
-          { type: "text" as const, text: "请用一句话（不超过50字）描述这张图片的内容和氛围。" },
+          { type: "text" as const, text: "请详细描述这张图片。" },
           { type: "image" as const, image: imageInput },
         ],
       },
     ],
-    maxOutputTokens: 80,
+    maxOutputTokens: 8000,
     temperature: 0,
   });
   return text.trim();
@@ -389,7 +575,155 @@ export async function describeImage(imageInput: string): Promise<string> {
 // URL content extraction (for shared links)
 // ---------------------------------------------------------------------------
 
-export async function fetchUrlContent(url: string): Promise<string | null> {
+const TWITTER_STATUS_REGEX =
+  /https?:\/\/(?:twitter\.com|x\.com|mobile\.twitter\.com)\/(\w+)\/status\/(\d+)/i;
+
+/** Download an arbitrary URL as a base64 data URL (max 10 MB). Returns null on failure. */
+async function downloadUrlAsDataUrl(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") ?? "image/jpeg";
+    const buf = Buffer.from(await res.arrayBuffer());
+    const MAX_BYTES = 10 * 1024 * 1024;
+    if (buf.length > MAX_BYTES) return null;
+    return `data:${contentType};base64,${buf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Describe multiple tweet photos in a single Gemini call.
+ * Returns one description per photo (same order), ≤150 Chinese chars each.
+ */
+async function describeTweetPhotos(
+  dataUrls: string[],
+  photos: { altText?: string }[],
+): Promise<string[]> {
+  try {
+    const altHints = photos
+      .map((p, i) => (p.altText ? `图${i + 1} alt: "${p.altText}"` : ""))
+      .filter(Boolean)
+      .join("; ");
+    const hint = altHints ? ` (已知信息: ${altHints})` : "";
+
+    const content: ({ type: "text"; text: string } | { type: "image"; image: string })[] = [
+      {
+        type: "text",
+        text: `请用中文分别描述以下推文配图，每条不超过150字，简洁准确。${hint}\n\n按图片顺序输出，每行一条描述，不编号不前缀。`,
+      },
+    ];
+    for (const dataUrl of dataUrls) {
+      content.push({ type: "image", image: dataUrl });
+    }
+
+    const { text } = await generateText({
+      model: geminiFlashModel,
+      messages: [{ role: "user", content }],
+      maxOutputTokens: 200 * dataUrls.length,
+      temperature: 0,
+    });
+
+    return text
+      .split("\n")
+      .map((s: string) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+interface FxTweetResponse {
+  code: number;
+  tweet?: {
+    text?: string;
+    author?: { name?: string; screen_name?: string };
+    media?: { photos?: { url: string; altText?: string }[] };
+    qrt?: {
+      text?: string;
+      author?: { name?: string; screen_name?: string };
+    };
+  };
+}
+
+async function fetchTwitterContent(
+  url: string,
+  username: string,
+  tweetId: string,
+): Promise<string | null> {
+  try {
+    const apiUrl = `https://api.fxtwitter.com/${username}/status/${tweetId}`;
+    const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as FxTweetResponse;
+    if (data.code !== 200 || !data.tweet) return null;
+
+    const tweet = data.tweet;
+    const author = `${tweet.author?.name ?? username} (@${tweet.author?.screen_name ?? username})`;
+
+    let mediaDesc = "";
+    const photos = tweet.media?.photos;
+    if (photos?.length) {
+      const photoSlice = photos.slice(0, 4);
+      const dataUrls: string[] = [];
+      for (const photo of photoSlice) {
+        const dataUrl = await downloadUrlAsDataUrl(photo.url);
+        if (dataUrl) dataUrls.push(dataUrl);
+      }
+      if (dataUrls.length > 0) {
+        const descriptions = await describeTweetPhotos(
+          dataUrls,
+          photoSlice.slice(0, dataUrls.length),
+        );
+        mediaDesc = ` | 配图: ${descriptions.join("; ")}`;
+      } else {
+        mediaDesc = ` | [${photos.length}张图]`;
+      }
+    }
+
+    let qrtDesc = "";
+    if (tweet.qrt) {
+      const qrt = tweet.qrt;
+      const qrtAuthor = qrt.author?.screen_name ?? "";
+      qrtDesc = ` | 引用 @${qrtAuthor}: ${qrt.text ?? ""}`;
+    }
+
+    return `[Tweet ${url} | ${author}: ${tweet.text ?? ""}${mediaDesc}${qrtDesc}]`;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDirectPageInfo(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") ?? "";
+
+    if (contentType.includes("text/html")) {
+      const html = await res.text();
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const descMatch =
+        html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i) ??
+        html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i);
+
+      const parts: string[] = [];
+      const title = titleMatch?.[1]?.trim();
+      const desc = descMatch?.[1]?.trim();
+      if (title) parts.push(`标题: ${title}`);
+      if (desc) parts.push(desc);
+
+      return parts.length > 0 ? parts.join(" — ") : null;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTavilyContent(url: string): Promise<string | null> {
   try {
     const { text } = await generateText({
       model: flashNoThinkModel,
@@ -411,4 +745,16 @@ export async function fetchUrlContent(url: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function fetchUrlContent(url: string): Promise<string | null> {
+  const twitterMatch = url.match(TWITTER_STATUS_REGEX);
+  if (twitterMatch) {
+    return fetchTwitterContent(url, twitterMatch[1]!, twitterMatch[2]!);
+  }
+
+  const directResult = await fetchDirectPageInfo(url);
+  if (directResult) return directResult;
+
+  return fetchTavilyContent(url);
 }

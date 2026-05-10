@@ -5,8 +5,11 @@ import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
 import { initFirebase } from "./services/index.js";
 import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
-import { logger } from "./libs/logger.js";
+import type { ProactiveCallbacks } from "./libs/proactive.js";
+import { logger, initAdminNotify } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
+import { formatForTelegramHtml } from "./libs/format-telegram.js";
+import { MIAOHAHA_STICKERS } from "./libs/stickers.js";
 
 initFirebase();
 
@@ -25,6 +28,9 @@ async function main(): Promise<void> {
   const botInfo = bot.botInfo;
   logger.info(`nyarbot starting as @${botInfo.username}`);
 
+  // Forward warn/error logs to admin DM from now on
+  initAdminNotify(bot.api);
+
   setupHandlers(bot, botInfo);
 
   // Fire-and-forget cache cleanup; failures shouldn't block startup.
@@ -32,9 +38,35 @@ async function main(): Promise<void> {
     logger.warn({ err }, "image cache cleanup failed");
   });
 
-  startProactiveChecker(async (text) => {
-    await bot.api.sendMessage(config.tgGroupId, text);
-  });
+  const proactiveCallbacks: ProactiveCallbacks = {
+    sendText: async (text: string) => {
+      const formatted = formatForTelegramHtml(text);
+      try {
+        await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
+      } catch {
+        await bot.api.sendMessage(config.tgGroupId, text);
+      }
+    },
+    sendSticker: async (stickerEmoji: string) => {
+      const fileId = MIAOHAHA_STICKERS[stickerEmoji];
+      if (fileId) {
+        try {
+          await bot.api.sendSticker(config.tgGroupId, fileId);
+        } catch (err) {
+          logger.warn({ err, stickerEmoji }, "proactive: sticker dispatch failed");
+        }
+      }
+    },
+    sendChatAction: async (action) => {
+      try {
+        await bot.api.sendChatAction(config.tgGroupId, action);
+      } catch {
+        // Best-effort; typing indicators are non-critical
+      }
+    },
+  };
+
+  startProactiveChecker(proactiveCallbacks);
 
   await bot.start({
     onStart(info) {
@@ -56,4 +88,17 @@ process.once("SIGINT", () => {
 process.once("SIGTERM", () => {
   stopProactiveChecker();
   void bot.stop();
+});
+
+// Crash guards: ensure unhandled errors are logged before exit
+process.once("uncaughtException", (err) => {
+  logger.fatal({ err }, "uncaught exception — exiting");
+  process.exit(1);
+});
+process.once("unhandledRejection", (reason) => {
+  logger.fatal(
+    { err: reason instanceof Error ? reason : new Error(String(reason)) },
+    "unhandled rejection — exiting",
+  );
+  process.exit(1);
 });

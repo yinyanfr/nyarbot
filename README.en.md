@@ -10,14 +10,17 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 
 - 💬 **Natural Chat** — @mention or reply to trigger a conversation with tsundere catgirl quirks (喵, 哼!, 笨蛋!), intentional mispronunciations (机器人→姬器人, AI→猫工智能)
 - 🧠 **Serious Mode** — Automatically drops the catgirl persona for programming, math, and technical questions
-- 🔍 **Web Search** — Auto-searches for current events and real-time information when needed
-- 🔗 **URL Understanding** — Automatically extracts content from shared links using Tavily
-- 🖼️ **Image Roasting** — Gemini identifies image content, catgirl-style commentary, descriptions auto-cached
+- 🔍 **Web Search** — Auto-searches for current events and real-time information when needed (forced search mechanism ensures the model doesn't skip it)
+- 🔗 **URL Understanding** — Tweet links auto-fetched via fxtwitter API (with Gemini photo recognition); other links try direct HTML fetch for title/description, falling back to Tavily; only successful results enter context
+- 🖼️ **Image Roasting** — Gemini identifies image content (including images in replied-to messages), catgirl-style commentary, descriptions auto-cached and written to conversation context for proactive chatter
 - 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
 - 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
-- 🎯 **Proactive Chatter** — Scans group chat every 15 seconds, jumps in when conversation is interesting
-- 🎨 **Sticker Replies** — Automatically sends Miaohaha stickers for short or concluding responses
+- 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
+- 🎨 **Sticker Replies** — Can send Miaohaha stickers standalone or alongside text
+- 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
+- ⌨️ **Typing Indicator** — Shows "typing..." while AI generates
+- 📝 **Markdown→Telegram HTML** — Replies auto-convert Markdown bold/italic/code/links to Telegram HTML
 
 ---
 
@@ -38,25 +41,31 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 
 ```
 src/
-├── app.ts                      # Entry: load dotenv, init Firebase, register handlers, start polling
+├── app.ts                      # Entry: load dotenv, init Firebase, register handlers,
+│                               #   create ProactiveCallbacks, start proactive checker
 ├── configs/
 │   └── env.ts                  # Environment variable reading and validation
 ├── handlers/
-│   ├── index.ts                # Message handler (filter, commands, trigger detection, AI routing, streaming)
+│   ├── index.ts                # Message handler: classify→AI turn→send (with dismiss
+│   │                           #   retry, typing indicator, sticker dispatch)
 │   ├── context.ts              # BotContext and RequestState types
-│   ├── constants.ts             # Regex patterns, limits
+│   ├── constants.ts            # Constants (MAX_BUFFER_TEXT, LOVE_REGEX, etc.)
 │   ├── match-command.ts        # Command matching utility
 │   ├── extract-content.ts      # URL/image/sticker extraction
-│   ├── reply-and-track.ts      # Reply + buffer push + proactive cooldown reset
+│   ├── reply-and-track.ts      # Reply + buffer push
 │   └── update-dedup.ts         # LRU dedup
 ├── libs/
-│   ├── ai.ts                   # DeepSeek providers, Gemini provider, classifyMessage(),
-│   │                           #   generateResponse() (streamText + tools),
-│   │                           #   describeImage() (Gemini), fetchUrlContent(), etc.
+│   ├── ai.ts                   # DeepSeek providers, classifyMessage(),
+│   │                           #   generateAiTurn() (tool-call architecture),
+│   │                           #   probeGate() (proactive probe),
+│   │                           #   describeImage(), fetchUrlContent(), etc.
 │   ├── conversation-buffer.ts  # In-memory ring buffer (30 msgs/group)
-│   ├── system-prompt.ts        # Catgirl persona system prompt builder
-│   ├── stickers.ts             # Miaohaha sticker pack (emoji → file_id mapping)
-│   ├── proactive.ts            # Proactive chat timer + dynamic cooldown
+│   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
+│   │                           #   naturalness late-binding prompt
+│   ├── stickers.ts             # Miaohaha sticker pack (emoji → file_id + descriptions)
+│   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
+│   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
+│   │                           #   two-stage probe, cooldown, sticker/typing dispatch
 │   ├── telegram-image.ts       # Telegram file download → base64 data URL
 │   ├── logger.ts                # Pino logger
 │   └── index.ts                # Barrel re-exports
@@ -128,6 +137,7 @@ See [Configuration Docs](docs/configuration.md) for details.
 | `DEEPSEEK_API_KEY` | ✅       | DeepSeek API Key                                |
 | `TAVILY_API_KEY`   | ✅       | Tavily Search API Key                           |
 | `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway Token (for Gemini vision) |
+| `CF_ACCOUNT_ID`    | ✅       | Cloudflare Account ID (for Gemini vision)       |
 | `BOT_USERNAME`     | ❌       | Bot username, default `nyarbot`                 |
 | `LOG_LEVEL`        | ❌       | Log level, default `info`                       |
 
@@ -150,9 +160,9 @@ Husky + lint-staged automatically runs prettier and eslint on staged `.ts` files
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — Data flow, AI routing, streaming, proactive chat
+- [Architecture](docs/architecture.md) — Tool-call architecture, proactive two-stage probe, dismiss retry, Markdown rendering
 - [Configuration](docs/configuration.md) — Environment variables, Firebase, model selection, AI Gateway
-- [Commands & Interactions](docs/commands-and-interactions.md) — Commands, natural language triggers, LLM tools
+- [Commands & Interactions](docs/commands-and-interactions.md) — Commands, natural language triggers, LLM tools, dismiss retry
 - [Development](docs/development.md) — Design decisions, Firestore schema, troubleshooting
 
 中文文档：
