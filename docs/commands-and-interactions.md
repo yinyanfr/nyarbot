@@ -59,6 +59,26 @@ When answering, the LLM can respond with:
 
 The `sendSticker` tool presents a numbered list of sticker Chinese descriptions. The LLM selects by copying a description, which is matched to a sticker via multi-level fallback: exact/substring → DeepSeek v4 Flash semantic match → emoji extraction → random sticker.
 
+### Videos, GIFs, Video Messages, Documents, and Audio
+
+Telegram provides a free `thumbnail` field (a tiny JPEG, typically ≤320×320 and under 200 KB) on `Video`, `Animation` (GIF), `VideoNote`, `Document`, and `Audio` messages. This thumbnail is a separate file from the full media — no bytes from the actual video/document need to be downloaded.
+
+The bot downloads thumbnails via `getFile(thumbnail_file_id)`, describes them through Gemini, and injects type-tagged descriptions into the AI prompt and conversation buffer:
+
+| Media type      | Format                          | Thumbnail source                     |
+| --------------- | ------------------------------- | ------------------------------------ |
+| Video           | `[视频: description]`           | `cover` (largest size) → `thumbnail` |
+| Animation (GIF) | `[GIF动画: description]`        | `thumbnail`                          |
+| Video note      | `[视频消息: description]`       | `thumbnail`                          |
+| Document        | `[文件: filename: description]` | `thumbnail`                          |
+| Audio           | `[音频: title: description]`    | `thumbnail` (album cover)            |
+
+- **Cached**: Thumbnail descriptions are cached in Firestore `images/{thumbnail_file_id}` — the same cache used for photos (shared 30-day TTL).
+- **Text-only fallback**: If no thumbnail is available (rare), text markers like `[视频]` or `[文件: report.pdf]` are injected instead, so the bot at least knows media was sent.
+- **Reply-to media**: Thumbnails from replied-to video/animation/video_note/document/audio messages are also processed, matching the existing reply-to photo behavior.
+- **Zero ffmpeg usage**: Thumbnails are pre-generated JPEG/WebP images by Telegram. No video extraction is needed.
+- **Unconditional caching**: All media thumbnails are described and cached regardless of trigger state — proactive context is always available.
+
 ### Goodnight / Good Morning
 
 - **Goodnight**: `/nighty` command or text matching the regex (晚安, night, 睡了, etc.) → stores a `nightyTimestamp` in Firestore.

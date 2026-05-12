@@ -59,6 +59,26 @@ LLM 可通过 `adoptSticker` 工具将 `received_stickers` 缓存中的贴纸收
 
 `sendSticker` 工具展示编号的中文贴纸描述列表。LLM 通过选择描述来匹配贴纸，多级回退：精确/子串 → DeepSeek v4 Flash 语义匹配 → emoji 提取 → 随机贴纸。
 
+### 视频、GIF动画、视频消息、文件与音频
+
+Telegram 在以下消息类型上免费提供 `thumbnail` 字段（微小的 JPEG，通常 ≤320×320、<200 KB）：`Video`、`Animation`（GIF）、`VideoNote`、`Document` 和 `Audio`。该缩略图是一个独立文件，完全不需要下载实际视频内容。
+
+Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描述，并将带类型标签的描述注入 AI 提示词和对话缓冲：
+
+| 媒体类型 | 格式                   | 缩略图来源                         |
+| -------- | ---------------------- | ---------------------------------- |
+| 视频     | `[视频: 描述]`         | `cover`（取最大尺寸）→ `thumbnail` |
+| GIF动画  | `[GIF动画: 描述]`      | `thumbnail`                        |
+| 视频消息 | `[视频消息: 描述]`     | `thumbnail`                        |
+| 文件     | `[文件: 文件名: 描述]` | `thumbnail`                        |
+| 音频     | `[音频: 标题: 描述]`   | `thumbnail`（专辑封面）            |
+
+- **已缓存**：缩略图描述缓存于 Firestore `images/{thumbnail_file_id}` — 与图片共享同一缓存（30 天 TTL）。
+- **纯文本回退**：若无缩略图（极少见），则注入 `[视频]` 或 `[文件: report.pdf]` 等文本标记，使 bot 至少获知有媒体发送。
+- **回复中的媒体**：回复消息中的视频/GIF/视频消息/文件/音频缩略图同样被处理，与现有的回复图片行为一致。
+- **无需 ffmpeg**：缩略图是 Telegram 预生成的 JPEG/WebP 图片，无需视频提取。
+- **无条件缓存**：所有媒体缩略图在 Gemini 描述后立即缓存，无论 bot 是否被触发——确保主动插话上下文始终可用。
+
 ### 晚安 / 早安
 
 - **晚安**：`/nighty` 命令或匹配正则的文本（晚安、night、睡了等）→ 在 Firestore 存储 `nightyTimestamp`。

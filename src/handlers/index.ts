@@ -31,6 +31,7 @@ import type { BotContext, BotInfo } from "./context.js";
 import { MAX_BUFFER_TEXT, LOVE_REGEX, EIGHT_HOURS_MS } from "./constants.js";
 import { matchCommand } from "./match-command.js";
 import { extractContent } from "./extract-content.js";
+import type { MediaDescriptor } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
@@ -51,6 +52,7 @@ function buildUserMessage(params: {
   replyTo: Message | undefined;
   isRepliedToBot: boolean;
   urlContents: Map<string, string | null>;
+  mediaDescriptors?: MediaDescriptor[];
 }): string {
   const {
     rawText,
@@ -58,6 +60,7 @@ function buildUserMessage(params: {
     imageDescriptions,
     hasImage,
     stickerEmoji,
+    mediaDescriptors,
     replyTo,
     isRepliedToBot,
     urlContents,
@@ -76,6 +79,13 @@ function buildUserMessage(params: {
     msg = (msg ? `${msg}\n` : "") + `[贴纸: ${stickerEmoji}]`;
   }
 
+  if (mediaDescriptors && mediaDescriptors.length > 0) {
+    const lines = mediaDescriptors
+      .map((d) => (d.description ? `[${d.label}: ${d.description}]` : `[${d.label}]`))
+      .join("\n");
+    msg = msg ? `${lines}\n${msg}` : lines;
+  }
+
   if (replyTo && !isRepliedToBot) {
     const replyUid = replyTo.from?.id?.toString() ?? "";
     const replyName = replyTo.from?.first_name ?? "某人";
@@ -87,6 +97,19 @@ function buildUserMessage(params: {
       replyDesc = `[回复 ${replyUid} ${replyName}: [图片]]`;
     } else if (replyTo.sticker) {
       replyDesc = `[回复 ${replyUid} ${replyName}: [贴纸: ${replyTo.sticker.emoji}]]`;
+    } else if (replyTo.video) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [视频]]`;
+    } else if (replyTo.animation) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [GIF动画]]`;
+    } else if (replyTo.video_note) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [视频消息]]`;
+    } else if (replyTo.document) {
+      const docName = replyTo.document.file_name ? `: ${replyTo.document.file_name}` : "";
+      replyDesc = `[回复 ${replyUid} ${replyName}: [文件${docName}]]`;
+    } else if (replyTo.audio) {
+      const audioName = replyTo.audio.title || replyTo.audio.file_name || "";
+      const audioLabel = audioName ? `: ${audioName}` : "";
+      replyDesc = `[回复 ${replyUid} ${replyName}: [音频${audioLabel}]]`;
     }
     if (replyDesc) {
       msg = `${replyDesc}\n${msg}`;
@@ -119,6 +142,7 @@ function buildBufferLine(params: {
   stickerEmoji: string;
   hasImageContext: boolean;
   imageDescriptions: string[];
+  mediaDescriptors?: MediaDescriptor[];
   urls: string[];
   replyToInfo?: { uid: string; name: string; text: string };
 }): string {
@@ -136,6 +160,12 @@ function buildBufferLine(params: {
       parts.push(`[图片: ${desc}]`);
     } else {
       parts.push("[图片]");
+    }
+  }
+  if (params.mediaDescriptors?.length) {
+    for (const md of params.mediaDescriptors) {
+      const line = md.description ? `[${md.label}: ${md.description}]` : `[${md.label}]`;
+      parts.push(line);
     }
   }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
@@ -459,6 +489,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       stickerEmoji,
       stickerContent,
       urlFetchPromise,
+      mediaDescriptors: cachedMediaDescriptors,
+      pendingMediaThumbnails,
     } = await extractContent(ctx, msg, { rawText, entities });
 
     // Build sticker display text: Gemini description + file_id for adoption tool
@@ -474,6 +506,25 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         imageDescriptions.push(desc);
       } catch (err) {
         logger.warn({ err }, "failed to describe image");
+      }
+    }
+
+    // Describe media thumbnails (video/animation/video_note/document/audio)
+    const mediaDescriptors: MediaDescriptor[] = [...cachedMediaDescriptors];
+    for (const pt of pendingMediaThumbnails) {
+      try {
+        const mediaType = pt.label.replace(/:.*$/, "");
+        const desc = await describeImage(pt.dataUrl, rawText, mediaType);
+        logger.info({ label: pt.label, desc: desc.slice(0, 80) }, "media thumbnail described");
+        mediaDescriptors.push({ label: pt.label, description: desc });
+        if (desc) {
+          cacheImage(pt.fileId, { description: desc }).catch((err: unknown) => {
+            logger.warn({ err, fileId: pt.fileId }, "media thumbnail cache failed");
+          });
+        }
+      } catch (err) {
+        logger.warn({ err, label: pt.label }, "failed to describe media thumbnail");
+        mediaDescriptors.push({ label: pt.label, description: "" });
       }
     }
 
@@ -506,6 +557,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       stickerEmoji: stickerDisplay,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
       imageDescriptions,
+      mediaDescriptors,
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
@@ -675,6 +727,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       replyTo,
       isRepliedToBot,
       urlContents,
+      mediaDescriptors,
     });
 
     await handleAiTurn({
@@ -790,6 +843,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       imageDescriptions: [],
       hasImage: false,
       stickerEmoji: "",
+      mediaDescriptors: [],
       replyTo,
       isRepliedToBot,
       urlContents,

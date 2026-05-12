@@ -20,11 +20,16 @@ handlers/index.ts（setupHandlers）
     │     ├─ URL 检测（entity + 正则回退）
     │     ├─ 图片：缓存查询 → 下载 → Gemini 描述
     │     │     （含回复消息中的图片：msg.reply_to_message.photo）
+    │     ├─ 媒体缩略图：视频/动画/视频消息/文件/音频
+    │     │     → 缓存查询（缩略图 file_id）→ 下载缩略图
+    │     │     → Gemini 描述（共享图片缓存）
+    │     │     （含回复中的媒体；无需 ffmpeg — Telegram 预生成缩略图）
     │     └─ 贴纸：缓存查询（received_stickers）→ 下载 →
     │           格式转换（webm→webp via ffmpeg）→ Gemini 描述
     │           → 缓存到 received_stickers（仅描述成功时）
     ├─ 缓冲区推送（conversation-buffer.ts）
     │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
+    │     └─ 媒体：推送类型标签描述（"[视频: 描述]"、"[GIF动画: 描述]" 等）
     ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
     ├─ 命令路由（match-command.ts）
     │     ├─ /help

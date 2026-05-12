@@ -20,11 +20,16 @@ handlers/index.ts (setupHandlers)
     │     ├─ URL detection (entity + regex fallback)
     │     ├─ Image: cache lookup → download → Gemini description
     │     │     (includes reply-to images: msg.reply_to_message.photo)
+    │     ├─ Media thumbnails: video/animation/video_note/document/audio
+    │     │     → cache lookup (thumbnail file_id) → download thumbnail
+    │     │     → Gemini description (shared image cache)
+    │     │     (includes reply-to media; no ffmpeg — Telegram pre-generates thumbnails)
     │     └─ Sticker: cache lookup (received_stickers) → download →
     │           convert format (webm→webp via ffmpeg) → Gemini description
     │           → cache to received_stickers (only if description succeeds)
     ├─ Buffer push (conversation-buffer.ts)
     │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
+    │     └─ Media: push type-tagged descriptions ("[视频: desc]", "[GIF动画: desc]", etc.)
     ├─ Image caching (firestore.ts) — cache ALL images immediately after Gemini describes them
     ├─ Command routing (match-command.ts)
     │     ├─ /help

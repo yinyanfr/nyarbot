@@ -644,16 +644,23 @@ ${memoriesBlock}
 // Image description (for caching)
 // ---------------------------------------------------------------------------
 
-export async function describeImage(imageInput: string, caption?: string): Promise<string> {
+export async function describeImage(
+  imageInput: string,
+  caption?: string,
+  mediaType?: string,
+): Promise<string> {
   const captionNote = caption
     ? `\n4. 用户给图片附加了说明文字：「${caption}」，请结合说明来理解图片。`
     : "";
-  const { text } = await generateText({
+  const mediaNote = mediaType
+    ? `\n注意：这是一张${mediaType}的缩略图/封面。请描述你看到的画面内容——这是${mediaType}的视觉预览。`
+    : "";
+  const { text, finishReason } = await generateText({
     model: geminiFlashModel,
     system: `请用中文详细描述这张图片，要求：
 1. 详细描述图片的内容、细节和氛围，描述要充分具体
-2. 如果图片中包含文字，把所有文字完整提取出来
-3. 如果图片是一道题目，尝试解题并给出解答过程${captionNote}
+2. 如果图片中包含文字，把所有文字完整提取出来${captionNote}${mediaNote}
+3. 如果图片是一道题目，尝试解题并给出解答过程
 只输出描述本身，不要加引号或任何前缀。`,
     messages: [
       {
@@ -667,7 +674,14 @@ export async function describeImage(imageInput: string, caption?: string): Promi
     maxOutputTokens: 8000,
     temperature: 0,
   });
-  return text.trim();
+  const result = text.trim();
+  if (!result) {
+    logger.warn(
+      { finishReason, dataUrlPrefix: imageInput.slice(0, 120), mediaType },
+      "describeImage: empty response from Gemini",
+    );
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
