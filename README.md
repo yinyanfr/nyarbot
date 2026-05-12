@@ -58,7 +58,7 @@ src/
 │   │                           #   generateAiTurn()（工具调用架构）、
 │   │                           #   probeGate()（主动插话探测）、
 │   │                           #   describeImage()、fetchUrlContent() 等
-│   ├── conversation-buffer.ts  # 内存环形缓冲区（30 条/组）
+│   ├── conversation-buffer.ts  # 内存环形缓冲区（60 条/组）
 │   ├── system-prompt.ts        # 猫娘人设 system prompt、探测 prompt、
 │   │                           #   自然度 late-binding prompt
 │   ├── stickers.ts             # Miaohaha 贴纸包（emoji → file_id 映射 + 描述）

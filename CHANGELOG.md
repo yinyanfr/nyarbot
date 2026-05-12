@@ -126,7 +126,7 @@
 - **Telegram Bot** via grammy with auto-retry.
 - **Multi-modal support**: text, images (vision), stickers (Miaohaha pack).
 - **Web search** via `@tavily/ai-sdk` with `tavilySearch` tool.
-- **Conversation ring buffer** (30 entries/group, 500 chars/entry).
+- **Conversation ring buffer** (60 entries/group, 500 chars/entry).
 - **Proactive conversation checker** with activity-based cooldown.
 - **Goodnight/morning greeting** — `/nighty` command + 8h timer.
 - **Image caching** via Firestore (`images/{fileId}`).

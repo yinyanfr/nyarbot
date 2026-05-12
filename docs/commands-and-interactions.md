@@ -43,7 +43,7 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
   - Tweets → `[推文]: [Tweet url | @handle (Name): text | 配图: desc1; desc2]`
   - Normal links → `[链接]: [链接内容: title — desc]`
 - **Failure**: Nothing is pushed to the buffer. In proactive mode, the bot stays silent. In triggered (passive) mode, the LLM sees `[链接 url: 无法获取内容]` and can ask the user to describe the link.
-- **No persistent storage**: Link descriptions live only in the in-memory conversation buffer (max 30 entries).
+- **No persistent storage**: Link descriptions live only in the in-memory conversation buffer (max 60 entries).
 
 ### Stickers
 

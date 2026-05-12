@@ -576,7 +576,7 @@ export async function describeImage(imageInput: string, caption?: string): Promi
 // ---------------------------------------------------------------------------
 
 const TWITTER_STATUS_REGEX =
-  /https?:\/\/(?:twitter\.com|x\.com|mobile\.twitter\.com)\/(\w+)\/status\/(\d+)/i;
+  /https?:\/\/(?:twitter\.com|x\.com|mobile\.twitter\.com|fxtwitter\.com|fixupx\.com|vxtwitter\.com)\/(\w+)\/status\/(\d+)/i;
 
 /** Download an arbitrary URL as a base64 data URL (max 10 MB). Returns null on failure. */
 async function downloadUrlAsDataUrl(url: string): Promise<string | null> {

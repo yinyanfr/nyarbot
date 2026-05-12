@@ -146,7 +146,7 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
+- **Conversation buffer**: In-memory ring buffer (max 60 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Image cache**: Firestore `images/{fileId}` with 30-day TTL. On cache hit, the stored description is reused instead of re-downloading and re-describing the image.
 

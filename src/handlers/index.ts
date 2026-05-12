@@ -76,10 +76,19 @@ function buildUserMessage(params: {
   }
 
   if (replyTo && !isRepliedToBot) {
-    const repliedText = replyTo.text ?? replyTo.caption ?? "";
-    const repliedName = replyTo.from?.first_name ?? "某人";
-    if (repliedText) {
-      msg = `[回复 ${repliedName}: "${repliedText}"]\n${msg}`;
+    const replyUid = replyTo.from?.id?.toString() ?? "";
+    const replyName = replyTo.from?.first_name ?? "某人";
+    const replyText = replyTo.text ?? replyTo.caption ?? "";
+    let replyDesc = "";
+    if (replyText) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: "${replyText}"]`;
+    } else if (replyTo.photo?.length) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [图片]]`;
+    } else if (replyTo.sticker) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [贴纸: ${replyTo.sticker.emoji}]]`;
+    }
+    if (replyDesc) {
+      msg = `${replyDesc}\n${msg}`;
     }
   }
 
@@ -110,8 +119,14 @@ function buildBufferLine(params: {
   hasImageContext: boolean;
   imageDescriptions: string[];
   urls: string[];
+  replyToInfo?: { uid: string; name: string; text: string };
 }): string {
   const parts: string[] = [];
+  if (params.replyToInfo?.text) {
+    parts.push(
+      `[回复 ${params.replyToInfo.uid} ${params.replyToInfo.name}: "${params.replyToInfo.text.slice(0, 100)}"]`,
+    );
+  }
   if (params.rawText) parts.push(params.rawText);
   if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
   if (params.hasImageContext) {
@@ -447,13 +462,37 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       }
     }
 
+    // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
+    const replyTo = msg.reply_to_message;
+    const isRepliedToBot =
+      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
+      replyTo?.from?.id === botId;
+    const isMentioned = entities.some((e) => {
+      if (e.type !== "mention") return false;
+      const mention = rawText.slice(e.offset, e.offset + e.length);
+      return (
+        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
+        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
+      );
+    });
+
     // 4. Push user's message into the buffer ONCE, up front.
+    const replyToInfo =
+      replyTo && !isRepliedToBot
+        ? {
+            uid: replyTo.from?.id?.toString() ?? "",
+            name: replyTo.from?.first_name ?? "某人",
+            text: replyTo.text ?? replyTo.caption ?? "",
+          }
+        : undefined;
+
     const bufferLine = buildBufferLine({
       rawText,
       stickerEmoji,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
       imageDescriptions,
       urls,
+      ...(replyToInfo ? { replyToInfo } : {}),
     });
     if (bufferLine) {
       pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferLine);
@@ -546,20 +585,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    // 9. Trigger detection (@mention or reply-to-bot) — needed before morning logic
-    const isMentioned = entities.some((e) => {
-      if (e.type !== "mention") return false;
-      const mention = rawText.slice(e.offset, e.offset + e.length);
-      return (
-        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
-        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
-      );
-    });
-    const replyTo = msg.reply_to_message;
-    const isRepliedToBot =
-      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
-      replyTo?.from?.id === botId;
-
     // 10. Morning greeting logic
     let systemHint: string | null = null;
     const now = Date.now();
@@ -612,6 +637,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // 12. If the bot wasn't pinged, we're done.
     if (!isMentioned && !isRepliedToBot) return;
+
+    // Reset proactive cooldown immediately to prevent double-reply.
+    touchBotActivity();
 
     // 13. Love confession → templated rejection (no full AI pipeline needed)
     if (LOVE_REGEX.test(rawText)) {
@@ -685,11 +713,18 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const displayName = user.nickname || from.first_name || "大哥哥";
 
     // Push the edited text into the buffer so the AI sees the correction
+    let editedBuffer = rawText;
+    if (replyTo && !isRepliedToBot) {
+      const replyText = replyTo.text ?? replyTo.caption ?? "";
+      if (replyText) {
+        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyTo.from?.first_name ?? "某人"}: "${replyText.slice(0, 100)}"] ${rawText}`;
+      }
+    }
     pushMessage(
       config.tgGroupId,
       from.id.toString(),
       displayName,
-      rawText.slice(0, MAX_BUFFER_TEXT),
+      editedBuffer.slice(0, MAX_BUFFER_TEXT),
     );
 
     // URL handling (simpler: no images in edit flow)

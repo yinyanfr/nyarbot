@@ -59,7 +59,7 @@ src/
 │   │                           #   generateAiTurn() (tool-call architecture),
 │   │                           #   probeGate() (proactive probe),
 │   │                           #   describeImage(), fetchUrlContent(), etc.
-│   ├── conversation-buffer.ts  # In-memory ring buffer (30 msgs/group)
+│   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
 │   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
 │   │                           #   naturalness late-binding prompt
 │   ├── stickers.ts             # Miaohaha sticker pack (emoji → file_id + descriptions)

@@ -109,6 +109,13 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       return;
     }
 
+    // Re-check cooldown: a passive handler may have replied while probeGate was running.
+    const elapsed = Date.now() - lastBotMessageTime;
+    if (elapsed < cooldown) {
+      logger.info(`proactive: passive reply ${elapsed}ms ago, skipping (cooldown ${cooldown}ms)`);
+      return;
+    }
+
     // Signal "typing..." to the group while the full model runs
     await callbacks.sendChatAction("typing");
 
