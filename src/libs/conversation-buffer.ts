@@ -5,7 +5,7 @@ interface HistoryEntry {
   timestamp: number;
 }
 
-const MAX_HISTORY = 30;
+const MAX_HISTORY = 60;
 const MAX_TEXT_LEN = 500;
 const buffers = new Map<string, HistoryEntry[]>();
 

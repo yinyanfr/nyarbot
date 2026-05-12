@@ -9,9 +9,10 @@ import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
-import { MIAOHAHA_STICKERS } from "./libs/stickers.js";
+import { initStickerStore, stickerStoreReady } from "./libs/sticker-store.js";
 
 initFirebase();
+initStickerStore();
 
 type BotContext = import("./handlers/context.js").BotContext;
 
@@ -33,6 +34,9 @@ async function main(): Promise<void> {
 
   setupHandlers(bot, botInfo);
 
+  // Wait for sticker store to load from Firestore before accepting messages
+  await stickerStoreReady();
+
   // Fire-and-forget cache cleanup; failures shouldn't block startup.
   cleanupExpiredImageCache().catch((err: unknown) => {
     logger.warn({ err }, "image cache cleanup failed");
@@ -47,14 +51,11 @@ async function main(): Promise<void> {
         await bot.api.sendMessage(config.tgGroupId, text);
       }
     },
-    sendSticker: async (stickerEmoji: string) => {
-      const fileId = MIAOHAHA_STICKERS[stickerEmoji];
-      if (fileId) {
-        try {
-          await bot.api.sendSticker(config.tgGroupId, fileId);
-        } catch (err) {
-          logger.warn({ err, stickerEmoji }, "proactive: sticker dispatch failed");
-        }
+    sendSticker: async (stickerFileId: string) => {
+      try {
+        await bot.api.sendSticker(config.tgGroupId, stickerFileId);
+      } catch (err) {
+        logger.warn({ err, stickerFileId }, "proactive: sticker dispatch failed");
       }
     },
     sendChatAction: async (action) => {

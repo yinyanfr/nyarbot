@@ -43,17 +43,41 @@
   - 推文 → `[推文]: [Tweet url | @handle (Name): 文本 | 配图: desc1; desc2]`
   - 普通链接 → `[链接]: [链接内容: 标题 — 描述]`
 - **失败**：缓冲区中不推送任何内容。主动模式下 bot 保持沉默。触发（被动）模式下，LLM 看到 `[链接 url: 无法获取内容]`，可以请用户描述链接。
-- **无持久化存储**：链接描述仅存在于内存对话缓冲区中（最多 30 条）。
+- **无持久化存储**：链接描述仅存在于内存对话缓冲区中（最多 60 条）。
 
 ### 贴纸
 
-Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LLM 可以：
+群友发送的贴纸会被下载、格式转换（动态贴纸 webm→webp via ffmpeg），并由 Gemini 进行中文描述。描述和 file_id 缓存到 `received_stickers`。只有生成有效 AI 描述的贴纸才会被缓存。
+
+LLM 可通过 `adoptSticker` 工具将 `received_stickers` 缓存中的贴纸收入 bot 自己的 `stickers` 贴纸库。收入时贴纸会发送到聊天，并提示模型调用 `send_message` 用傲娇猫娘口吻确认。
+
+回复时，LLM 可以：
 
 - **文字 + 贴纸**：调用 `send_message` 后调用 `sendSticker` — 贴纸在文字消息后分发。
 - **纯贴纸**：只调用 `sendSticker` 不调用 `send_message` — 贴纸带回复引用发送。
 - **无贴纸**：只调用 `send_message` — 纯文字回复。
 
-`sendSticker` 工具描述包含所有可用的妙哈哈贴纸 emoji 及其含义。系统提示词告诉模型不要在 `send_message` 文本中只发 emoji — 想发贴纸就用 `sendSticker`。
+`sendSticker` 工具展示编号的中文贴纸描述列表。LLM 通过选择描述来匹配贴纸，多级回退：精确/子串 → DeepSeek v4 Flash 语义匹配 → emoji 提取 → 随机贴纸。
+
+### 视频、GIF动画、视频消息、文件与音频
+
+Telegram 在以下消息类型上免费提供 `thumbnail` 字段（微小的 JPEG，通常 ≤320×320、<200 KB）：`Video`、`Animation`（GIF）、`VideoNote`、`Document` 和 `Audio`。该缩略图是一个独立文件，完全不需要下载实际视频内容。
+
+Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描述，并将带类型标签的描述注入 AI 提示词和对话缓冲：
+
+| 媒体类型 | 格式                   | 缩略图来源                         |
+| -------- | ---------------------- | ---------------------------------- |
+| 视频     | `[视频: 描述]`         | `cover`（取最大尺寸）→ `thumbnail` |
+| GIF动画  | `[GIF动画: 描述]`      | `thumbnail`                        |
+| 视频消息 | `[视频消息: 描述]`     | `thumbnail`                        |
+| 文件     | `[文件: 文件名: 描述]` | `thumbnail`                        |
+| 音频     | `[音频: 标题: 描述]`   | `thumbnail`（专辑封面）            |
+
+- **已缓存**：缩略图描述缓存于 Firestore `images/{thumbnail_file_id}` — 与图片共享同一缓存（30 天 TTL）。
+- **纯文本回退**：若无缩略图（极少见），则注入 `[视频]` 或 `[文件: report.pdf]` 等文本标记，使 bot 至少获知有媒体发送。
+- **回复中的媒体**：回复消息中的视频/GIF/视频消息/文件/音频缩略图同样被处理，与现有的回复图片行为一致。
+- **无需 ffmpeg**：缩略图是 Telegram 预生成的 JPEG/WebP 图片，无需视频提取。
+- **无条件缓存**：所有媒体缩略图在 Gemini 描述后立即缓存，无论 bot 是否被触发——确保主动插话上下文始终可用。
 
 ### 晚安 / 早安
 
@@ -77,7 +101,8 @@ Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LL
 | `saveMemory`   | 记录关于群友的记忆（uid 必须来自最近群友列表）        |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 选择一个妙哈哈贴纸 emoji 发送（可单独发送或随文字）   |
+| `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级匹配回退        |
+| `adoptSticker` | 将群友发送的贴纸收入 bot 的库；收入时贴纸发送到聊天   |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 
 所有记忆/昵称工具在写入 Firestore 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
@@ -92,12 +117,12 @@ Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LL
                                         ├─ 模型调用 saveMemory → Firestore 写入
                                         ├─ 模型调用 setNickname → Firestore 写入
                                         ├─ 模型调用 deleteMemory → Firestore 删除
-                                        ├─ 模型调用 sendSticker → emoji 保存
+                                        ├─ 模型调用 sendSticker → file_id 保存
                                         ├─ 模型调用 webSearch → Tavily 搜索执行
                                         │
                                         ▼
                                  AiTurnResult
-                                  ├─ { action: "send", messages, stickerEmoji }
+                                  ├─ { action: "send", messages, stickerFileId }
                                   └─ { action: "dismiss", rawText? }
 ```
 

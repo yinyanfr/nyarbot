@@ -53,15 +53,15 @@ Model used: `google-ai-studio/gemini-2.5-flash` — fast, cheap, and supports vi
 
 The bot uses `generateText()` (not streaming) with the following tools exposed to the model:
 
-| Tool           | Purpose                                                                |
-| -------------- | ---------------------------------------------------------------------- |
-| `send_message` | Send a message to the group — the only way to speak                    |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                      |
-| `saveMemory`   | Record a memory about a group member (uid validated)                   |
-| `setNickname`  | Set/update a group member's preferred nickname                         |
-| `deleteMemory` | Remove a specific memory about a group member                          |
-| `sendSticker`  | Select a Miaohaha sticker emoji to send (standalone or alongside text) |
-| `webSearch`    | Tavily search (only when `needsSearch=true` from classification)       |
+| Tool           | Purpose                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `send_message` | Send a message to the group — the only way to speak              |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                |
+| `saveMemory`   | Record a memory about a group member (uid validated)             |
+| `setNickname`  | Set/update a group member's preferred nickname                   |
+| `deleteMemory` | Remove a specific memory about a group member                    |
+| `sendSticker`  | Select a sticker by Chinese description (numbered list)          |
+| `webSearch`    | Tavily search (only when `needsSearch=true` from classification) |
 
 When `needsSearch=true`, a mandatory instruction is appended to ensure the model calls `webSearch` before answering.
 

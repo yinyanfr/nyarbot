@@ -43,7 +43,9 @@ node dist/app.js   # run the compiled bot
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (persona + naturalness), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (per-turn human-likeness feedback)
 - `src/libs/conversation-buffer.ts` — in-memory ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
-- `src/libs/stickers.ts` — Miaohaha sticker pack mapping (emoji → file_id), `STICKER_EMOJIS` array, `STICKER_DESCRIPTIONS`
+- `src/libs/stickers.ts` — sticker facade: description-based selection (`getStickerFileIdByDescription`, `getStickerList`), emoji-based lookup (`getStickerFileId`), random fallback (`pickRandomStickerEmoji`)
+- `src/libs/sticker-store.ts` — Firestore-backed sticker cache: `stickers` (bot's library) + `received_stickers` (user-sent), in-memory `onSnapshot` sync, `getStickerByDescription()`, `getStickerByFileId()`
+- `src/libs/telegram-image.ts` — Telegram file download as data URL + sticker conversion (webm→webp via `fluent-ffmpeg` + `ffmpeg-static`, signature-based `application/octet-stream` detection)
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization

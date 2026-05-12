@@ -20,9 +20,16 @@ handlers/index.ts（setupHandlers）
     │     ├─ URL 检测（entity + 正则回退）
     │     ├─ 图片：缓存查询 → 下载 → Gemini 描述
     │     │     （含回复消息中的图片：msg.reply_to_message.photo）
-    │     └─ 贴纸 emoji 提取
+    │     ├─ 媒体缩略图：视频/动画/视频消息/文件/音频
+    │     │     → 缓存查询（缩略图 file_id）→ 下载缩略图
+    │     │     → Gemini 描述（共享图片缓存）
+    │     │     （含回复中的媒体；无需 ffmpeg — Telegram 预生成缩略图）
+    │     └─ 贴纸：缓存查询（received_stickers）→ 下载 →
+    │           格式转换（webm→webp via ffmpeg）→ Gemini 描述
+    │           → 缓存到 received_stickers（仅描述成功时）
     ├─ 缓冲区推送（conversation-buffer.ts）
     │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
+    │     └─ 媒体：推送类型标签描述（"[视频: 描述]"、"[GIF动画: 描述]" 等）
     ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
     ├─ 命令路由（match-command.ts）
     │     ├─ /help
@@ -47,7 +54,7 @@ handlers/index.ts（setupHandlers）
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-    │     │           deleteMemory、sendSticker
+    │     │           deleteMemory、sendSticker、adoptSticker
     │     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
     │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
@@ -64,25 +71,26 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 
 ### 可用工具
 
-| 工具           | 用途                                                  |
-| -------------- | ----------------------------------------------------- |
-| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）        |
-| `dismiss`      | 选择不回复（二选一：说话/沉默）                       |
-| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）          |
-| `setNickname`  | 设置/更新群友的昵称                                   |
-| `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 选择一个妙哈哈贴纸 emoji，随文字一起或单独发送        |
-| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
+| 工具           | 用途                                                                                                                              |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                                                                    |
+| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                                                                   |
+| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                                                                      |
+| `setNickname`  | 设置/更新群友的昵称                                                                                                               |
+| `deleteMemory` | 删除关于群友的指定记忆                                                                                                            |
+| `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级回退：精确/子串 → DeepSeek Flash 语义匹配 → emoji → 随机。直接返回 file_id。                |
+| `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。设置 `stickerFileId` 以便贴纸发送到聊天。拒绝无有效描述的贴纸。 |
+| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                             |
 
 ### AiTurnResult
 
 ```typescript
 type AiTurnResult =
-  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 ```
 
-- **`send`**：一条或多条消息 + 可选贴纸。通过 `sendAiMessages()` 发送，该方法会将 Markdown 格式化为 HTML、错开消息时间（400ms）、分发贴纸。
+- **`send`**：一条或多条消息 + 可选贴纸（file_id）。通过 `sendAiMessages()` 发送，该方法会将 Markdown 格式化为 HTML、错开消息时间（400ms）、直接按 file_id 分发贴纸。
 - **`dismiss`**：模型选择沉默。`rawText` 捕获内心独白作为重试的兜底。
 
 ### 沉默重试
@@ -146,7 +154,7 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **对话缓冲区**：内存环形缓冲区（每组最多 30 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。图片条目包含 Gemini 行内描述（如 `[图片: 一只猫在睡觉]`）；URL 条目仅包含成功抓取的内容（推文：`[推文]: [Tweet url | @x: 文本 | 配图: ...]`，普通链接：`[链接内容]: 标题 — 描述`）。原始 URL 绝不进入缓冲区，避免对无法抓取的链接产生主动噪音。
+- **对话缓冲区**：内存环形缓冲区（每组最多 60 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。图片条目包含 Gemini 行内描述（如 `[图片: 一只猫在睡觉]`）；URL 条目仅包含成功抓取的内容（推文：`[推文]: [Tweet url | @x: 文本 | 配图: ...]`，普通链接：`[链接内容]: 标题 — 描述`）。原始 URL 绝不进入缓冲区，避免对无法抓取的链接产生主动噪音。
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **图片缓存**：Firestore `images/{fileId}`，30 天 TTL。缓存命中时直接使用存储的描述，避免重新下载和重新描述图片。
 

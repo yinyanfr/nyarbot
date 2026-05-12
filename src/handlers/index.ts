@@ -22,7 +22,8 @@ import {
   formatHistoryAsContext,
   clearHistory,
 } from "../libs/conversation-buffer.js";
-import { MIAOHAHA_STICKERS, STICKER_EMOJIS } from "../libs/stickers.js";
+import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
+import { getStickerByFileId } from "../libs/sticker-store.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
@@ -30,6 +31,7 @@ import type { BotContext, BotInfo } from "./context.js";
 import { MAX_BUFFER_TEXT, LOVE_REGEX, EIGHT_HOURS_MS } from "./constants.js";
 import { matchCommand } from "./match-command.js";
 import { extractContent } from "./extract-content.js";
+import type { MediaDescriptor } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
@@ -50,6 +52,7 @@ function buildUserMessage(params: {
   replyTo: Message | undefined;
   isRepliedToBot: boolean;
   urlContents: Map<string, string | null>;
+  mediaDescriptors?: MediaDescriptor[];
 }): string {
   const {
     rawText,
@@ -57,6 +60,7 @@ function buildUserMessage(params: {
     imageDescriptions,
     hasImage,
     stickerEmoji,
+    mediaDescriptors,
     replyTo,
     isRepliedToBot,
     urlContents,
@@ -75,11 +79,40 @@ function buildUserMessage(params: {
     msg = (msg ? `${msg}\n` : "") + `[贴纸: ${stickerEmoji}]`;
   }
 
+  if (mediaDescriptors && mediaDescriptors.length > 0) {
+    const lines = mediaDescriptors
+      .map((d) => (d.description ? `[${d.label}: ${d.description}]` : `[${d.label}]`))
+      .join("\n");
+    msg = msg ? `${lines}\n${msg}` : lines;
+  }
+
   if (replyTo && !isRepliedToBot) {
-    const repliedText = replyTo.text ?? replyTo.caption ?? "";
-    const repliedName = replyTo.from?.first_name ?? "某人";
-    if (repliedText) {
-      msg = `[回复 ${repliedName}: "${repliedText}"]\n${msg}`;
+    const replyUid = replyTo.from?.id?.toString() ?? "";
+    const replyName = replyTo.from?.first_name ?? "某人";
+    const replyText = replyTo.text ?? replyTo.caption ?? "";
+    let replyDesc = "";
+    if (replyText) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: "${replyText}"]`;
+    } else if (replyTo.photo?.length) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [图片]]`;
+    } else if (replyTo.sticker) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [贴纸: ${replyTo.sticker.emoji}]]`;
+    } else if (replyTo.video) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [视频]]`;
+    } else if (replyTo.animation) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [GIF动画]]`;
+    } else if (replyTo.video_note) {
+      replyDesc = `[回复 ${replyUid} ${replyName}: [视频消息]]`;
+    } else if (replyTo.document) {
+      const docName = replyTo.document.file_name ? `: ${replyTo.document.file_name}` : "";
+      replyDesc = `[回复 ${replyUid} ${replyName}: [文件${docName}]]`;
+    } else if (replyTo.audio) {
+      const audioName = replyTo.audio.title || replyTo.audio.file_name || "";
+      const audioLabel = audioName ? `: ${audioName}` : "";
+      replyDesc = `[回复 ${replyUid} ${replyName}: [音频${audioLabel}]]`;
+    }
+    if (replyDesc) {
+      msg = `${replyDesc}\n${msg}`;
     }
   }
 
@@ -109,9 +142,16 @@ function buildBufferLine(params: {
   stickerEmoji: string;
   hasImageContext: boolean;
   imageDescriptions: string[];
+  mediaDescriptors?: MediaDescriptor[];
   urls: string[];
+  replyToInfo?: { uid: string; name: string; text: string };
 }): string {
   const parts: string[] = [];
+  if (params.replyToInfo?.text) {
+    parts.push(
+      `[回复 ${params.replyToInfo.uid} ${params.replyToInfo.name}: "${params.replyToInfo.text.slice(0, 100)}"]`,
+    );
+  }
   if (params.rawText) parts.push(params.rawText);
   if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
   if (params.hasImageContext) {
@@ -120,6 +160,12 @@ function buildBufferLine(params: {
       parts.push(`[图片: ${desc}]`);
     } else {
       parts.push("[图片]");
+    }
+  }
+  if (params.mediaDescriptors?.length) {
+    for (const md of params.mediaDescriptors) {
+      const line = md.description ? `[${md.label}: ${md.description}]` : `[${md.label}]`;
+      parts.push(line);
     }
   }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
@@ -167,19 +213,19 @@ async function sendAiMessages(params: {
   chatId: number;
   replyToMessageId: number;
   messages: string[];
-  stickerEmoji: string | null;
+  stickerFileId: string | null;
 }): Promise<void> {
-  const { ctx, chatId, replyToMessageId, messages, stickerEmoji } = params;
+  const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
 
   if (messages.length === 0) {
     // No text messages — if there's a sticker, send it with a reply reference
-    if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+    if (stickerFileId) {
       try {
-        await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji], {
+        await ctx.api.sendSticker(chatId, stickerFileId, {
           reply_parameters: { message_id: replyToMessageId },
         });
       } catch (err) {
-        logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+        logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
       }
     }
     return;
@@ -217,11 +263,11 @@ async function sendAiMessages(params: {
   }
 
   // Dispatch sticker after all text messages, if any
-  if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+  if (stickerFileId) {
     try {
-      await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji]);
+      await ctx.api.sendSticker(chatId, stickerFileId);
     } catch (err) {
-      logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+      logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
     }
   }
 }
@@ -229,10 +275,6 @@ async function sendAiMessages(params: {
 const MAX_DISMISS_RETRIES = 3;
 
 const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]";
-
-function pickRandomStickerEmoji(): string {
-  return STICKER_EMOJIS[Math.floor(Math.random() * STICKER_EMOJIS.length)]!;
-}
 
 /**
  * Handle an AI turn: classify the message, run the full AI pipeline with
@@ -346,12 +388,17 @@ async function handleAiTurn(params: {
             chatId,
             replyToMessageId,
             messages: [result.rawText],
-            stickerEmoji: fallbackEmoji,
+            stickerFileId: getStickerFileId(fallbackEmoji),
           });
         } else {
           touchBotActivity();
-          pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${fallbackEmoji}]`);
-          const stickerFileId = MIAOHAHA_STICKERS[fallbackEmoji];
+          const stickerFileId = getStickerFileId(fallbackEmoji);
+          pushMessage(
+            config.tgGroupId,
+            "bot",
+            config.botUsername,
+            `[贴纸 ${fallbackEmoji}: ${stickerFileId || "unknown"}]`,
+          );
           if (stickerFileId) {
             try {
               await ctx.api.sendSticker(chatId, stickerFileId, {
@@ -381,8 +428,15 @@ async function handleAiTurn(params: {
     }
 
     // Sticker-only: push a sticker marker so the buffer stays coherent
-    if (result.messages.length === 0 && result.stickerEmoji) {
-      pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${result.stickerEmoji}]`);
+    if (result.messages.length === 0 && result.stickerFileId) {
+      const sticker = getStickerByFileId(result.stickerFileId);
+      const emoji = sticker?.emoji[0] ?? "🐱";
+      pushMessage(
+        config.tgGroupId,
+        "bot",
+        config.botUsername,
+        `[贴纸 ${emoji}: ${result.stickerFileId}]`,
+      );
     }
 
     await sendAiMessages({
@@ -390,7 +444,7 @@ async function handleAiTurn(params: {
       chatId,
       replyToMessageId,
       messages: result.messages,
-      stickerEmoji: result.stickerEmoji,
+      stickerFileId: result.stickerFileId,
     });
   } catch (err) {
     logger.error({ err }, "handleAiTurn: AI turn failed");
@@ -433,8 +487,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       imageDataUrls,
       imageDescriptions: cachedImageDescriptions,
       stickerEmoji,
+      stickerContent,
       urlFetchPromise,
+      mediaDescriptors: cachedMediaDescriptors,
+      pendingMediaThumbnails,
     } = await extractContent(ctx, msg, { rawText, entities });
+
+    // Build sticker display text: Gemini description + file_id for adoption tool
+    const stickerDisplay = stickerContent?.description
+      ? `${stickerContent.description} (sticker_id: ${stickerContent.fileId})`
+      : stickerEmoji;
 
     // Merge cached descriptions with fresh Gemini-described images.
     const imageDescriptions = [...cachedImageDescriptions];
@@ -447,13 +509,57 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       }
     }
 
+    // Describe media thumbnails (video/animation/video_note/document/audio)
+    const mediaDescriptors: MediaDescriptor[] = [...cachedMediaDescriptors];
+    for (const pt of pendingMediaThumbnails) {
+      try {
+        const mediaType = pt.label.replace(/:.*$/, "");
+        const desc = await describeImage(pt.dataUrl, rawText, mediaType);
+        logger.info({ label: pt.label, desc: desc.slice(0, 80) }, "media thumbnail described");
+        mediaDescriptors.push({ label: pt.label, description: desc });
+        if (desc) {
+          cacheImage(pt.fileId, { description: desc }).catch((err: unknown) => {
+            logger.warn({ err, fileId: pt.fileId }, "media thumbnail cache failed");
+          });
+        }
+      } catch (err) {
+        logger.warn({ err, label: pt.label }, "failed to describe media thumbnail");
+        mediaDescriptors.push({ label: pt.label, description: "" });
+      }
+    }
+
+    // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
+    const replyTo = msg.reply_to_message;
+    const isRepliedToBot =
+      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
+      replyTo?.from?.id === botId;
+    const isMentioned = entities.some((e) => {
+      if (e.type !== "mention") return false;
+      const mention = rawText.slice(e.offset, e.offset + e.length);
+      return (
+        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
+        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
+      );
+    });
+
     // 4. Push user's message into the buffer ONCE, up front.
+    const replyToInfo =
+      replyTo && !isRepliedToBot
+        ? {
+            uid: replyTo.from?.id?.toString() ?? "",
+            name: replyTo.from?.first_name ?? "某人",
+            text: replyTo.text ?? replyTo.caption ?? "",
+          }
+        : undefined;
+
     const bufferLine = buildBufferLine({
       rawText,
-      stickerEmoji,
+      stickerEmoji: stickerDisplay,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
       imageDescriptions,
+      mediaDescriptors,
       urls,
+      ...(replyToInfo ? { replyToInfo } : {}),
     });
     if (bufferLine) {
       pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferLine);
@@ -546,20 +652,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    // 9. Trigger detection (@mention or reply-to-bot) — needed before morning logic
-    const isMentioned = entities.some((e) => {
-      if (e.type !== "mention") return false;
-      const mention = rawText.slice(e.offset, e.offset + e.length);
-      return (
-        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
-        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
-      );
-    });
-    const replyTo = msg.reply_to_message;
-    const isRepliedToBot =
-      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
-      replyTo?.from?.id === botId;
-
     // 10. Morning greeting logic
     let systemHint: string | null = null;
     const now = Date.now();
@@ -613,6 +705,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 12. If the bot wasn't pinged, we're done.
     if (!isMentioned && !isRepliedToBot) return;
 
+    // Reset proactive cooldown immediately to prevent double-reply.
+    touchBotActivity();
+
     // 13. Love confession → templated rejection (no full AI pipeline needed)
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveRejection(user);
@@ -628,10 +723,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       displayName,
       imageDescriptions,
       hasImage: imageDataUrls.length > 0,
-      stickerEmoji,
+      stickerEmoji: stickerDisplay,
       replyTo,
       isRepliedToBot,
       urlContents,
+      mediaDescriptors,
     });
 
     await handleAiTurn({
@@ -685,11 +781,18 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const displayName = user.nickname || from.first_name || "大哥哥";
 
     // Push the edited text into the buffer so the AI sees the correction
+    let editedBuffer = rawText;
+    if (replyTo && !isRepliedToBot) {
+      const replyText = replyTo.text ?? replyTo.caption ?? "";
+      if (replyText) {
+        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyTo.from?.first_name ?? "某人"}: "${replyText.slice(0, 100)}"] ${rawText}`;
+      }
+    }
     pushMessage(
       config.tgGroupId,
       from.id.toString(),
       displayName,
-      rawText.slice(0, MAX_BUFFER_TEXT),
+      editedBuffer.slice(0, MAX_BUFFER_TEXT),
     );
 
     // URL handling (simpler: no images in edit flow)
@@ -740,6 +843,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       imageDescriptions: [],
       hasImage: false,
       stickerEmoji: "",
+      mediaDescriptors: [],
       replyTo,
       isRepliedToBot,
       urlContents,

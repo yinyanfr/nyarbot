@@ -20,9 +20,16 @@ handlers/index.ts (setupHandlers)
     │     ├─ URL detection (entity + regex fallback)
     │     ├─ Image: cache lookup → download → Gemini description
     │     │     (includes reply-to images: msg.reply_to_message.photo)
-    │     └─ Sticker emoji extraction
+    │     ├─ Media thumbnails: video/animation/video_note/document/audio
+    │     │     → cache lookup (thumbnail file_id) → download thumbnail
+    │     │     → Gemini description (shared image cache)
+    │     │     (includes reply-to media; no ffmpeg — Telegram pre-generates thumbnails)
+    │     └─ Sticker: cache lookup (received_stickers) → download →
+    │           convert format (webm→webp via ffmpeg) → Gemini description
+    │           → cache to received_stickers (only if description succeeds)
     ├─ Buffer push (conversation-buffer.ts)
     │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
+    │     └─ Media: push type-tagged descriptions ("[视频: desc]", "[GIF动画: desc]", etc.)
     ├─ Image caching (firestore.ts) — cache ALL images immediately after Gemini describes them
     ├─ Command routing (match-command.ts)
     │     ├─ /help
@@ -47,7 +54,7 @@ handlers/index.ts (setupHandlers)
     ├─ AI turn (handleAiTurn → generateAiTurn)
     │     ├─ System prompt (buildSystemPrompt + buildLateBindingPrompt)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
-    │     │               deleteMemory, sendSticker
+    │     │               deleteMemory, sendSticker, adoptSticker
     │     ├─ Conditional: webSearch (tavilySearch, when needsSearch=true)
     │     ├─ Dismiss retry (up to 3×, escalating reply hint)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
@@ -64,25 +71,26 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 
 ### Available Tools
 
-| Tool           | Purpose                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| `send_message` | Send a message to the group (required to speak; can be called multiple times) |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                             |
-| `saveMemory`   | Record a memory about a group member (uid validated against recent members)   |
-| `setNickname`  | Set/update a group member's preferred nickname                                |
-| `deleteMemory` | Remove a specific memory about a group member                                 |
-| `sendSticker`  | Select a Miaohaha sticker emoji to send alongside or instead of text          |
-| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)     |
+| Tool           | Purpose                                                                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `send_message` | Send a message to the group (required to speak; can be called multiple times)                                                                                                        |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                                                                                                                                    |
+| `saveMemory`   | Record a memory about a group member (uid validated against recent members)                                                                                                          |
+| `setNickname`  | Set/update a group member's preferred nickname                                                                                                                                       |
+| `deleteMemory` | Remove a specific memory about a group member                                                                                                                                        |
+| `sendSticker`  | Select a sticker by its Chinese description (numbered list), with multi-level fallback: exact/substring → DeepSeek Flash semantic match → emoji → random. Returns file_id directly.  |
+| `adoptSticker` | Adopt a user-sent sticker into the bot's library (from `received_stickers` cache). Sets `stickerFileId` so the sticker is sent to chat. Rejects stickers without valid descriptions. |
+| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)                                                                                                            |
 
 ### AiTurnResult
 
 ```typescript
 type AiTurnResult =
-  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 ```
 
-- **`send`**: One or more messages + optional sticker. Sent via `sendAiMessages()` which formats Markdown→HTML, staggers messages (400ms), and dispatches stickers.
+- **`send`**: One or more messages + optional sticker (file_id). Sent via `sendAiMessages()` which formats Markdown→HTML, staggers messages (400ms), and dispatches stickers directly by file_id.
 - **`dismiss`**: Model chose silence. `rawText` captures any inner monologue as fallback for retry.
 
 ### Dismiss Retry
@@ -146,7 +154,7 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
+- **Conversation buffer**: In-memory ring buffer (max 60 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Image cache**: Firestore `images/{fileId}` with 30-day TTL. On cache hit, the stored description is reused instead of re-downloading and re-describing the image.
 
