@@ -54,8 +54,9 @@ handlers/index.ts（setupHandlers）
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-    │     │           deleteMemory、sendSticker、adoptSticker
-    │     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
+│     │           deleteMemory、sendSticker、adoptSticker
+│     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
+│     ├─ 可选：writeDiary → firestore.ts（diary/{date}）
     │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
     │     └─ 通过 sendAiMessages 发送（打字指示、消息间隔、贴纸分发）
@@ -80,6 +81,7 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 | `deleteMemory` | 删除关于群友的指定记忆                                                                                                            |
 | `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级回退：精确/子串 → DeepSeek Flash 语义匹配 → emoji → 随机。直接返回 file_id。                |
 | `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。设置 `stickerFileId` 以便贴纸发送到聊天。拒绝无有效描述的贴纸。 |
+| `writeDiary`   | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。                                                 |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                             |
 
 ### AiTurnResult
@@ -210,3 +212,41 @@ type AiTurnResult =
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。
 
 主动插话检查器在连续 5 次失败后停止。
+
+## 日记系统
+
+Bot 通过 `writeDiary` AI 工具记录对话观察笔记。由模型决定什么值得记录——无频率限制，无规则提取。
+
+### 观察记录
+
+- `writeDiary` 工具将自然语言观察写入 Firestore `diary/{YYYY-MM-DD}`，使用 `arrayUnion`。
+- 每条观察包含 `ts`（毫秒时间戳）和 `content`（观察文本）。
+- 观察按日期累积在同一文档中。
+
+### 午夜生成
+
+一个 60 秒间隔定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中）检测 UTC+8 日期变化：
+
+1. 日期变更时，从 Firestore 获取昨天的日记条目。
+2. 如果有条目，调用 DeepSeek v4 Pro（`proThinkModel`）以系统提示词引导撰写自然的猫娘第一人称日记。
+3. 生成的日记保存到 Firestore（`diary` 字段 + `generatedAt` 时间戳）。
+4. 如果配置了 `GITHUB_TOKEN` 和 `GITHUB_REPO`，日记通过 GitHub Content API（`src/services/github.ts`）推送到 `nyarbot-diary` Hexo 博客。
+5. GitHub 推送触发 GitHub Actions 工作流，构建并部署到 GitHub Pages。
+
+### /diary 管理员命令
+
+`/diary` 命令（私聊，仅管理员）使用相同的 `generateDiaryForDate()` 函数按需从今天的条目生成日记。仅为预览——不保存到 Firestore，不推送到 GitHub。
+
+### Firestore Schema
+
+```
+diary/{YYYY-MM-DD}
+  ├── date: string（如 "2026-05-13"）
+  ├── entries: DiaryEntry[]  （via arrayUnion）
+  ├── diary?: string         （生成的日记文本）
+  └── generatedAt?: number   （时间戳）
+```
+
+### 时区
+
+所有日期格式化使用 UTC+8（`Asia/Shanghai`），集中在 `src/libs/time.ts` 中通过 `dayjs` 实现。函数：`todayDateStr()`、`yesterdayDateStr()`、`formatTimestamp()`、`formatSystemPromptTime()`。

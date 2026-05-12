@@ -16,6 +16,7 @@
 - 🌅 **早安问候** — `/nighty` 或说晚安后，8 小时后下次发言自动收到个性化早安
 - 💔 **好人卡** — `/love` 或告白时根据记忆傲娇地发好人卡
 - 🏷️ **昵称 & 记忆** — 跟她说「叫我XX」设置昵称，「记住XXX」记录记忆
+- 📔 **日记系统** — bot 在群聊中自动记录观察笔记，每日午夜生成一篇猫娘日记，发布到 Hexo 博客
 - 🎯 **主动插话** — 两阶段探测：廉价模型判断话题相关性，通过后完整模型生成回复
 - 🎨 **贴纸回复** — 通过中文描述选择贴纸（多级匹配回退），可单独发或随文字发送
 - 🔄 **沉默重试** — 被触发但模型选择沉默时自动重试最多 3 次，附加强制回复提示；仍沉默则发送原始文本或贴纸兜底
@@ -33,6 +34,7 @@
 | 图片识别          | Gemini 2.5 Flash (via Cloudflare AI Gateway)          |
 | 网页搜索          | `@tavily/ai-sdk`                                      |
 | 数据库            | `firebase-admin` (Firestore)                          |
+| 日期处理          | `dayjs` (UTC+8, Asia/Shanghai)                        |
 | 运行时            | Node.js, TypeScript (ESM, moduleResolution: nodenext) |
 
 ---
@@ -65,14 +67,17 @@ src/
 │   ├── format-telegram.ts      # Markdown→Telegram HTML 转换（LaTeX→Unicode）
 │   ├── proactive.ts            # 主动插话：ProactiveCallbacks 接口、
 │   │                           #   两阶段探测、冷却逻辑、贴纸/打字指示分发
+│   ├── diary.ts                # 日记系统：午夜定时器、按日期生成日记
+│   ├── time.ts                 # dayjs 时区工具（UTC+8）
 │   ├── telegram-image.ts       # Telegram 文件下载 → base64 data URL
 │   ├── logger.ts                # pino 日志
 │   └── index.ts                # barrel 重导出
 ├── services/
 │   ├── index.ts                # Firebase Admin SDK 初始化
-│   ├── firestore.ts            # Firestore CRUD（用户、图片缓存、晚安/早安时间戳）
+│   ├── firestore.ts            # Firestore CRUD（用户、图片缓存、日记、晚安/早安时间戳）
+│   ├── github.ts               # GitHub Content API 推送日记到 Hexo 博客
 │   └── serviceAccountKey.json  # Firebase 凭证（gitignored）
-└── global.d.ts                 # User 类型定义
+└── global.d.ts                 # User、DiaryEntry 类型定义
 ```
 
 详见 [架构文档](docs/architecture.zh-CN.md)。
@@ -112,6 +117,7 @@ node dist/app.js
 | `/nighty` | 晚安，8 小时后下次发言自动早安问候 |
 | `/status` | bot 运行状态（仅管理员）           |
 | `/reset`  | 清除对话历史缓冲区（仅管理员）     |
+| `/diary`  | 生成今日日记预览（仅管理员，私聊） |
 
 | 场景        | 触发方式                                           |
 | ----------- | -------------------------------------------------- |
@@ -121,6 +127,7 @@ node dist/app.js
 | 记录记忆    | 跟她说「记住XXX」                                  |
 | 分享链接    | 直接发链接（@她可获得内容总结，不 @ 则写入上下文） |
 | 发图片/贴纸 | 直接发送，Gemini 识别后猫娘评价                    |
+| 日记记录    | bot 在群聊中自动通过 writeDiary 工具记录观察笔记   |
 
 ---
 
@@ -138,6 +145,8 @@ node dist/app.js
 | `CF_AIG_TOKEN`     | ✅   | Cloudflare AI Gateway Token（Gemini 图片识别） |
 | `CF_ACCOUNT_ID`    | ✅   | Cloudflare 账户 ID（Gemini 图片识别）          |
 | `BOT_USERNAME`     | ❌   | Bot 用户名，默认 `nyarbot`                     |
+| `GITHUB_TOKEN`     | ❌   | GitHub PAT，用于推送日记到 Hexo 博客           |
+| `GITHUB_REPO`      | ❌   | GitHub 仓库名，格式 `owner/repo`               |
 | `LOG_LEVEL`        | ❌   | 日志级别，默认 `info`                          |
 
 ---

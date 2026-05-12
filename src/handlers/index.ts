@@ -302,10 +302,12 @@ async function handleAiTurn(params: {
   const chatId = ctx.chatId;
   if (chatId === undefined) throw new Error("no chat in context");
 
-  // Signal "typing..." while the AI generates
-  await ctx.api.sendChatAction(chatId, "typing").catch(() => {
-    // Best-effort; typing indicators are non-critical
-  });
+  // Signal "typing..." while the AI generates.
+  // Because DeepSeek can take 10-20s, refresh the typing action every 4.5s.
+  const typingTimer = setInterval(() => {
+    ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+  }, 4500);
+  await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
 
   const history = getHistory(config.tgGroupId);
   const recentConversation = formatHistoryAsContext(history);
@@ -374,6 +376,7 @@ async function handleAiTurn(params: {
 
       // All retries exhausted — fallback to rawText or a sticker
       if (result.action === "dismiss") {
+        clearInterval(typingTimer);
         logger.warn("handleAiTurn: all retries dismissed, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
 
@@ -417,11 +420,13 @@ async function handleAiTurn(params: {
     }
 
     if (result.action === "dismiss") {
+      clearInterval(typingTimer);
       logger.info("handleAiTurn: model chose to dismiss (silence)");
       return;
     }
 
     // result.action === "send"
+    clearInterval(typingTimer);
     touchBotActivity();
 
     // Push all messages to the conversation buffer
@@ -449,6 +454,7 @@ async function handleAiTurn(params: {
       stickerFileId: result.stickerFileId,
     });
   } catch (err) {
+    clearInterval(typingTimer);
     logger.error({ err }, "handleAiTurn: AI turn failed");
     await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
       logger.warn({ err: replyErr }, "handleAiTurn: fallback reply failed");
@@ -842,35 +848,22 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       editedBuffer.slice(0, MAX_BUFFER_TEXT),
     );
 
-    // URL handling (simpler: no images in edit flow)
-    const urls: string[] = [];
-    for (const e of entities) {
-      if (e.type === "url") urls.push(rawText.slice(e.offset, e.offset + e.length));
-    }
-    const regexMatches = rawText.match(/https?:\/\/[^\s]+/g) ?? [];
-    for (const m of regexMatches) {
-      const cleaned = m.replace(/[)\],.;:!?，。；：！？」』】》]+$/u, "");
-      if (!urls.includes(cleaned)) urls.push(cleaned);
-    }
-    const { fetchUrlContent } = await import("../libs/ai.js");
-    const urlContents = new Map<string, string | null>();
-    if (urls.length > 0) {
-      const entries = await Promise.all(
-        urls.map(async (u) => [u, await fetchUrlContent(u)] as const),
-      );
-      for (const [u, c] of entries) {
-        urlContents.set(u, c);
-        if (c) {
-          if (c.startsWith("[Tweet ")) {
-            pushMessage(config.tgGroupId, "system", "推文", c.slice(0, MAX_BUFFER_TEXT));
-          } else {
-            pushMessage(
-              config.tgGroupId,
-              "system",
-              "链接",
-              `[链接内容: ${c.slice(0, MAX_BUFFER_TEXT)}]`,
-            );
-          }
+    // Use extractContent for consistent parsing of URLs and other entities
+    // We don't process images/stickers during edits, so those arrays will just be empty.
+    const { urlFetchPromise } = await extractContent(ctx, msg, { rawText, entities });
+    const urlContents = await urlFetchPromise;
+
+    for (const [, content] of urlContents) {
+      if (content) {
+        if (content.startsWith("[Tweet ")) {
+          pushMessage(config.tgGroupId, "system", "推文", content.slice(0, MAX_BUFFER_TEXT));
+        } else {
+          pushMessage(
+            config.tgGroupId,
+            "system",
+            "链接",
+            `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
+          );
         }
       }
     }

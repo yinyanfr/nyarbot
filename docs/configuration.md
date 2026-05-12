@@ -14,6 +14,8 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 | `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway token for Gemini vision calls                                 |
 | `CF_ACCOUNT_ID`    | ✅       | Cloudflare account ID for AI Gateway                                                |
 | `BOT_USERNAME`     | ❌       | Bot username (default: `nyarbot`)                                                   |
+| `GITHUB_TOKEN`     | ❌       | GitHub PAT for pushing diaries to Hexo blog (format `ghp_...`)                      |
+| `GITHUB_REPO`      | ❌       | GitHub repo in `owner/repo` format (e.g., `yinyanfr/nyarbot-diary`)                 |
 | `LOG_LEVEL`        | ❌       | Pino log level (default: `info`)                                                    |
 | `PORT`             | ❌       | Unused (long polling, no webhook server)                                            |
 
@@ -30,6 +32,7 @@ Firestore collections used:
 | ----------------- | ---------------- | ------------------------------------------------------------------------ |
 | `users/{uid}`     | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?` |
 | `images/{fileId}` | Telegram file_id | `fileId`, `description`, `cachedAt`                                      |
+| `diary/{date}`    | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                            |
 
 ## DeepSeek Models
 
@@ -40,6 +43,7 @@ The bot uses two models with two thinking-mode variants each:
 | `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, love rejection, probe gate, image/URL description             |
 | `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss |
 | `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss           |
+| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Diary generation (midnight summary and `/diary` command)                                 |
 
 Thinking mode is injected via a custom `fetch` wrapper that modifies the request body before sending. Base URL is `https://api.deepseek.com` (no `/v1` suffix).
 
@@ -61,6 +65,7 @@ The bot uses `generateText()` (not streaming) with the following tools exposed t
 | `setNickname`  | Set/update a group member's preferred nickname                   |
 | `deleteMemory` | Remove a specific memory about a group member                    |
 | `sendSticker`  | Select a sticker by Chinese description (numbered list)          |
+| `writeDiary`   | Record an observational note about the conversation              |
 | `webSearch`    | Tavily search (only when `needsSearch=true` from classification) |
 
 When `needsSearch=true`, a mandatory instruction is appended to ensure the model calls `webSearch` before answering.

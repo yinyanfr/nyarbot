@@ -9,6 +9,7 @@
 | `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
 | `/status` | Admin only | Show uptime, buffer size, memory count, image cache count  |
 | `/reset`  | Admin only | Clear the conversation buffer                              |
+| `/diary`  | Admin only | Generate today's diary preview (private chat only)         |
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 
@@ -103,6 +104,7 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `deleteMemory` | Remove a specific memory about a group member                                     |
 | `sendSticker`  | Select a sticker by Chinese description (numbered list) with multi-level match    |
 | `adoptSticker` | Adopt a user-sent sticker into the bot's library; sends sticker to chat           |
+| `writeDiary`   | Record a diary observation about the current conversation                         |
 | `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)         |
 
 All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
@@ -117,8 +119,9 @@ User message → classifyMessage() → generateAiTurn()
                                         ├─ Model calls saveMemory → Firestore write
                                         ├─ Model calls setNickname → Firestore write
                                         ├─ Model calls deleteMemory → Firestore delete
-                                        ├─ Model calls sendSticker → file_id saved
-                                        ├─ Model calls webSearch → Tavily search executed
+                                         ├─ Model calls sendSticker → file_id saved
+                                         ├─ Model calls writeDiary → Firestore diary write
+                                         ├─ Model calls webSearch → Tavily search executed
                                         │
                                         ▼
                                  AiTurnResult

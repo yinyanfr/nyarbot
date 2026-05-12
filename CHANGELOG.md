@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0] — 2026-05-13
+
+### Added
+
+- **Diary system** (`src/libs/diary.ts`, `src/libs/ai.ts`, `src/services/firestore.ts`). `writeDiary` AI tool lets the model record conversational observations in natural language. Observations stored in Firestore `diary/{YYYY-MM-DD}` via `arrayUnion`. Midnight (UTC+8) auto-generates yesterday's consolidated diary using DeepSeek v4 Pro with thinking. Admin `/diary` command in private chat generates today's diary on demand for preview.
+- **Hexo blog publishing** (`src/services/github.ts`, `src/configs/env.ts`). Midnight-generated diaries are automatically pushed to the `nyarbot-diary` Hexo blog via GitHub Content API (`PUT /repos/{repo}/contents/{path}`). Uses `GITHUB_TOKEN` and `GITHUB_REPO` env vars (both optional). Hexo front matter with title, date, and tags. SHA-based idempotent updates.
+- **GitHub Actions deploy workflow** (`nyarbot-diary/.github/workflows/deploy.yml`). Push to main → `hexo generate` → deploy to GitHub Pages via official `actions/deploy-pages`.
+- **dayjs date refactoring** (`src/libs/time.ts`). Centralized timezone-aware date utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`. Fixed TZ `Asia/Shanghai`. Replaced all manual `new Date()` offset math across the codebase.
+
+### Changed
+
+- **Private admin handler expanded** (`src/handlers/index.ts`). Now handles `/status`, `/reset`, and `/diary` commands in DM with bot admin.
+
+### Fixed
+
+- **`writeGeneratedDiary` idempotency** (`src/services/firestore.ts`). Changed from `update()` to `set({ merge: true })`, matching `writeDiaryEntry`'s pattern and preventing `NOT_FOUND` if the document doesn't exist yet.
+
+### Added (dependencies)
+
+- `dayjs`
+
 ## [0.6.0] — 2026-05-12
 
 ### Added

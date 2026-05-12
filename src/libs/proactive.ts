@@ -117,8 +117,17 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       return;
     }
 
+    // Lock the cooldown slot *before* calling generateAiTurn
+    // This prevents a race condition where users chat during the proactive generation
+    // window and end up triggering a double bot response.
+    touchBotActivity();
+
     // Signal "typing..." to the group while the full model runs
-    await callbacks.sendChatAction("typing");
+    // Use an interval to keep it alive during long DeepSeek thinking phases
+    const typingTimer = setInterval(() => {
+      callbacks.sendChatAction("typing").catch(() => void 0);
+    }, 4500);
+    await callbacks.sendChatAction("typing").catch(() => void 0);
 
     const formattedHistory = formatHistoryAsContext(recentHistory);
 
@@ -129,19 +138,24 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       .slice(-5);
 
     // Use the current conversation context for the proactive response
-    const result = await generateAiTurn({
-      userContext: { uid: "proactive", nickname: "", memories: [] },
-      userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
-      recentConversation: formattedHistory,
-      recentMembers,
-      allowedUids,
-      tier: "simple", // proactive messages should always be short
-      needsSearch: false,
-      systemHint: null,
-      wasMentioned: false,
-      wasRepliedTo: false,
-      recentBotMessages,
-    });
+    let result;
+    try {
+      result = await generateAiTurn({
+        userContext: { uid: "proactive", nickname: "", memories: [] },
+        userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
+        recentConversation: formattedHistory,
+        recentMembers,
+        allowedUids,
+        tier: "simple", // proactive messages should always be short
+        needsSearch: false,
+        systemHint: null,
+        wasMentioned: false,
+        wasRepliedTo: false,
+        recentBotMessages,
+      });
+    } finally {
+      clearInterval(typingTimer);
+    }
 
     if (result.action === "dismiss") {
       logger.info("proactive: full model chose to dismiss after probe activation");

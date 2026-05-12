@@ -16,6 +16,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
 - 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
+- 📔 **Diary System** — Bot auto-records observational notes during chat, generates a consolidated catgirl diary at midnight, publishes to Hexo blog
 - 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
 - 🎨 **Sticker Replies** — Select stickers by Chinese description (multi-level matching), standalone or alongside text
 - 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
@@ -33,6 +34,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 | Vision                 | Gemini 2.5 Flash (via Cloudflare AI Gateway)          |
 | Web Search             | `@tavily/ai-sdk`                                      |
 | Database               | `firebase-admin` (Firestore)                          |
+| Date/Time              | `dayjs` (UTC+8, Asia/Shanghai)                        |
 | Runtime                | Node.js, TypeScript (ESM, moduleResolution: nodenext) |
 
 ---
@@ -66,14 +68,17 @@ src/
 │   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
 │   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
 │   │                           #   two-stage probe, cooldown, sticker/typing dispatch
+│   ├── diary.ts                # Diary: midnight timer, per-date diary generation
+│   ├── time.ts                 # dayjs timezone utils (UTC+8)
 │   ├── telegram-image.ts       # Telegram file download → base64 data URL
 │   ├── logger.ts                # Pino logger
 │   └── index.ts                # Barrel re-exports
 ├── services/
 │   ├── index.ts                # Firebase Admin SDK initialization
-│   ├── firestore.ts            # Firestore CRUD (users, image cache, nighty/morning)
+│   ├── firestore.ts            # Firestore CRUD (users, image cache, diary, nighty/morning)
+│   ├── github.ts               # GitHub Content API: push diary to Hexo blog
 │   └── serviceAccountKey.json  # Firebase credentials (gitignored)
-└── global.d.ts                 # User type definition
+└── global.d.ts                 # User, DiaryEntry type definitions
 ```
 
 See [Architecture Docs](docs/architecture.md) for details.
@@ -113,6 +118,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | `/nighty` | Say goodnight; bot sends a morning greeting 8+ hours later  |
 | `/status` | Bot status — uptime, buffer size, memory count (admin only) |
 | `/reset`  | Clear conversation history buffer (admin only)              |
+| `/diary`  | Generate today's diary preview (admin only, private chat)   |
 
 | Scenario           | Trigger                                                            |
 | ------------------ | ------------------------------------------------------------------ |
@@ -122,6 +128,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | Save memory        | Tell her "remember XXX"                                            |
 | Share URL          | Send a link directly (@ her for a summary, otherwise context only) |
 | Send image/sticker | Send directly, Gemini identifies and catgirl comments              |
+| Diary observation  | Bot auto-records notes via writeDiary tool during conversation     |
 
 ---
 
@@ -139,6 +146,8 @@ See [Configuration Docs](docs/configuration.md) for details.
 | `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway Token (for Gemini vision) |
 | `CF_ACCOUNT_ID`    | ✅       | Cloudflare Account ID (for Gemini vision)       |
 | `BOT_USERNAME`     | ❌       | Bot username, default `nyarbot`                 |
+| `GITHUB_TOKEN`     | ❌       | GitHub PAT for pushing diaries to Hexo blog     |
+| `GITHUB_REPO`      | ❌       | GitHub repo in `owner/repo` format              |
 | `LOG_LEVEL`        | ❌       | Log level, default `info`                       |
 
 ---

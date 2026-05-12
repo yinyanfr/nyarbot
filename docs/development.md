@@ -69,6 +69,19 @@ DeepSeek outputs Markdown (bold, italic, code, links, LaTeX math). Telegram's Bo
 
 When the user @mentions or replies to the bot, silence is almost always wrong — the user expects a response. Retrying with escalating hints ensures the model eventually speaks. For proactive messages, silence is a valid and expected choice, so no retry is needed.
 
+### Why a diary system?
+
+The bot records conversational observations via the `writeDiary` AI tool rather than post-hoc extraction. The model decides what's worth recording based on the conversation context — no rule-based triggers or frequency limits. At midnight (UTC+8), observations are consolidated into a natural first-person catgirl diary using DeepSeek v4 Pro with thinking. The generated diary is pushed to a Hexo blog via GitHub Content API for public reading.
+
+### Why dayjs for date handling?
+
+`dayjs` (2KB) was chosen over `date-fns`, `luxon`, or `Temporal` for:
+
+- Smallest bundle size with timezone support
+- Plugin system (`utc` + `timezone` plugins)
+- Moment.js-compatible API (familiar, concise)
+- All timezone-aware formatting centralized in `src/libs/time.ts` with fixed `Asia/Shanghai` TZ
+
 ### In-memory state
 
 The conversation buffer, user cache, update dedup set, and proactive timer state are all in-process memory. A restart loses all conversation context and the proactive checker stops. This is acceptable for a single-group personal bot.
@@ -118,4 +131,19 @@ interface CachedImage {
   description: string; // Gemini-generated Chinese description
   cachedAt: number; // ms since epoch, 30-day TTL
 }
+```
+
+### `diary/{date}`
+
+```typescript
+interface DiaryEntry {
+  ts: number; // ms since epoch
+  content: string; // natural-language observation
+}
+
+// Document fields:
+// date: string (e.g., "2026-05-13")
+// entries: DiaryEntry[] (via arrayUnion)
+// diary?: string (generated diary text)
+// generatedAt?: number (ms since epoch)
 ```

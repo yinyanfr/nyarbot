@@ -54,8 +54,9 @@ handlers/index.ts (setupHandlers)
     ├─ AI turn (handleAiTurn → generateAiTurn)
     │     ├─ System prompt (buildSystemPrompt + buildLateBindingPrompt)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
-    │     │               deleteMemory, sendSticker, adoptSticker
-    │     ├─ Conditional: webSearch (tavilySearch, when needsSearch=true)
+│     │               deleteMemory, sendSticker, adoptSticker
+│     ├─ Conditional: webSearch (tavilySearch, when needsSearch=true)
+│     ├─ Optional: writeDiary → firestore.ts (diary/{date})
     │     ├─ Dismiss retry (up to 3×, escalating reply hint)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
     │     └─ Send via sendAiMessages (typing indicator, stagger delay, sticker dispatch)
@@ -80,6 +81,7 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 | `deleteMemory` | Remove a specific memory about a group member                                                                                                                                        |
 | `sendSticker`  | Select a sticker by its Chinese description (numbered list), with multi-level fallback: exact/substring → DeepSeek Flash semantic match → emoji → random. Returns file_id directly.  |
 | `adoptSticker` | Adopt a user-sent sticker into the bot's library (from `received_stickers` cache). Sets `stickerFileId` so the sticker is sent to chat. Rejects stickers without valid descriptions. |
+| `writeDiary`   | Record a diary observation about the conversation in natural language. Stored in Firestore `diary/{YYYY-MM-DD}`.                                                                     |
 | `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)                                                                                                            |
 
 ### AiTurnResult
@@ -210,3 +212,41 @@ If cooldown has elapsed:
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.
 
 The proactive checker stops after 5 consecutive failures.
+
+## Diary System
+
+The bot records conversational observations via the `writeDiary` AI tool. The model decides what's worth recording — no frequency limits, no rule-based extraction.
+
+### Observation Recording
+
+- `writeDiary` tool writes a natural-language observation to Firestore `diary/{YYYY-MM-DD}` using `arrayUnion`.
+- Each observation has a `ts` (millisecond timestamp) and `content` (the observation text).
+- Observations accumulate in a single document per date.
+
+### Midnight Generation
+
+A 60-second interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`) detects UTC+8 date changes:
+
+1. When the date rolls over, it fetches yesterday's diary entries from Firestore.
+2. If entries exist, it calls DeepSeek v4 Pro (`proThinkModel`) with a system prompt to compose a natural first-person catgirl diary.
+3. The generated diary is saved to Firestore (`diary` field + `generatedAt` timestamp).
+4. If `GITHUB_TOKEN` and `GITHUB_REPO` are configured, the diary is pushed to the `nyarbot-diary` Hexo blog via GitHub Content API (`src/services/github.ts`).
+5. The GitHub push triggers a GitHub Actions workflow that builds and deploys to GitHub Pages.
+
+### Admin /diary Command
+
+The `/diary` command (private chat, admin only) generates a diary from today's entries on demand using the same `generateDiaryForDate()` function. This is a preview only — no save to Firestore, no GitHub push.
+
+### Firestore Schema
+
+```
+diary/{YYYY-MM-DD}
+  ├── date: string (e.g., "2026-05-13")
+  ├── entries: DiaryEntry[]  (via arrayUnion)
+  ├── diary?: string         (generated diary text)
+  └── generatedAt?: number   (timestamp)
+```
+
+### Timezone
+
+All date formatting uses UTC+8 (`Asia/Shanghai`), centralized in `src/libs/time.ts` via `dayjs`. Functions: `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`.
