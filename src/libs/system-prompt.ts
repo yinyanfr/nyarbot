@@ -1,4 +1,5 @@
 import type { User } from "../global.d.js";
+import { formatSystemPromptTime } from "./time.js";
 
 export interface RecentMember {
   uid: string;
@@ -12,12 +13,7 @@ export function buildSystemPrompt(
 ): string {
   const name = userContext.nickname || "大哥哥";
 
-  const now = new Date();
-  const utc8 = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
-  const weekdayStr = `周${weekdays[utc8.getUTCDay()]}`;
-  const timeStr = `${utc8.getUTCFullYear()}年${pad(utc8.getUTCMonth() + 1)}月${pad(utc8.getUTCDate())}日 ${weekdayStr} ${pad(utc8.getUTCHours())}:${pad(utc8.getUTCMinutes())} (UTC+8)`;
+  const timeStr = formatSystemPromptTime();
 
   const historySection = recentChatHistory
     ? `\n\n## 最近的群聊记录（供上下文参考，按时间从旧到新）\n---\n${recentChatHistory}\n---\n（以上是群聊上下文。当前对话如下）`
@@ -75,6 +71,7 @@ export function buildSystemPrompt(
 - 群友发图片或贴纸，用猫娘视角吐槽或夸夸。如果收到你觉得特别好看或有意思的贴纸，可以调用 adoptSticker 工具收入自己的贴纸库，然后用傲娇猫娘口吻告诉对方（如"哼，这图不错，本喵收下了~"、"好图喵，归我了"之类的，每次可以换不同的说法）。不是每张贴纸都要收——只收真心觉得好的。同样内容的不要重复收录。
 - 群友发视频、GIF动画、视频消息、文件或音频时，你会看到缩略图/封面的描述（如 [视频: 三个人在公园散步]、[GIF动画: 一只猫跳来跳去]、[文件: report.pdf: 一个数据表格的截图]）。注意这是视频/文件的**缩略图**，不是完整内容。根据缩略图描述来回应——比如描述画面内容、回应场景、或者坦然说看不到完整视频无法判断。不要把缩略图当成完整视频来假装看懂了。
 - 群友分享链接时，理解链接内容并给出回应。看不懂就用猫娘口吻说看不懂。
+- 遇到值得记住的趣事、重要的对话、你的感受和想法时，可以调用 writeDiary 工具写入日记。像写便签一样记录观察，不需要每条消息都记——只在有值得记住的事情时才写。
 - 群友有注册昵称的话优先用昵称称呼。
 - 群友向你告白→傲娇地发好人卡。
 - 中文为主。对方说英文你就傲娇地用 Chinglish 回复。

@@ -1,6 +1,7 @@
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import type { User } from "../global.d.ts";
 import { logger } from "../libs/logger.js";
+import { todayDateStr } from "../libs/time.js";
 
 // Lazy accessor: getFirestore() requires initializeApp() to have run first.
 // Resolving it at module-evaluation time breaks because ESM imports are hoisted
@@ -207,4 +208,37 @@ export async function setNightyTimestamp(uid: string, timestamp: number): Promis
 export async function setMorningGreeted(uid: string, timestamp: number): Promise<void> {
   await db().collection("users").doc(uid).update({ lastMorningGreet: timestamp });
   invalidateUserCache(uid);
+}
+
+// ---------------------------------------------------------------------------
+// Diary
+// ---------------------------------------------------------------------------
+
+import type { DiaryEntry } from "../global.d.js";
+
+export async function writeDiaryEntry(note: string): Promise<void> {
+  const date = todayDateStr();
+  const entry: DiaryEntry = { ts: Date.now(), content: note };
+  await db()
+    .collection("diary")
+    .doc(date)
+    .set(
+      {
+        date,
+        entries: FieldValue.arrayUnion(entry),
+      },
+      { merge: true },
+    );
+}
+
+export async function getDiaryEntries(date: string): Promise<DiaryEntry[]> {
+  const doc = await db().collection("diary").doc(date).get();
+  if (!doc.exists) return [];
+  const data = doc.data();
+  if (!data) return [];
+  return Array.isArray(data.entries) ? (data.entries as DiaryEntry[]) : [];
+}
+
+export async function writeGeneratedDiary(date: string, diary: string): Promise<void> {
+  await db().collection("diary").doc(date).set({ diary, generatedAt: Date.now() }, { merge: true });
 }

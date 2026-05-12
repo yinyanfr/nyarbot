@@ -10,6 +10,9 @@ import { logger, initAdminNotify } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { initStickerStore, stickerStoreReady } from "./libs/sticker-store.js";
+import { checkAndGenerateDiary } from "./libs/diary.js";
+
+let diaryTimer: ReturnType<typeof setInterval> | undefined;
 
 initFirebase();
 initStickerStore();
@@ -69,6 +72,10 @@ async function main(): Promise<void> {
 
   startProactiveChecker(proactiveCallbacks);
 
+  // Midnight diary generation: check every 60s if the UTC+8 date has changed
+  diaryTimer = setInterval(checkAndGenerateDiary, 60_000);
+  diaryTimer.unref?.();
+
   await bot.start({
     onStart(info) {
       logger.info(`nyarbot polling as @${info.username}`);
@@ -84,10 +91,12 @@ main().catch((err: unknown) => {
 // Graceful shutdown
 process.once("SIGINT", () => {
   stopProactiveChecker();
+  if (diaryTimer) clearInterval(diaryTimer);
   void bot.stop();
 });
 process.once("SIGTERM", () => {
   stopProactiveChecker();
+  if (diaryTimer) clearInterval(diaryTimer);
   void bot.stop();
 });
 

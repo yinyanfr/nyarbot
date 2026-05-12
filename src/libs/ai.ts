@@ -10,7 +10,12 @@ import {
   buildLateBindingPrompt,
   buildProbeSystemPrompt,
 } from "./system-prompt.js";
-import { updateUserMemory, removeUserMemory, updateUserNickname } from "../services/firestore.js";
+import {
+  updateUserMemory,
+  removeUserMemory,
+  updateUserNickname,
+  writeDiaryEntry,
+} from "../services/firestore.js";
 import {
   getStickerList,
   getStickerFileIdByDescription,
@@ -91,7 +96,7 @@ const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3-flash-prev
 
 const flashNoThinkModel = deepseekNoThinking.chat("deepseek-v4-flash");
 const flashThinkModel = deepseekThink.chat("deepseek-v4-flash");
-const proThinkModel = deepseekThink.chat("deepseek-v4-pro");
+export const proThinkModel = deepseekThink.chat("deepseek-v4-pro");
 
 // ---------------------------------------------------------------------------
 // Message classification (中文 prompt, fast model, thinking disabled)
@@ -323,6 +328,25 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     },
   });
 
+  const writeDiaryTool = tool({
+    description:
+      "记录值得记住的对话片段作为日记观察。写简短自然的观察（1-2句中文），像记笔记一样。" +
+      "适合记录的内容：有趣的事件、群友的情绪变化、重要的讨论、你自己的想法和感受。" +
+      "不要频繁记录——只在有值得记住的事情时才调用。",
+    inputSchema: z.object({
+      note: z.string().describe("一条简短的观察记录，中文，1-2句话"),
+    }),
+    execute: async ({ note }) => {
+      try {
+        await writeDiaryEntry(note);
+        return "日记已记录 ✓";
+      } catch (err) {
+        logger.error(err, "failed to write diary entry");
+        return "日记记录失败";
+      }
+    },
+  });
+
   const sendStickerTool = tool({
     description:
       "当你的回复内容很简短（如 噢、好的、很棒、哈哈），或者对话已经自然结束，可以发送一个贴纸代替或结束对话。" +
@@ -432,6 +456,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       saveMemory: saveMemoryTool,
       setNickname: setNicknameTool,
       deleteMemory: deleteMemoryTool,
+      writeDiary: writeDiaryTool,
       sendSticker: sendStickerTool,
       adoptSticker: adoptStickerTool,
       ...(needsSearch

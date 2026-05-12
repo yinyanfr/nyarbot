@@ -25,6 +25,8 @@ import {
 import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
 import { getStickerByFileId } from "../libs/sticker-store.js";
 import { touchBotActivity } from "../libs/proactive.js";
+import { generateDiaryForDate } from "../libs/diary.js";
+import { todayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
 import type { BotContext, BotInfo } from "./context.js";
@@ -458,6 +460,34 @@ async function handleAiTurn(params: {
 // Main entry point
 // ---------------------------------------------------------------------------
 
+async function buildStatusText(): Promise<string> {
+  const historyLen = getHistory(config.tgGroupId).length;
+  const uptime = process.uptime();
+  const mins = Math.floor(uptime / 60);
+  const hours = Math.floor(mins / 60);
+  const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
+  const mem = process.memoryUsage();
+  const rssMb = Math.round(mem.rss / 1024 / 1024);
+  const [memUsers, cachedImgs] = await Promise.all([
+    countUsersWithMemories().catch((err: unknown) => {
+      logger.warn({ err }, "countUsersWithMemories failed");
+      return null;
+    }),
+    countCachedImages().catch((err: unknown) => {
+      logger.warn({ err }, "countCachedImages failed");
+      return null;
+    }),
+  ]);
+  return [
+    "📊 nyarbot 状态",
+    `运行时间: ${uptimeStr}`,
+    `缓冲区消息数: ${historyLen}`,
+    `记忆用户数: ${memUsers ?? "?"}`,
+    `图片缓存数: ${cachedImgs ?? "?"}`,
+    `内存 RSS: ${rssMb} MB`,
+  ].join("\n");
+}
+
 export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
@@ -466,6 +496,47 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     if (isDuplicateUpdate(ctx.update.update_id)) return;
     const msg = ctx.message;
     if (!msg) return;
+
+    // 0. Private chat — admin commands only
+    if (ctx.chat?.type === "private") {
+      if (!msg.from || msg.from.id.toString() !== config.tgAdminUid) return;
+      const privText = msg.text ?? msg.caption ?? "";
+      const privEntities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+
+      if (matchCommand(privEntities, privText, "/status", botUsername)) {
+        const statusText = await buildStatusText();
+        await ctx.reply(statusText).catch((err: unknown) => {
+          logger.warn({ err }, "private /status reply failed");
+        });
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/reset", botUsername)) {
+        clearHistory(config.tgGroupId);
+        await ctx.reply("对话历史已清除喵~").catch((err: unknown) => {
+          logger.warn({ err }, "private /reset reply failed");
+        });
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diary", botUsername)) {
+        await ctx.reply("正在生成今日日记...").catch(() => void 0);
+        try {
+          const diary = await generateDiaryForDate(todayDateStr());
+          if (!diary) {
+            await ctx.reply("今天还没有日记记录喵~");
+            return;
+          }
+          await ctx.reply(diary);
+        } catch (err) {
+          logger.error({ err }, "private /diary failed");
+          await ctx.reply("生成日记时出错了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      return;
+    }
 
     // 1. Group filter
     if (ctx.chat.id.toString() !== config.tgGroupId) return;
@@ -606,31 +677,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         await replyAndTrack(ctx, "哼，这是主人才能用的命令喵~", msg.message_id);
         return;
       }
-      const historyLen = getHistory(config.tgGroupId).length;
-      const uptime = process.uptime();
-      const mins = Math.floor(uptime / 60);
-      const hours = Math.floor(mins / 60);
-      const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
-      const mem = process.memoryUsage();
-      const rssMb = Math.round(mem.rss / 1024 / 1024);
-      const [memUsers, cachedImgs] = await Promise.all([
-        countUsersWithMemories().catch((err: unknown) => {
-          logger.warn({ err }, "countUsersWithMemories failed");
-          return null;
-        }),
-        countCachedImages().catch((err: unknown) => {
-          logger.warn({ err }, "countCachedImages failed");
-          return null;
-        }),
-      ]);
-      const statusText = [
-        "📊 nyarbot 状态",
-        `运行时间: ${uptimeStr}`,
-        `缓冲区消息数: ${historyLen}`,
-        `记忆用户数: ${memUsers ?? "?"}`,
-        `图片缓存数: ${cachedImgs ?? "?"}`,
-        `内存 RSS: ${rssMb} MB`,
-      ].join("\n");
+      const statusText = await buildStatusText();
       await replyAndTrack(ctx, statusText, msg.message_id);
       return;
     }

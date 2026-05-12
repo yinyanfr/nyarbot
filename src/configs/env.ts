@@ -23,6 +23,8 @@ const config = {
   tavilyApiKey: process.env.TAVILY_API_KEY!,
   cfAigToken: process.env.CF_AIG_TOKEN!,
   cfAccountId: process.env.CF_ACCOUNT_ID!,
+  githubToken: process.env.GITHUB_TOKEN ?? "",
+  githubRepo: process.env.GITHUB_REPO ?? "",
 } as const;
 
 export default config;

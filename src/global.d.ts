@@ -8,3 +8,9 @@ export interface User {
   nightyTimestamp?: number; // timestamp of last goodnight (server time, ms)
   lastMorningGreet?: number; // timestamp of last morning greeting (prevents duplicates within same cycle)
 }
+
+/** A single diary observation written by the bot during conversation. */
+export interface DiaryEntry {
+  ts: number; // Unix timestamp in ms
+  content: string; // natural-language observation
+}
