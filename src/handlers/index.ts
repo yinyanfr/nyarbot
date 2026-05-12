@@ -22,7 +22,8 @@ import {
   formatHistoryAsContext,
   clearHistory,
 } from "../libs/conversation-buffer.js";
-import { MIAOHAHA_STICKERS, STICKER_EMOJIS } from "../libs/stickers.js";
+import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
+import { getStickerByFileId } from "../libs/sticker-store.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
@@ -182,19 +183,19 @@ async function sendAiMessages(params: {
   chatId: number;
   replyToMessageId: number;
   messages: string[];
-  stickerEmoji: string | null;
+  stickerFileId: string | null;
 }): Promise<void> {
-  const { ctx, chatId, replyToMessageId, messages, stickerEmoji } = params;
+  const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
 
   if (messages.length === 0) {
     // No text messages — if there's a sticker, send it with a reply reference
-    if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+    if (stickerFileId) {
       try {
-        await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji], {
+        await ctx.api.sendSticker(chatId, stickerFileId, {
           reply_parameters: { message_id: replyToMessageId },
         });
       } catch (err) {
-        logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+        logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
       }
     }
     return;
@@ -232,11 +233,11 @@ async function sendAiMessages(params: {
   }
 
   // Dispatch sticker after all text messages, if any
-  if (stickerEmoji && MIAOHAHA_STICKERS[stickerEmoji]) {
+  if (stickerFileId) {
     try {
-      await ctx.api.sendSticker(chatId, MIAOHAHA_STICKERS[stickerEmoji]);
+      await ctx.api.sendSticker(chatId, stickerFileId);
     } catch (err) {
-      logger.warn({ err, stickerEmoji }, "sendAiMessages: sticker dispatch failed");
+      logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
     }
   }
 }
@@ -244,10 +245,6 @@ async function sendAiMessages(params: {
 const MAX_DISMISS_RETRIES = 3;
 
 const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]";
-
-function pickRandomStickerEmoji(): string {
-  return STICKER_EMOJIS[Math.floor(Math.random() * STICKER_EMOJIS.length)]!;
-}
 
 /**
  * Handle an AI turn: classify the message, run the full AI pipeline with
@@ -361,12 +358,17 @@ async function handleAiTurn(params: {
             chatId,
             replyToMessageId,
             messages: [result.rawText],
-            stickerEmoji: fallbackEmoji,
+            stickerFileId: getStickerFileId(fallbackEmoji),
           });
         } else {
           touchBotActivity();
-          pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${fallbackEmoji}]`);
-          const stickerFileId = MIAOHAHA_STICKERS[fallbackEmoji];
+          const stickerFileId = getStickerFileId(fallbackEmoji);
+          pushMessage(
+            config.tgGroupId,
+            "bot",
+            config.botUsername,
+            `[贴纸 ${fallbackEmoji}: ${stickerFileId || "unknown"}]`,
+          );
           if (stickerFileId) {
             try {
               await ctx.api.sendSticker(chatId, stickerFileId, {
@@ -396,8 +398,15 @@ async function handleAiTurn(params: {
     }
 
     // Sticker-only: push a sticker marker so the buffer stays coherent
-    if (result.messages.length === 0 && result.stickerEmoji) {
-      pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${result.stickerEmoji}]`);
+    if (result.messages.length === 0 && result.stickerFileId) {
+      const sticker = getStickerByFileId(result.stickerFileId);
+      const emoji = sticker?.emoji[0] ?? "🐱";
+      pushMessage(
+        config.tgGroupId,
+        "bot",
+        config.botUsername,
+        `[贴纸 ${emoji}: ${result.stickerFileId}]`,
+      );
     }
 
     await sendAiMessages({
@@ -405,7 +414,7 @@ async function handleAiTurn(params: {
       chatId,
       replyToMessageId,
       messages: result.messages,
-      stickerEmoji: result.stickerEmoji,
+      stickerFileId: result.stickerFileId,
     });
   } catch (err) {
     logger.error({ err }, "handleAiTurn: AI turn failed");
@@ -448,8 +457,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       imageDataUrls,
       imageDescriptions: cachedImageDescriptions,
       stickerEmoji,
+      stickerContent,
       urlFetchPromise,
     } = await extractContent(ctx, msg, { rawText, entities });
+
+    // Build sticker display text: Gemini description + file_id for adoption tool
+    const stickerDisplay = stickerContent?.description
+      ? `${stickerContent.description} (sticker_id: ${stickerContent.fileId})`
+      : stickerEmoji;
 
     // Merge cached descriptions with fresh Gemini-described images.
     const imageDescriptions = [...cachedImageDescriptions];
@@ -488,7 +503,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     const bufferLine = buildBufferLine({
       rawText,
-      stickerEmoji,
+      stickerEmoji: stickerDisplay,
       hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
       imageDescriptions,
       urls,
@@ -656,7 +671,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       displayName,
       imageDescriptions,
       hasImage: imageDataUrls.length > 0,
-      stickerEmoji,
+      stickerEmoji: stickerDisplay,
       replyTo,
       isRepliedToBot,
       urlContents,

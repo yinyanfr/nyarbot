@@ -47,13 +47,17 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 
 ### Stickers
 
-Telegram sticker emoji are extracted and sent to the LLM as `[贴纸: emoji]`. The LLM can respond with:
+User-sent stickers are downloaded, format-converted (webm→webp via ffmpeg for animated stickers), and described by Gemini. The description and file_id are cached in `received_stickers`. Only stickers with valid AI-generated descriptions are cached.
+
+The LLM can adopt stickers from the `received_stickers` cache into the bot's own `stickers` library using the `adoptSticker` tool. When adopting, the sticker is sent to chat and the model is instructed to call `send_message` with an傲娇 verbal acknowledgment.
+
+When answering, the LLM can respond with:
 
 - **Text + sticker**: Calls `send_message` then `sendSticker` — sticker is dispatched after text messages.
 - **Sticker only**: Calls only `sendSticker` without `send_message` — sticker is sent with a reply reference.
 - **No sticker**: Calls only `send_message` — plain text reply.
 
-The `sendSticker` tool description includes all available Miaohaha sticker emojis and their meanings. The system prompt tells the model not to send bare emoji as text — use `sendSticker` instead.
+The `sendSticker` tool presents a numbered list of sticker Chinese descriptions. The LLM selects by copying a description, which is matched to a sticker via multi-level fallback: exact/substring → DeepSeek v4 Flash semantic match → emoji extraction → random sticker.
 
 ### Goodnight / Good Morning
 
@@ -77,7 +81,8 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `saveMemory`   | Record a memory about a group member (uid must be from the recent members list)   |
 | `setNickname`  | Set/update a group member's preferred nickname                                    |
 | `deleteMemory` | Remove a specific memory about a group member                                     |
-| `sendSticker`  | Select a Miaohaha sticker emoji to send (standalone or alongside text)            |
+| `sendSticker`  | Select a sticker by Chinese description (numbered list) with multi-level match    |
+| `adoptSticker` | Adopt a user-sent sticker into the bot's library; sends sticker to chat           |
 | `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)         |
 
 All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
@@ -92,12 +97,12 @@ User message → classifyMessage() → generateAiTurn()
                                         ├─ Model calls saveMemory → Firestore write
                                         ├─ Model calls setNickname → Firestore write
                                         ├─ Model calls deleteMemory → Firestore delete
-                                        ├─ Model calls sendSticker → emoji saved
+                                        ├─ Model calls sendSticker → file_id saved
                                         ├─ Model calls webSearch → Tavily search executed
                                         │
                                         ▼
                                  AiTurnResult
-                                  ├─ { action: "send", messages, stickerEmoji }
+                                  ├─ { action: "send", messages, stickerFileId }
                                   └─ { action: "dismiss", rawText? }
 ```
 

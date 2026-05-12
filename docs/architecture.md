@@ -20,7 +20,9 @@ handlers/index.ts (setupHandlers)
     │     ├─ URL detection (entity + regex fallback)
     │     ├─ Image: cache lookup → download → Gemini description
     │     │     (includes reply-to images: msg.reply_to_message.photo)
-    │     └─ Sticker emoji extraction
+    │     └─ Sticker: cache lookup (received_stickers) → download →
+    │           convert format (webm→webp via ffmpeg) → Gemini description
+    │           → cache to received_stickers (only if description succeeds)
     ├─ Buffer push (conversation-buffer.ts)
     │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
     ├─ Image caching (firestore.ts) — cache ALL images immediately after Gemini describes them
@@ -47,7 +49,7 @@ handlers/index.ts (setupHandlers)
     ├─ AI turn (handleAiTurn → generateAiTurn)
     │     ├─ System prompt (buildSystemPrompt + buildLateBindingPrompt)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
-    │     │               deleteMemory, sendSticker
+    │     │               deleteMemory, sendSticker, adoptSticker
     │     ├─ Conditional: webSearch (tavilySearch, when needsSearch=true)
     │     ├─ Dismiss retry (up to 3×, escalating reply hint)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
@@ -64,25 +66,26 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 
 ### Available Tools
 
-| Tool           | Purpose                                                                       |
-| -------------- | ----------------------------------------------------------------------------- |
-| `send_message` | Send a message to the group (required to speak; can be called multiple times) |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                             |
-| `saveMemory`   | Record a memory about a group member (uid validated against recent members)   |
-| `setNickname`  | Set/update a group member's preferred nickname                                |
-| `deleteMemory` | Remove a specific memory about a group member                                 |
-| `sendSticker`  | Select a Miaohaha sticker emoji to send alongside or instead of text          |
-| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)     |
+| Tool           | Purpose                                                                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `send_message` | Send a message to the group (required to speak; can be called multiple times)                                                                                                        |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                                                                                                                                    |
+| `saveMemory`   | Record a memory about a group member (uid validated against recent members)                                                                                                          |
+| `setNickname`  | Set/update a group member's preferred nickname                                                                                                                                       |
+| `deleteMemory` | Remove a specific memory about a group member                                                                                                                                        |
+| `sendSticker`  | Select a sticker by its Chinese description (numbered list), with multi-level fallback: exact/substring → DeepSeek Flash semantic match → emoji → random. Returns file_id directly.  |
+| `adoptSticker` | Adopt a user-sent sticker into the bot's library (from `received_stickers` cache). Sets `stickerFileId` so the sticker is sent to chat. Rejects stickers without valid descriptions. |
+| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)                                                                                                            |
 
 ### AiTurnResult
 
 ```typescript
 type AiTurnResult =
-  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 ```
 
-- **`send`**: One or more messages + optional sticker. Sent via `sendAiMessages()` which formats Markdown→HTML, staggers messages (400ms), and dispatches stickers.
+- **`send`**: One or more messages + optional sticker (file_id). Sent via `sendAiMessages()` which formats Markdown→HTML, staggers messages (400ms), and dispatches stickers directly by file_id.
 - **`dismiss`**: Model chose silence. `rawText` captures any inner monologue as fallback for retry.
 
 ### Dismiss Retry

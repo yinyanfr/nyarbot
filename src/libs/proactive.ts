@@ -3,6 +3,7 @@ import { getHistory, pushMessage, formatHistoryAsContext } from "./conversation-
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
 import { MAX_BUFFER_TEXT } from "../handlers/constants.js";
+import { getStickerByFileId } from "./sticker-store.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -38,8 +39,8 @@ const MAX_FAILURES = 5;
 export interface ProactiveCallbacks {
   /** Send a text message to the group (formatting applied by caller). */
   sendText: (text: string) => Promise<void>;
-  /** Send a sticker by its emoji key (looked up in MIAOHAHA_STICKERS by caller). */
-  sendSticker: (stickerEmoji: string) => Promise<void>;
+  /** Send a sticker by its Telegram file_id (looked up via sticker-store by caller). */
+  sendSticker: (stickerFileId: string) => Promise<void>;
   /** Send a chat action indicator (e.g. "typing"). */
   sendChatAction: (
     action:
@@ -160,10 +161,17 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     }
 
     // Dispatch sticker — either after text messages, or sticker-only (no text)
-    if (result.stickerEmoji) {
-      await callbacks.sendSticker(result.stickerEmoji);
+    if (result.stickerFileId) {
+      await callbacks.sendSticker(result.stickerFileId);
       if (result.messages.length === 0) {
-        pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸: ${result.stickerEmoji}]`);
+        const sticker = getStickerByFileId(result.stickerFileId);
+        const emoji = sticker?.emoji[0] ?? "🐱";
+        pushMessage(
+          config.tgGroupId,
+          "bot",
+          config.botUsername,
+          `[贴纸 ${emoji}: ${result.stickerFileId}]`,
+        );
       }
     }
 

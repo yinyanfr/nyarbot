@@ -45,7 +45,7 @@ The previous streaming architecture (`streamText` + `sendMessage` + `editMessage
 
 Additional benefits:
 
-- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers cleanly.
+- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers by Chinese description. The `adoptSticker` tool lets the model adopt user-sent stickers into its library.
 - **Memory tools**: `saveMemory`, `setNickname`, `deleteMemory` are first-class operations with uid validation.
 - **Dismiss retry**: When triggered but dismissed, the handler can retry with escalating hints.
 

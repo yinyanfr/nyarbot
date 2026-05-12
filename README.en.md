@@ -17,7 +17,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
 - 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
-- 🎨 **Sticker Replies** — Can send Miaohaha stickers standalone or alongside text
+- 🎨 **Sticker Replies** — Select stickers by Chinese description (multi-level matching), standalone or alongside text
 - 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
 - ⌨️ **Typing Indicator** — Shows "typing..." while AI generates
 - 📝 **Markdown→Telegram HTML** — Replies auto-convert Markdown bold/italic/code/links to Telegram HTML
@@ -62,7 +62,7 @@ src/
 │   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
 │   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
 │   │                           #   naturalness late-binding prompt
-│   ├── stickers.ts             # Miaohaha sticker pack (emoji → file_id + descriptions)
+│   ├── stickers.ts             # Sticker facade (description selection + emoji lookup + random fallback)
 │   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
 │   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
 │   │                           #   two-stage probe, cooldown, sticker/typing dispatch

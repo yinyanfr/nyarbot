@@ -47,13 +47,17 @@
 
 ### 贴纸
 
-Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LLM 可以：
+群友发送的贴纸会被下载、格式转换（动态贴纸 webm→webp via ffmpeg），并由 Gemini 进行中文描述。描述和 file_id 缓存到 `received_stickers`。只有生成有效 AI 描述的贴纸才会被缓存。
+
+LLM 可通过 `adoptSticker` 工具将 `received_stickers` 缓存中的贴纸收入 bot 自己的 `stickers` 贴纸库。收入时贴纸会发送到聊天，并提示模型调用 `send_message` 用傲娇猫娘口吻确认。
+
+回复时，LLM 可以：
 
 - **文字 + 贴纸**：调用 `send_message` 后调用 `sendSticker` — 贴纸在文字消息后分发。
 - **纯贴纸**：只调用 `sendSticker` 不调用 `send_message` — 贴纸带回复引用发送。
 - **无贴纸**：只调用 `send_message` — 纯文字回复。
 
-`sendSticker` 工具描述包含所有可用的妙哈哈贴纸 emoji 及其含义。系统提示词告诉模型不要在 `send_message` 文本中只发 emoji — 想发贴纸就用 `sendSticker`。
+`sendSticker` 工具展示编号的中文贴纸描述列表。LLM 通过选择描述来匹配贴纸，多级回退：精确/子串 → DeepSeek v4 Flash 语义匹配 → emoji 提取 → 随机贴纸。
 
 ### 晚安 / 早安
 
@@ -77,7 +81,8 @@ Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LL
 | `saveMemory`   | 记录关于群友的记忆（uid 必须来自最近群友列表）        |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 选择一个妙哈哈贴纸 emoji 发送（可单独发送或随文字）   |
+| `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级匹配回退        |
+| `adoptSticker` | 将群友发送的贴纸收入 bot 的库；收入时贴纸发送到聊天   |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 
 所有记忆/昵称工具在写入 Firestore 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
@@ -92,12 +97,12 @@ Telegram 贴纸 emoji 被提取并以 `[贴纸: emoji]` 形式发送给 LLM。LL
                                         ├─ 模型调用 saveMemory → Firestore 写入
                                         ├─ 模型调用 setNickname → Firestore 写入
                                         ├─ 模型调用 deleteMemory → Firestore 删除
-                                        ├─ 模型调用 sendSticker → emoji 保存
+                                        ├─ 模型调用 sendSticker → file_id 保存
                                         ├─ 模型调用 webSearch → Tavily 搜索执行
                                         │
                                         ▼
                                  AiTurnResult
-                                  ├─ { action: "send", messages, stickerEmoji }
+                                  ├─ { action: "send", messages, stickerFileId }
                                   └─ { action: "dismiss", rawText? }
 ```
 

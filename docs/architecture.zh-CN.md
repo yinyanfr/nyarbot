@@ -20,7 +20,9 @@ handlers/index.ts（setupHandlers）
     │     ├─ URL 检测（entity + 正则回退）
     │     ├─ 图片：缓存查询 → 下载 → Gemini 描述
     │     │     （含回复消息中的图片：msg.reply_to_message.photo）
-    │     └─ 贴纸 emoji 提取
+    │     └─ 贴纸：缓存查询（received_stickers）→ 下载 →
+    │           格式转换（webm→webp via ffmpeg）→ Gemini 描述
+    │           → 缓存到 received_stickers（仅描述成功时）
     ├─ 缓冲区推送（conversation-buffer.ts）
     │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
     ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
@@ -47,7 +49,7 @@ handlers/index.ts（setupHandlers）
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-    │     │           deleteMemory、sendSticker
+    │     │           deleteMemory、sendSticker、adoptSticker
     │     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
     │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
@@ -64,25 +66,26 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 
 ### 可用工具
 
-| 工具           | 用途                                                  |
-| -------------- | ----------------------------------------------------- |
-| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）        |
-| `dismiss`      | 选择不回复（二选一：说话/沉默）                       |
-| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）          |
-| `setNickname`  | 设置/更新群友的昵称                                   |
-| `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 选择一个妙哈哈贴纸 emoji，随文字一起或单独发送        |
-| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
+| 工具           | 用途                                                                                                                              |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                                                                    |
+| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                                                                   |
+| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                                                                      |
+| `setNickname`  | 设置/更新群友的昵称                                                                                                               |
+| `deleteMemory` | 删除关于群友的指定记忆                                                                                                            |
+| `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级回退：精确/子串 → DeepSeek Flash 语义匹配 → emoji → 随机。直接返回 file_id。                |
+| `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。设置 `stickerFileId` 以便贴纸发送到聊天。拒绝无有效描述的贴纸。 |
+| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                             |
 
 ### AiTurnResult
 
 ```typescript
 type AiTurnResult =
-  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 ```
 
-- **`send`**：一条或多条消息 + 可选贴纸。通过 `sendAiMessages()` 发送，该方法会将 Markdown 格式化为 HTML、错开消息时间（400ms）、分发贴纸。
+- **`send`**：一条或多条消息 + 可选贴纸（file_id）。通过 `sendAiMessages()` 发送，该方法会将 Markdown 格式化为 HTML、错开消息时间（400ms）、直接按 file_id 分发贴纸。
 - **`dismiss`**：模型选择沉默。`rawText` 捕获内心独白作为重试的兜底。
 
 ### 沉默重试

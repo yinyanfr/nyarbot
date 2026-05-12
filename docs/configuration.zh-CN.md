@@ -60,7 +60,7 @@ Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 | `saveMemory`   | 记录关于群友的记忆（uid 已验证）                      |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 选择妙哈哈贴纸 emoji 发送（可单独发送或随文字）       |
+| `sendSticker`  | 通过中文描述选择贴纸（编号列表）                      |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 
 当 `needsSearch=true` 时，追加一条强制指令确保模型在回答前调用 `webSearch`。

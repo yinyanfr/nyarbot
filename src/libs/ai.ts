@@ -11,7 +11,14 @@ import {
   buildProbeSystemPrompt,
 } from "./system-prompt.js";
 import { updateUserMemory, removeUserMemory, updateUserNickname } from "../services/firestore.js";
-import { STICKER_EMOJIS, STICKER_DESCRIPTIONS } from "./stickers.js";
+import {
+  getStickerList,
+  getStickerFileIdByDescription,
+  getStickerFileId,
+  pickRandomStickerEmoji,
+} from "./stickers.js";
+import { getReceivedSticker, saveSticker, hasSticker } from "./sticker-store.js";
+import { convertStickerForGemini } from "./telegram-image.js";
 import { logger } from "./logger.js";
 import type { User } from "../global.d.js";
 
@@ -146,7 +153,7 @@ const MAX_TOKENS_BY_TIER: Record<ClassificationResult["tier"], number | undefine
 // ---------------------------------------------------------------------------
 
 export type AiTurnResult =
-  | { action: "send"; messages: string[]; stickerEmoji: string | null }
+  | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 
 // ---------------------------------------------------------------------------
@@ -221,8 +228,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   // Mutable state captured by tool closures
   const sentMessages: string[] = [];
-  let stickerEmoji: string | null = null;
+  let stickerFileId: string | null = null;
   let dismissed = false;
+  let adoptedSticker = false;
 
   const sendMessageTool = tool({
     description:
@@ -319,14 +327,98 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     description:
       "当你的回复内容很简短（如 噢、好的、很棒、哈哈），或者对话已经自然结束，可以发送一个贴纸代替或结束对话。" +
       "不要在 send_message 的文本中只发一个 emoji——想发贴纸就用 sendSticker。" +
-      "可用贴纸含义：" +
-      STICKER_EMOJIS.map((e) => `${e}(${STICKER_DESCRIPTIONS[e] || ""})`).join(" "),
+      "可用贴纸（根据描述含义选择最匹配的）：\n" +
+      getStickerList()
+        .map((s, i) => `${i + 1}. ${s.description} (${s.emoji})`)
+        .join("\n"),
     inputSchema: z.object({
-      emoji: z.enum(STICKER_EMOJIS).describe("要发送的贴纸对应的 emoji"),
+      description: z.string().describe("选择的贴纸描述，从上面列表中复制完整描述"),
     }),
-    execute: async ({ emoji }) => {
-      stickerEmoji = emoji;
-      return "贴纸已发送 ✓";
+    execute: async ({ description }) => {
+      const fileId = getStickerFileIdByDescription(description);
+      if (fileId) {
+        stickerFileId = fileId;
+        return "贴纸已发送 ✓";
+      }
+
+      const list = getStickerList();
+      if (list.length === 0) {
+        return "贴纸库为空，无法选择";
+      }
+
+      try {
+        const { text } = await generateText({
+          model: flashNoThinkModel,
+          system:
+            "从以下贴纸列表中选出与给定描述语义最匹配的一个，只返回其编号（纯数字），不要任何其他内容。",
+          messages: [
+            {
+              role: "user" as const,
+              content: `需要匹配的描述：${description}\n\n贴纸列表：\n${list.map((s, i) => `${i + 1}. ${s.description}`).join("\n")}`,
+            },
+          ],
+          maxOutputTokens: 10,
+          temperature: 0,
+        });
+        const idx = parseInt(text.trim(), 10);
+        if (!isNaN(idx) && idx >= 1 && idx <= list.length) {
+          stickerFileId = getStickerFileIdByDescription(list[idx - 1]!.description);
+          if (stickerFileId) return "贴纸已发送 ✓";
+        }
+      } catch (err) {
+        logger.warn({ err, description }, "sendSticker: semantic match failed");
+      }
+
+      // Emoji fallback: try to extract an emoji from the description
+      for (const s of list) {
+        if (description.includes(s.emoji)) {
+          stickerFileId = getStickerFileId(s.emoji);
+          if (stickerFileId) return "贴纸已发送 ✓";
+        }
+      }
+
+      // Last resort: pick a random sticker
+      const randomEmoji = pickRandomStickerEmoji();
+      stickerFileId = getStickerFileId(randomEmoji);
+      if (stickerFileId) return "贴纸已发送 ✓";
+
+      return "贴纸库为空，无法选择";
+    },
+  });
+
+  const adoptStickerTool = tool({
+    description:
+      "将群友发送的有趣贴纸收入你自己的贴纸库，此后你可以在聊天中使用它。" +
+      "贴纸的 sticker_id 可以从上下文中找到（格式如 sticker_id: xxx）。" +
+      "只在收到你真心觉得好看或有用的贴纸时调用。同样内容的贴纸不要重复收录。" +
+      "收入后你**必须**再调用 send_message 用傲娇猫娘口吻告诉对方你收下了（如'哼，这图不错，本喵收下了~'之类的）。" +
+      "如果贴纸已经在库里了，就正常回复对方，不要告诉对方你已经收过。",
+    inputSchema: z.object({
+      sticker_id: z
+        .string()
+        .describe("要收入的贴纸的 sticker_id（从消息上下文中的 (sticker_id: xxx) 获取）"),
+    }),
+    execute: async ({ sticker_id }) => {
+      if (hasSticker(sticker_id)) {
+        return "已在库中，正常回复即可（不要告诉对方你已有这张贴纸）";
+      }
+      const received = await getReceivedSticker(sticker_id);
+      if (!received) {
+        return "未找到该贴纸的缓存信息，请确认 sticker_id 正确";
+      }
+      if (!received.description || received.description === received.emoji.join("")) {
+        return "这张贴纸没有生成有效描述，无法收入";
+      }
+      await saveSticker({
+        file_id: received.file_id,
+        emoji: received.emoji,
+        description: received.description,
+        source: "adopted",
+        adoptedAt: Date.now(),
+      });
+      stickerFileId = received.file_id;
+      adoptedSticker = true;
+      return `贴纸已收入 ✓ (${received.emoji.join(" ")})。记得用 send_message 傲娇地告诉对方你收下了~`;
     },
   });
 
@@ -341,6 +433,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       setNickname: setNicknameTool,
       deleteMemory: deleteMemoryTool,
       sendSticker: sendStickerTool,
+      adoptSticker: adoptStickerTool,
       ...(needsSearch
         ? {
             webSearch: tavilySearch({
@@ -374,9 +467,15 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   const rawText = result.text?.trim();
   const rawTextProp = rawText || undefined;
 
+  // When adoptSticker was called but no send_message: promote the model's
+  // raw text (inner monologue) to a visible message so it reaches the chat.
+  if (adoptedSticker && sentMessages.length === 0 && rawText) {
+    sentMessages.push(rawText);
+  }
+
   // If the model called dismiss but also produced output (e.g. sticker),
   // prefer the output over silence.
-  if (dismissed && sentMessages.length === 0 && !stickerEmoji) {
+  if (dismissed && sentMessages.length === 0 && !stickerFileId) {
     return rawTextProp
       ? { action: "dismiss" as const, rawText: rawTextProp }
       : { action: "dismiss" as const };
@@ -386,13 +485,13 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     return {
       action: "send" as const,
       messages: sentMessages,
-      stickerEmoji,
+      stickerFileId,
     };
   }
 
   // Sticker-only: model called sendSticker but not send_message
-  if (stickerEmoji) {
-    return { action: "send" as const, messages: [], stickerEmoji };
+  if (stickerFileId) {
+    return { action: "send" as const, messages: [], stickerFileId };
   }
 
   // Edge case: no send_message and no dismiss — the model just output text
@@ -569,6 +668,43 @@ export async function describeImage(imageInput: string, caption?: string): Promi
     temperature: 0,
   });
   return text.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Sticker description (for caching and adoption)
+// ---------------------------------------------------------------------------
+
+export async function describeSticker(dataUrl: string): Promise<string> {
+  try {
+    const convertedUrl = await convertStickerForGemini(dataUrl);
+    if (!convertedUrl) {
+      logger.warn("describeSticker: convertStickerForGemini returned empty, skipping");
+      return "";
+    }
+    const { text } = await generateText({
+      model: geminiFlashModel,
+      system: `请用中文描述这个贴纸，要求：
+1. 描述画面中的人物、动作、表情、文字等所有可见元素
+2. 说明画面的整体风格和氛围
+3. 说明这个贴纸适合在什么聊天情境下表达什么情绪或态度
+只输出描述文本本身，不要加引号或任何前缀。`,
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            { type: "text" as const, text: "请描述这个贴纸。" },
+            { type: "image" as const, image: convertedUrl },
+          ],
+        },
+      ],
+      maxOutputTokens: 8000,
+      temperature: 0,
+    });
+    return text.trim();
+  } catch (err) {
+    logger.warn({ err }, "describeSticker failed");
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------------------

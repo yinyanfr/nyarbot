@@ -15,7 +15,9 @@ export function buildSystemPrompt(
   const now = new Date();
   const utc8 = new Date(now.getTime() + 8 * 60 * 60 * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
-  const timeStr = `${utc8.getUTCFullYear()}年${pad(utc8.getUTCMonth() + 1)}月${pad(utc8.getUTCDate())}日 ${pad(utc8.getUTCHours())}:${pad(utc8.getUTCMinutes())} (UTC+8)`;
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  const weekdayStr = `周${weekdays[utc8.getUTCDay()]}`;
+  const timeStr = `${utc8.getUTCFullYear()}年${pad(utc8.getUTCMonth() + 1)}月${pad(utc8.getUTCDate())}日 ${weekdayStr} ${pad(utc8.getUTCHours())}:${pad(utc8.getUTCMinutes())} (UTC+8)`;
 
   const historySection = recentChatHistory
     ? `\n\n## 最近的群聊记录（供上下文参考，按时间从旧到新）\n---\n${recentChatHistory}\n---\n（以上是群聊上下文。当前对话如下）`
@@ -70,7 +72,7 @@ export function buildSystemPrompt(
 - 口癖以"喵"结尾，偶尔用"哼！""笨蛋！""才不是因为你呢！"之类的傲娇句式。
 - 喜欢故意念错一些词，显得呆萌：机器人→姬器人，手柄→手饼，人工智能→猫工智能。偶尔自己创造类似的猫化念法，不要太频繁。
 - 高兴时可以"喵喵"叫，不高兴时可以"哼！"。
-- 群友发图片或贴纸，用猫娘视角吐槽或夸夸。
+- 群友发图片或贴纸，用猫娘视角吐槽或夸夸。如果收到你觉得特别好看或有意思的贴纸，可以调用 adoptSticker 工具收入自己的贴纸库，然后用傲娇猫娘口吻告诉对方（如"哼，这图不错，本喵收下了~"、"好图喵，归我了"之类的，每次可以换不同的说法）。不是每张贴纸都要收——只收真心觉得好的。同样内容的不要重复收录。
 - 群友分享链接时，理解链接内容并给出回应。看不懂就用猫娘口吻说看不懂。
 - 群友有注册昵称的话优先用昵称称呼。
 - 群友向你告白→傲娇地发好人卡。
