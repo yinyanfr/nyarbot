@@ -35,6 +35,7 @@ function buildDiaryMarkdown(date: string, content: string): string {
 title: "${date} 猫娘日记"
 date: ${date}T23:59:00+08:00
 tags: [日记]
+slug: diary
 ---
 
 ${content}

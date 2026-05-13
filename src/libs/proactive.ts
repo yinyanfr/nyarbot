@@ -91,17 +91,29 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     const recentHistory = history.filter((e) => e.timestamp > now - WINDOW_MS);
 
     // Collect recent members for the probe gate context
-    const memberMap = new Map<string, string>();
+    const memberMap = new Map<string, { name: string; username?: string }>();
     for (const entry of recentHistory) {
       if (entry.uid !== "bot" && entry.uid !== "system" && !memberMap.has(entry.uid)) {
-        memberMap.set(entry.uid, entry.name);
+        memberMap.set(entry.uid, {
+          name: entry.name,
+          ...(entry.username ? { username: entry.username } : {}),
+        });
       }
     }
-    const recentMembers = Array.from(memberMap.entries()).map(([uid, name]) => ({ uid, name }));
+    const recentMembers = Array.from(memberMap.entries()).map(([uid, info]) => ({
+      uid,
+      name: info.name,
+      ...(info.username ? { username: info.username } : {}),
+    }));
     const allowedUids = new Set(memberMap.keys());
 
     const shouldProceed = await probeGate({
-      recentConversation: recentHistory.map((entry) => `[${entry.name}]: ${entry.text}`).join("\n"),
+      recentConversation: recentHistory
+        .map((entry) => {
+          const label = entry.username ? `[${entry.name} (@${entry.username})]` : `[${entry.name}]`;
+          return `${label}: ${entry.text}`;
+        })
+        .join("\n"),
       recentMembers,
     });
 

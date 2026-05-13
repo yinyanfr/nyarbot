@@ -18,7 +18,7 @@
 - 🏷️ **昵称 & 记忆** — 跟她说「叫我XX」设置昵称，「记住XXX」记录记忆
 - 📔 **日记系统** — bot 在群聊中自动记录观察笔记，每日午夜生成一篇猫娘日记，发布到 Hexo 博客
 - 🎯 **主动插话** — 两阶段探测：廉价模型判断话题相关性，通过后完整模型生成回复
-- 🎨 **贴纸回复** — 通过中文描述选择贴纸（多级匹配回退），可单独发或随文字发送
+- 🎨 **贴纸回复** — 通过 emoji + 关键词选择贴纸（两阶段预选 + 语义匹配），可单独发或随文字发送
 - 🔄 **沉默重试** — 被触发但模型选择沉默时自动重试最多 3 次，附加强制回复提示；仍沉默则发送原始文本或贴纸兜底
 - ⌨️ **打字指示** — AI 生成时显示"正在输入…"
 - 📝 **Markdown→Telegram HTML** — 回复自动转换 Markdown 粗体/斜体/代码/链接等为 Telegram HTML
@@ -63,7 +63,7 @@ src/
 │   ├── conversation-buffer.ts  # 内存环形缓冲区（60 条/组）
 │   ├── system-prompt.ts        # 猫娘人设 system prompt、探测 prompt、
 │   │                           #   自然度 late-binding prompt
-│   ├── stickers.ts             # 贴纸 facade（描述选择 + emoji查找 + 随机兜底）
+│   ├── stickers.ts             # 贴纸 facade（关键词/描述选择 + emoji查找 + 随机兜底）
 │   ├── format-telegram.ts      # Markdown→Telegram HTML 转换（LaTeX→Unicode）
 │   ├── proactive.ts            # 主动插话：ProactiveCallbacks 接口、
 │   │                           #   两阶段探测、冷却逻辑、贴纸/打字指示分发

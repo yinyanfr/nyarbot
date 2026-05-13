@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0] — 2026-05-13
+
+### Added
+
+- **Sticker keywords** (`src/libs/sticker-store.ts`, `src/libs/ai.ts`, `src/handlers/extract-content.ts`). `StickerDoc` and `ReceivedStickerDoc` now include `keywords?: string[]`. `describeSticker()` output changed from raw string to `{ description, keywords } | null`, with a simplified prompt targeting ≤30-char descriptions + 3-5 keywords separated by `|`. Retry on missing pipe separator with fallback prompt. `maxOutputTokens` reduced from 8000 → 800.
+- **Two-stage sticker selection** (`src/libs/ai.ts`). `sendSticker` tool now uses compact emoji→keywords index (`😀 开心,庆祝 | 😭 大哭,崩溃 | ...`) instead of embedding full sticker descriptions in the tool description. LLM picks an emoji + keywords, then `execute` pre-filters candidates via `filterStickersByKeywords()` (max 5) and uses Flash to pick the best match from the shortlist. This reduces the per-request input token cost by ~60%.
+- **Keyword-based sticker pre-filter** (`src/libs/sticker-store.ts`). `filterStickersByKeywords()` scores stickers by keyword overlap. Falls back to returning stickers without keywords (up to 5) when no keyword match is found, so pre-migration stickers remain selectable via semantic match.
+- **`rewrite-sticker-descriptions.ts`** (`src/scripts/`). Migration script to re-describe all existing stickers in Firestore with the new `description|keywords` format.
+
+### Changed
+
+- **`describeSticker` prompt simplified**. Removed complex multi-example format instructions that confused the model. Now uses a minimal 3-line prompt with one example. Added retry: if first attempt yields no `|` separator, retries with ultra-minimal prompt. Falls back to description-only (empty keywords) if retry also fails.
+- **`adoptSticker` relaxed**. No longer rejects stickers without keywords. Emoji-only stickers can still be adopted and matched via exact emoji lookup in `sendSticker`.
+- **`sendSticker` input schema** changed from `{ description }` to `{ emoji, keywords }`.
+- **`getStickerList()` return type** includes `keywords: string[]`.
+- **`migrate-stickers.ts`** and **`sync-stickers-to-received.ts`** updated to pass `keywords` in `saveSticker`/`set()` calls.
+
+### Removed
+
+- **`getKeywordIndex()`** (`src/libs/sticker-store.ts`). Dead code — never called.
+- **`getStickerFileIdByDescription` unused import** in `src/libs/ai.ts`.
+
 ## [0.7.0] — 2026-05-13
 
 ### Added

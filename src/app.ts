@@ -10,9 +10,11 @@ import { logger, initAdminNotify } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { initStickerStore, stickerStoreReady } from "./libs/sticker-store.js";
-import { checkAndGenerateDiary } from "./libs/diary.js";
+import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
+import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
+let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
 
 initFirebase();
 initStickerStore();
@@ -39,6 +41,9 @@ async function main(): Promise<void> {
 
   // Wait for sticker store to load from Firestore before accepting messages
   await stickerStoreReady();
+
+  // Restore conversation context from last session
+  await loadConversationBuffer();
 
   // Fire-and-forget cache cleanup; failures shouldn't block startup.
   cleanupExpiredImageCache().catch((err: unknown) => {
@@ -72,9 +77,26 @@ async function main(): Promise<void> {
 
   startProactiveChecker(proactiveCallbacks);
 
+  initDiaryCallbacks({
+    sendText: async (text) => {
+      const formatted = formatForTelegramHtml(text);
+      try {
+        await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
+      } catch {
+        await bot.api.sendMessage(config.tgGroupId, text);
+      }
+    },
+  });
+
   // Midnight diary generation: check every 60s if the UTC+8 date has changed
   diaryTimer = setInterval(checkAndGenerateDiary, 60_000);
   diaryTimer.unref?.();
+
+  // Periodic buffer save: flush to disk every 5 min for crash resilience
+  bufferSaveTimer = setInterval(() => {
+    saveConversationBuffer().catch(() => void 0);
+  }, 300_000);
+  bufferSaveTimer.unref?.();
 
   await bot.start({
     onStart(info) {
@@ -92,20 +114,26 @@ main().catch((err: unknown) => {
 process.once("SIGINT", () => {
   stopProactiveChecker();
   if (diaryTimer) clearInterval(diaryTimer);
+  if (bufferSaveTimer) clearInterval(bufferSaveTimer);
+  saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
 process.once("SIGTERM", () => {
   stopProactiveChecker();
   if (diaryTimer) clearInterval(diaryTimer);
+  if (bufferSaveTimer) clearInterval(bufferSaveTimer);
+  saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
 
 // Crash guards: ensure unhandled errors are logged before exit
 process.once("uncaughtException", (err) => {
+  saveConversationBuffer().catch(() => void 0);
   logger.fatal({ err }, "uncaught exception — exiting");
   process.exit(1);
 });
 process.once("unhandledRejection", (reason) => {
+  saveConversationBuffer().catch(() => void 0);
   logger.fatal(
     { err: reason instanceof Error ? reason : new Error(String(reason)) },
     "unhandled rejection — exiting",

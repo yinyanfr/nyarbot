@@ -72,17 +72,17 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 
 ### Available Tools
 
-| Tool           | Purpose                                                                                                                                                                              |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `send_message` | Send a message to the group (required to speak; can be called multiple times)                                                                                                        |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                                                                                                                                    |
-| `saveMemory`   | Record a memory about a group member (uid validated against recent members)                                                                                                          |
-| `setNickname`  | Set/update a group member's preferred nickname                                                                                                                                       |
-| `deleteMemory` | Remove a specific memory about a group member                                                                                                                                        |
-| `sendSticker`  | Select a sticker by its Chinese description (numbered list), with multi-level fallback: exact/substring → DeepSeek Flash semantic match → emoji → random. Returns file_id directly.  |
-| `adoptSticker` | Adopt a user-sent sticker into the bot's library (from `received_stickers` cache). Sets `stickerFileId` so the sticker is sent to chat. Rejects stickers without valid descriptions. |
-| `writeDiary`   | Record a diary observation about the conversation in natural language. Stored in Firestore `diary/{YYYY-MM-DD}`.                                                                     |
-| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)                                                                                                            |
+| Tool           | Purpose                                                                                                                                                                                                                     |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `send_message` | Send a message to the group (required to speak; can be called multiple times)                                                                                                                                               |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                                                                                                                                                                           |
+| `saveMemory`   | Record a memory about a group member (uid validated against recent members)                                                                                                                                                 |
+| `setNickname`  | Set/update a group member's preferred nickname                                                                                                                                                                              |
+| `deleteMemory` | Remove a specific memory about a group member                                                                                                                                                                               |
+| `sendSticker`  | Select a sticker by emoji + keywords from compact index, with two-stage pre-filter: keyword overlap scoring (max 5 candidates) → Flash semantic match within candidates. Falls back to emoji exact match or random sticker. |
+| `adoptSticker` | Adopt a user-sent sticker into the bot's library (from `received_stickers` cache). Sets `stickerFileId` so the sticker is sent to chat. Saves description + keywords from the cached entry.                                 |
+| `writeDiary`   | Record a diary observation about the conversation in natural language. Stored in Firestore `diary/{YYYY-MM-DD}`.                                                                                                            |
+| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)                                                                                                                                                   |
 
 ### AiTurnResult
 

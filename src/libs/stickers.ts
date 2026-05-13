@@ -60,12 +60,13 @@ export function getStickerFileIdByDescription(description: string): string | nul
 }
 
 /**
- * Get the list of all stickers with description and representative emoji,
+ * Get the list of all stickers with description, keywords, and representative emoji,
  * formatted for the sendSticker tool description.
  * Returns a fallback if the store is empty.
  */
-export function getStickerList(): { description: string; emoji: string }[] {
+export function getStickerList(): { description: string; keywords: string[]; emoji: string }[] {
   const list = getAllStickerList();
-  if (list.length === 0) return [{ description: "猫猫贴纸", emoji: "🐱" }];
+  if (list.length === 0)
+    return [{ description: "猫猫贴纸", keywords: ["猫猫", "可爱"], emoji: "🐱" }];
   return list;
 }

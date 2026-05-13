@@ -4,6 +4,7 @@ import { formatSystemPromptTime } from "./time.js";
 export interface RecentMember {
   uid: string;
   name: string;
+  username?: string;
 }
 
 export function buildSystemPrompt(
@@ -22,7 +23,11 @@ export function buildSystemPrompt(
   const membersSection =
     recentMembers && recentMembers.length > 0
       ? `\n\n## 最近出现过的群友（写 memory/nickname 工具时 uid 必须从这里选）\n${recentMembers
-          .map((m) => `- ${m.name} (uid: ${m.uid})`)
+          .map((m) =>
+            m.username
+              ? `- ${m.name} (@${m.username}) (uid: ${m.uid})`
+              : `- ${m.name} (uid: ${m.uid})`,
+          )
           .join("\n")}`
       : "";
 
@@ -157,7 +162,9 @@ export function buildProbeSystemPrompt(
 
   const membersSection =
     recentMembers && recentMembers.length > 0
-      ? `\n\n## 最近出现的群友\n${recentMembers.map((m) => `- ${m.name}`).join("\n")}`
+      ? `\n\n## 最近出现的群友\n${recentMembers
+          .map((m) => (m.username ? `- ${m.name} (@${m.username})` : `- ${m.name}`))
+          .join("\n")}`
       : "";
 
   return `你是 nyarbot，一只傲娇的高中生猫娘 AI，在 Telegram 群聊里当群友。

@@ -23,7 +23,7 @@ import {
   clearHistory,
 } from "../libs/conversation-buffer.js";
 import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
-import { getStickerByFileId } from "../libs/sticker-store.js";
+import { getStickerByFileId, hasSticker } from "../libs/sticker-store.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
 import { todayDateStr } from "../libs/time.js";
@@ -90,7 +90,9 @@ function buildUserMessage(params: {
 
   if (replyTo && !isRepliedToBot) {
     const replyUid = replyTo.from?.id?.toString() ?? "";
-    const replyName = replyTo.from?.first_name ?? "某人";
+    const replyFirstName = replyTo.from?.first_name ?? "某人";
+    const replyUsername = replyTo.from?.username;
+    const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
     const replyText = replyTo.text ?? replyTo.caption ?? "";
     let replyDesc = "";
     if (replyText) {
@@ -146,13 +148,13 @@ function buildBufferLine(params: {
   imageDescriptions: string[];
   mediaDescriptors?: MediaDescriptor[];
   urls: string[];
-  replyToInfo?: { uid: string; name: string; text: string };
+  replyToInfo?: { uid: string; name: string; username?: string; text: string };
 }): string {
   const parts: string[] = [];
   if (params.replyToInfo?.text) {
-    parts.push(
-      `[回复 ${params.replyToInfo.uid} ${params.replyToInfo.name}: "${params.replyToInfo.text.slice(0, 100)}"]`,
-    );
+    const ri = params.replyToInfo;
+    const userLabel = ri.username ? `${ri.name} (@${ri.username})` : ri.name;
+    parts.push(`[回复 ${ri.uid} ${userLabel}: "${ri.text.slice(0, 100)}"]`);
   }
   if (params.rawText) parts.push(params.rawText);
   if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
@@ -178,16 +180,24 @@ function buildBufferLine(params: {
  * knows which uids are safe to reference from memory tools.
  */
 function collectRecentMembers(groupId: string): {
-  recentMembers: { uid: string; name: string }[];
+  recentMembers: { uid: string; name: string; username?: string }[];
   allowedUids: Set<string>;
 } {
   const history = getHistory(groupId);
-  const map = new Map<string, string>();
+  const map = new Map<string, { name: string; username?: string }>();
   for (const entry of history) {
     if (entry.uid === "bot" || entry.uid === "system") continue;
-    if (!map.has(entry.uid)) map.set(entry.uid, entry.name);
+    if (!map.has(entry.uid))
+      map.set(entry.uid, {
+        name: entry.name,
+        ...(entry.username ? { username: entry.username } : {}),
+      });
   }
-  const recentMembers = Array.from(map.entries()).map(([uid, name]) => ({ uid, name }));
+  const recentMembers = Array.from(map.entries()).map(([uid, info]) => ({
+    uid,
+    name: info.name,
+    ...(info.username ? { username: info.username } : {}),
+  }));
   return { recentMembers, allowedUids: new Set(map.keys()) };
 }
 
@@ -274,8 +284,6 @@ async function sendAiMessages(params: {
   }
 }
 
-const MAX_DISMISS_RETRIES = 3;
-
 const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]";
 
 /**
@@ -283,9 +291,10 @@ const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你
  * tool-call architecture, and send results to Telegram.
  *
  * When the user explicitly @-mentioned or replied to the bot, dismiss results
- * are retried up to MAX_DISMISS_RETRIES times with escalating hints. If all
- * retries still dismiss, a fallback message or sticker is sent instead of
- * silence.
+ * are retried with escalating hints based on the classification tier:
+ *   - tech (pro model): no retry — dismisses are sent as fallback immediately
+ *   - simple/complex: 1 retry, then fallback if still dismissed
+ *   - proactive: no retry (dismiss = silence)
  */
 async function handleAiTurn(params: {
   ctx: BotContext;
@@ -295,9 +304,18 @@ async function handleAiTurn(params: {
   systemHint: string | null;
   isMentioned: boolean;
   isRepliedToBot: boolean;
+  senderUsername?: string;
 }): Promise<void> {
-  const { ctx, replyToMessageId, user, userMessage, systemHint, isMentioned, isRepliedToBot } =
-    params;
+  const {
+    ctx,
+    replyToMessageId,
+    user,
+    userMessage,
+    systemHint,
+    isMentioned,
+    isRepliedToBot,
+    senderUsername,
+  } = params;
 
   const chatId = ctx.chatId;
   if (chatId === undefined) throw new Error("no chat in context");
@@ -316,7 +334,11 @@ async function handleAiTurn(params: {
   // accumulated buffer entries yet (e.g. first message after /reset).
   allowedUids.add(user.uid);
   if (!recentMembers.some((m) => m.uid === user.uid)) {
-    recentMembers.push({ uid: user.uid, name: user.nickname || "大哥哥" });
+    recentMembers.push({
+      uid: user.uid,
+      name: user.nickname || "大哥哥",
+      ...(senderUsername ? { username: senderUsername } : {}),
+    });
   }
 
   const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
@@ -342,15 +364,17 @@ async function handleAiTurn(params: {
       recentBotMessages,
     });
 
-    // Retry on dismiss when the user explicitly triggered the bot
+    // Retry on dismiss when the user explicitly triggered the bot.
+    // tech tier: no retry, just send the fallback.
+    // simple/complex tier: 1 retry, then fallback.
     if (result.action === "dismiss" && isTriggered) {
-      for (let attempt = 1; attempt <= MAX_DISMISS_RETRIES; attempt++) {
-        logger.info(
-          { attempt, rawText: result.rawText?.slice(0, 80) },
-          "handleAiTurn: dismissing, retrying",
-        );
+      let retries = 0;
+      const maxRetries = tier === "tech" ? 0 : 1;
 
-        // Refresh typing indicator before each retry
+      while (retries < maxRetries) {
+        retries++;
+        logger.info({ retries, tier }, "handleAiTurn: dismissing, retrying");
+
         await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
 
         currentHint = currentHint
@@ -374,10 +398,9 @@ async function handleAiTurn(params: {
         if (result.action === "send") break;
       }
 
-      // All retries exhausted — fallback to rawText or a sticker
       if (result.action === "dismiss") {
         clearInterval(typingTimer);
-        logger.warn("handleAiTurn: all retries dismissed, sending fallback");
+        logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
 
         if (result.rawText) {
@@ -570,9 +593,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       pendingMediaThumbnails,
     } = await extractContent(ctx, msg, { rawText, entities });
 
-    // Build sticker display text: Gemini description + file_id for adoption tool
+    // Build sticker display text: Gemini description + file_id for adoption tool.
+    // Only include sticker_id for stickers not yet adopted — avoid leaking
+    // "already collected" info to the LLM for already-adopted stickers.
+    const alreadyAdopted = stickerContent ? hasSticker(stickerContent.fileId) : false;
     const stickerDisplay = stickerContent?.description
-      ? `${stickerContent.description} (sticker_id: ${stickerContent.fileId})`
+      ? alreadyAdopted
+        ? stickerContent.description
+        : `${stickerContent.description} (sticker_id: ${stickerContent.fileId})`
       : stickerEmoji;
 
     // Merge cached descriptions with fresh Gemini-described images.
@@ -620,14 +648,17 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     });
 
     // 4. Push user's message into the buffer ONCE, up front.
-    const replyToInfo =
-      replyTo && !isRepliedToBot
-        ? {
-            uid: replyTo.from?.id?.toString() ?? "",
-            name: replyTo.from?.first_name ?? "某人",
-            text: replyTo.text ?? replyTo.caption ?? "",
-          }
-        : undefined;
+    let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
+    if (replyTo && !isRepliedToBot) {
+      replyToInfo = {
+        uid: replyTo.from?.id?.toString() ?? "",
+        name: replyTo.from?.first_name ?? "某人",
+        text: replyTo.text ?? replyTo.caption ?? "",
+      };
+      if (replyTo.from?.username) {
+        replyToInfo.username = replyTo.from.username;
+      }
+    }
 
     const bufferLine = buildBufferLine({
       rawText,
@@ -639,7 +670,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       ...(replyToInfo ? { replyToInfo } : {}),
     });
     if (bufferLine) {
-      pushMessage(config.tgGroupId, from.id.toString(), displayName, bufferLine);
+      pushMessage(
+        config.tgGroupId,
+        from.id.toString(),
+        displayName,
+        bufferLine,
+        from.username ?? undefined,
+      );
     }
 
     // 4b. Cache fresh image descriptions so future turns (and proactive) see them
@@ -791,10 +828,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       systemHint,
       isMentioned,
       isRepliedToBot,
+      ...(from.username ? { senderUsername: from.username } : {}),
     });
   });
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Edited messages — treat as corrections: only re-reply when the user is
   // still @-mentioning or replying to the bot. Commands / goodnight / images
   // are intentionally skipped.
@@ -837,8 +875,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     let editedBuffer = rawText;
     if (replyTo && !isRepliedToBot) {
       const replyText = replyTo.text ?? replyTo.caption ?? "";
+      const replyFirstName = replyTo.from?.first_name ?? "某人";
+      const replyUsername = replyTo.from?.username;
+      const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
       if (replyText) {
-        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyTo.from?.first_name ?? "某人"}: "${replyText.slice(0, 100)}"] ${rawText}`;
+        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyName}: "${replyText.slice(0, 100)}"] ${rawText}`;
       }
     }
     pushMessage(
@@ -846,6 +887,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       from.id.toString(),
       displayName,
       editedBuffer.slice(0, MAX_BUFFER_TEXT),
+      from.username ?? undefined,
     );
 
     // Use extractContent for consistent parsing of URLs and other entities
@@ -897,6 +939,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       systemHint: null,
       isMentioned,
       isRepliedToBot,
+      ...(from.username ? { senderUsername: from.username } : {}),
     });
   });
 }
