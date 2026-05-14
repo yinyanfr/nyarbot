@@ -37,9 +37,10 @@ import type { MediaDescriptor } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
+import { getPersonaLabel } from "../libs/persona.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
-const MESSAGE_DELAY_MS = 400;
+const MESSAGE_DELAY_MS = config.botMessageDelayMs;
 
 /**
  * Build the user-facing text for the AI call by stitching together the raw
@@ -508,7 +509,7 @@ async function buildStatusText(): Promise<string> {
     }),
   ]);
   return [
-    "📊 nyarbot 状态",
+    `📊 ${config.botPersonaName} 状态`,
     `运行时间: ${uptimeStr}`,
     `缓冲区消息数: ${historyLen}`,
     `记忆用户数: ${memUsers ?? "?"}`,
@@ -693,7 +694,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // 5. /help — public
     if (matchCommand(entities, rawText, "/help", botUsername)) {
-      const helpText = `喵~ 我是 nyarbot，一只傲娇的高中生猫娘 AI！🎀
+      const helpText = `喵~ 我是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI！🎀
+
+我的用户名是 @${botUsername}，名字是 ${config.botPersonaName} 喵~
 
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天

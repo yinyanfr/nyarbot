@@ -135,19 +135,45 @@ node dist/app.js
 
 详见 [配置文档](docs/configuration.zh-CN.md)。
 
-| 变量               | 必填 | 说明                                           |
-| ------------------ | ---- | ---------------------------------------------- |
-| `BOT_API_KEY`      | ✅   | Telegram Bot Token                             |
-| `TG_GROUP_ID`      | ✅   | 目标群组 ID（bot 只在此群工作）                |
-| `TG_ADMIN_UID`     | ✅   | 管理员 Telegram 用户 ID                        |
-| `DEEPSEEK_API_KEY` | ✅   | DeepSeek API Key                               |
-| `TAVILY_API_KEY`   | ✅   | Tavily Search API Key                          |
-| `CF_AIG_TOKEN`     | ✅   | Cloudflare AI Gateway Token（Gemini 图片识别） |
-| `CF_ACCOUNT_ID`    | ✅   | Cloudflare 账户 ID（Gemini 图片识别）          |
-| `BOT_USERNAME`     | ❌   | Bot 用户名，默认 `nyarbot`                     |
-| `GITHUB_TOKEN`     | ❌   | GitHub PAT，用于推送日记到 Hexo 博客           |
-| `GITHUB_REPO`      | ❌   | GitHub 仓库名，格式 `owner/repo`               |
-| `LOG_LEVEL`        | ❌   | 日志级别，默认 `info`                          |
+| 变量                    | 必填 | 说明                                           |
+| ----------------------- | ---- | ---------------------------------------------- |
+| `BOT_API_KEY`           | ✅   | Telegram Bot Token                             |
+| `BOT_PERSONA_NAME`      | ❌   | 机器人对话名，默认 `にゃる`                    |
+| `BOT_PERSONA_FULL_NAME` | ❌   | 机器人全名，默认 `晴海猫月`                    |
+| `BOT_PERSONA_READING`   | ❌   | 名字读音标注，默认 `はるみ にゃる`             |
+| `TG_GROUP_ID`           | ✅   | 目标群组 ID（bot 只在此群工作）                |
+| `TG_ADMIN_UID`          | ✅   | 管理员 Telegram 用户 ID                        |
+| `DEEPSEEK_API_KEY`      | ✅   | DeepSeek API Key                               |
+| `TAVILY_API_KEY`        | ✅   | Tavily Search API Key                          |
+| `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway Token（Gemini 图片识别） |
+| `CF_ACCOUNT_ID`         | ✅   | Cloudflare 账户 ID（Gemini 图片识别）          |
+| `BOT_USERNAME`          | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致）   |
+| `GITHUB_TOKEN`          | ❌   | GitHub PAT，用于推送日记到 Hexo 博客           |
+| `GITHUB_REPO`           | ❌   | GitHub 仓库名，格式 `owner/repo`               |
+| `LOG_LEVEL`             | ❌   | 日志级别，默认 `info`                          |
+
+### 可选高级配置（有默认值）
+
+| 变量                           | 默认值                          | 说明                                      |
+| ------------------------------ | ------------------------------- | ----------------------------------------- |
+| `DEEPSEEK_BASE_URL`            | `https://api.deepseek.com`      | DeepSeek API 基础地址（可替换代理/网关）  |
+| `CF_AIG_GATEWAY`               | `gem`                           | Cloudflare AI Gateway 名称                |
+| `GITHUB_API_BASE`              | `https://api.github.com`        | GitHub API 基础地址（GHES 可改）          |
+| `GITHUB_API_VERSION`           | `2022-11-28`                    | GitHub API 版本头                         |
+| `APP_TIMEZONE`                 | `Asia/Shanghai`                 | 应用时区（IANA 时区名，非法值会启动报错） |
+| `LOG_APP_NAME`                 | `nyarbot`                       | 日志服务名                                |
+| `ADMIN_DM_MIN_INTERVAL_MS`     | `5000`                          | 管理员日志私信最小间隔（毫秒）            |
+| `CONVERSATION_BUFFER_PATH`     | `data/conversation-buffer.json` | 对话缓冲持久化文件路径                    |
+| `BOT_MESSAGE_DELAY_MS`         | `400`                           | bot 被动回复多条消息时的间隔（毫秒）      |
+| `PROACTIVE_CHECK_INTERVAL_MS`  | `15000`                         | 主动发言轮询间隔（毫秒）                  |
+| `PROACTIVE_WINDOW_MS`          | `180000`                        | 主动发言观察窗口（毫秒）                  |
+| `PROACTIVE_MESSAGE_DELAY_MS`   | `400`                           | 主动发言多条消息间隔（毫秒）              |
+| `PROACTIVE_MAX_FAILURES`       | `5`                             | 主动发言连续失败停止阈值                  |
+| `PROACTIVE_COOLDOWN_HIGH_MS`   | `90000`                         | 高活跃冷却（毫秒）                        |
+| `PROACTIVE_COOLDOWN_MEDIUM_MS` | `180000`                        | 中活跃冷却（毫秒）                        |
+| `PROACTIVE_COOLDOWN_LOW_MS`    | `360000`                        | 低活跃冷却（毫秒）                        |
+| `DIARY_CHECK_INTERVAL_MS`      | `60000`                         | 日记跨天检查间隔（毫秒）                  |
+| `BUFFER_SAVE_INTERVAL_MS`      | `300000`                        | 对话缓冲自动保存间隔（毫秒）              |
 
 ---
 

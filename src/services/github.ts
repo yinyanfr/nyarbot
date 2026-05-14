@@ -1,8 +1,8 @@
 import config from "../configs/env.js";
 import { logger } from "../libs/logger.js";
 
-const API_BASE = "https://api.github.com";
-const API_VERSION = "2022-11-28";
+const API_BASE = config.githubApiBase;
+const API_VERSION = config.githubApiVersion;
 
 interface ContentItem {
   sha: string;

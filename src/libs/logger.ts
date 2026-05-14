@@ -9,7 +9,7 @@ const isDev = process.env.NODE_ENV !== "production";
 // Admin DM stream — forwards warn/error logs to the admin via Telegram
 // ---------------------------------------------------------------------------
 
-const MIN_DM_INTERVAL_MS = 5_000;
+const MIN_DM_INTERVAL_MS = config.adminDmMinIntervalMs;
 
 class AdminDmHandler {
   private botApi: Api<RawApi> | null = null;
@@ -104,7 +104,7 @@ function adminDmStream(): { write(msg: string): void } {
 
 function createLogger(): pino.Logger {
   const baseOptions: pino.LoggerOptions = {
-    name: "nyarbot",
+    name: config.logAppName,
     level: process.env.LOG_LEVEL ?? "info",
   };
 

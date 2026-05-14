@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.1] — 2026-05-14
+
+### Added
+
+- **Persona naming envs** (`src/configs/env.ts`, `src/libs/persona.ts`, prompts/docs): added `BOT_PERSONA_NAME`, `BOT_PERSONA_FULL_NAME`, `BOT_PERSONA_READING` so deployers can customize the bot's in-chat identity without changing code.
+
+### Changed
+
+- **Persona prompt unification** (`src/libs/persona.ts`, `src/libs/system-prompt.ts`, `src/libs/ai.ts`, `src/libs/diary.ts`, `src/handlers/index.ts`): extracted shared persona label/identity helpers and switched prompt strings/help text/status text to use env-driven persona values.
+- **Deployment configuration hardening** (`src/configs/env.ts`, `.env.example`, README/docs):
+  - `BOT_USERNAME` is now required.
+  - Added configurable envs for `DEEPSEEK_BASE_URL`, `CF_AIG_GATEWAY`, `GITHUB_API_BASE`, `GITHUB_API_VERSION`, timezone, logger naming/rate limit, proactive intervals/cooldowns, bot message delay, and buffer save path/interval.
+  - `APP_TIMEZONE` now validates IANA timezone format at startup and fails fast on invalid values.
+
+### Fixed
+
+- **Memory cap consistency during compression** (`src/services/firestore.ts`): `overwriteUserMemories()` now enforces `MEMORY_MAX_ENTRIES` when merging compressed memories with concurrently-added memories, preventing temporary overflow beyond the 30-entry cap.
+
 ## [0.8.0] — 2026-05-13
 
 ### Added

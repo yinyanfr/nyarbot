@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "./logger.js";
+import config from "../configs/env.js";
 
 interface HistoryEntry {
   uid: string;
@@ -10,10 +11,10 @@ interface HistoryEntry {
   timestamp: number;
 }
 
-const SAVE_PATH = path.resolve("data/conversation-buffer.json");
+const SAVE_PATH = path.resolve(config.conversationBufferPath);
 const STALE_MS = 2 * 60 * 60 * 1000; // 2 hours
 
-const MAX_HISTORY = 60;
+const MAX_HISTORY = 30;
 const MAX_TEXT_LEN = 500;
 const buffers = new Map<string, HistoryEntry[]>();
 

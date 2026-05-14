@@ -149,3 +149,4 @@ src/services/serviceAccountKey.json
 src/configs/index.ts
 
 tmp/
+opencode.json

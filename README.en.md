@@ -136,19 +136,45 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 
 See [Configuration Docs](docs/configuration.md) for details.
 
-| Variable           | Required | Description                                     |
-| ------------------ | -------- | ----------------------------------------------- |
-| `BOT_API_KEY`      | ✅       | Telegram Bot Token                              |
-| `TG_GROUP_ID`      | ✅       | Target group ID (bot only works in this group)  |
-| `TG_ADMIN_UID`     | ✅       | Admin Telegram user ID                          |
-| `DEEPSEEK_API_KEY` | ✅       | DeepSeek API Key                                |
-| `TAVILY_API_KEY`   | ✅       | Tavily Search API Key                           |
-| `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway Token (for Gemini vision) |
-| `CF_ACCOUNT_ID`    | ✅       | Cloudflare Account ID (for Gemini vision)       |
-| `BOT_USERNAME`     | ❌       | Bot username, default `nyarbot`                 |
-| `GITHUB_TOKEN`     | ❌       | GitHub PAT for pushing diaries to Hexo blog     |
-| `GITHUB_REPO`      | ❌       | GitHub repo in `owner/repo` format              |
-| `LOG_LEVEL`        | ❌       | Log level, default `info`                       |
+| Variable                | Required | Description                                      |
+| ----------------------- | -------- | ------------------------------------------------ |
+| `BOT_API_KEY`           | ✅       | Telegram Bot Token                               |
+| `BOT_PERSONA_NAME`      | ❌       | Bot persona display name, default `にゃる`       |
+| `BOT_PERSONA_FULL_NAME` | ❌       | Bot persona full name, default `晴海猫月`        |
+| `BOT_PERSONA_READING`   | ❌       | Persona reading, default `はるみ にゃる`         |
+| `TG_GROUP_ID`           | ✅       | Target group ID (bot only works in this group)   |
+| `TG_ADMIN_UID`          | ✅       | Admin Telegram user ID                           |
+| `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API Key                                 |
+| `TAVILY_API_KEY`        | ✅       | Tavily Search API Key                            |
+| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway Token (for Gemini vision)  |
+| `CF_ACCOUNT_ID`         | ✅       | Cloudflare Account ID (for Gemini vision)        |
+| `BOT_USERNAME`          | ✅       | Bot username (must match actual Telegram handle) |
+| `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog      |
+| `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format               |
+| `LOG_LEVEL`             | ❌       | Log level, default `info`                        |
+
+### Optional Advanced Configuration (with defaults)
+
+| Variable                       | Default                         | Description                                           |
+| ------------------------------ | ------------------------------- | ----------------------------------------------------- |
+| `DEEPSEEK_BASE_URL`            | `https://api.deepseek.com`      | DeepSeek API base URL (proxy/gateway friendly)        |
+| `CF_AIG_GATEWAY`               | `gem`                           | Cloudflare AI Gateway name                            |
+| `GITHUB_API_BASE`              | `https://api.github.com`        | GitHub API base URL (customize for GHES)              |
+| `GITHUB_API_VERSION`           | `2022-11-28`                    | GitHub API version header                             |
+| `APP_TIMEZONE`                 | `Asia/Shanghai`                 | App timezone (IANA name; invalid value fails startup) |
+| `LOG_APP_NAME`                 | `nyarbot`                       | Logger service name                                   |
+| `ADMIN_DM_MIN_INTERVAL_MS`     | `5000`                          | Min admin DM log interval in ms                       |
+| `CONVERSATION_BUFFER_PATH`     | `data/conversation-buffer.json` | Conversation buffer persistence path                  |
+| `BOT_MESSAGE_DELAY_MS`         | `400`                           | Delay between passive multi-message replies (ms)      |
+| `PROACTIVE_CHECK_INTERVAL_MS`  | `15000`                         | Proactive checker polling interval (ms)               |
+| `PROACTIVE_WINDOW_MS`          | `180000`                        | Proactive lookback window (ms)                        |
+| `PROACTIVE_MESSAGE_DELAY_MS`   | `400`                           | Delay between proactive multi-message sends (ms)      |
+| `PROACTIVE_MAX_FAILURES`       | `5`                             | Consecutive failures before proactive loop stops      |
+| `PROACTIVE_COOLDOWN_HIGH_MS`   | `90000`                         | Cooldown for high activity (ms)                       |
+| `PROACTIVE_COOLDOWN_MEDIUM_MS` | `180000`                        | Cooldown for medium activity (ms)                     |
+| `PROACTIVE_COOLDOWN_LOW_MS`    | `360000`                        | Cooldown for low activity (ms)                        |
+| `DIARY_CHECK_INTERVAL_MS`      | `60000`                         | Cross-day diary check interval (ms)                   |
+| `BUFFER_SAVE_INTERVAL_MS`      | `300000`                        | Conversation buffer auto-save interval (ms)           |
 
 ---
 

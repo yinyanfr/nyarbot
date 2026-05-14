@@ -75,14 +75,14 @@ export async function updateUserNickname(uid: string, nickname: string): Promise
   invalidateUserCache(uid);
 }
 
-export async function updateUserMemory(uid: string, memory: string): Promise<void> {
+export async function updateUserMemory(uid: string, memory: string): Promise<string[]> {
   const trimmed = memory.trim();
-  if (!trimmed) return;
+  if (!trimmed) return [];
 
   // Use a transaction so the append-and-trim is atomic: without it, two
   // concurrent writes could both pass the length check and leave the list
   // over the cap.
-  await db().runTransaction(async (tx) => {
+  const result = await db().runTransaction(async (tx) => {
     const ref = db().collection("users").doc(uid);
     const snap = await tx.get(ref);
     const existing: string[] =
@@ -92,7 +92,7 @@ export async function updateUserMemory(uid: string, memory: string): Promise<voi
 
     // Exact-string dedup (FieldValue.arrayUnion does the same, but we need the
     // post-write length for trimming, so we duplicate the check here).
-    if (existing.includes(trimmed)) return;
+    if (existing.includes(trimmed)) return existing;
 
     const next = [...existing, trimmed];
     // Hard cap: drop the oldest entries. The LLM gets a running window of
@@ -101,6 +101,36 @@ export async function updateUserMemory(uid: string, memory: string): Promise<voi
       next.length > MEMORY_MAX_ENTRIES ? next.slice(next.length - MEMORY_MAX_ENTRIES) : next;
 
     tx.update(ref, { memories: trimmedList });
+    return trimmedList;
+  });
+  invalidateUserCache(uid);
+  return result;
+}
+
+export async function overwriteUserMemories(
+  uid: string,
+  compressedMemories: string[],
+  originalMemories: string[],
+): Promise<void> {
+  await db().runTransaction(async (tx) => {
+    const ref = db().collection("users").doc(uid);
+    const snap = await tx.get(ref);
+    if (!snap.exists) return;
+
+    const existing: string[] = Array.isArray(snap.data()?.memories)
+      ? (snap.data()!.memories as string[])
+      : [];
+
+    // Remove the original (uncompressed) memories, keep any new ones added
+    // during the compression window.
+    const originalsSet = new Set(originalMemories);
+    const newMemories = existing.filter((m) => !originalsSet.has(m));
+    const merged = [...compressedMemories, ...newMemories];
+    const capped =
+      merged.length > MEMORY_MAX_ENTRIES
+        ? merged.slice(merged.length - MEMORY_MAX_ENTRIES)
+        : merged;
+    tx.update(ref, { memories: capped });
   });
   invalidateUserCache(uid);
 }

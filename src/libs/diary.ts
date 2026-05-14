@@ -5,6 +5,7 @@ import { todayDateStr, formatTimestamp } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub } from "../services/github.js";
 import config from "../configs/env.js";
+import { getPersonaLabel } from "./persona.js";
 
 let lastDate: string | null = null;
 
@@ -36,7 +37,7 @@ async function generateDiaryNotification(
   const { text } = await generateText({
     model: flashNoThinkModel,
     system:
-      "你是 nyarbot，一只傲娇的高中生猫娘 AI。你的日记刚刚更新了，请在群里发一条简短的消息告诉大家。" +
+      `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。你的日记刚刚更新了，请在群里发一条简短的消息告诉大家。` +
       "语气自然傲娇，像群友聊天一样。一句话感叹昨天，一句话告诉大家可以去看，附上链接。总共两到三句话。",
     prompt: `昨天的日记已经写好了喵~${urlNote}\n\n请用猫娘口吻在群里说一声。`,
     temperature: 0.8,
@@ -46,7 +47,7 @@ async function generateDiaryNotification(
 }
 
 function buildDiarySystemPrompt(date: string): string {
-  return `你是 nyarbot，一只傲娇的高中生猫娘 AI。
+  return `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。
 现在你需要回顾${date}的日记观察笔记，写一篇日记。
 
 要求：

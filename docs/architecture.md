@@ -1,6 +1,6 @@
 # Architecture
 
-nyarbot is a single-group Telegram bot written in TypeScript (ESM) with a catgirl persona.
+nyarbot is a single-group Telegram bot written in TypeScript (ESM) with a configurable catgirl persona.
 
 ## Data Flow
 
@@ -60,7 +60,7 @@ handlers/index.ts (setupHandlers)
     │     ├─ Dismiss retry (up to 3×, escalating reply hint)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
     │     └─ Send via sendAiMessages (typing indicator, stagger delay, sticker dispatch)
-    └─ Proactive checker (proactive.ts, 15s interval)
+└─ Proactive checker (proactive.ts, env-configurable interval)
           ├─ Phase 1: probeGate() — cheap model checks topic relevance
           └─ Phase 2: generateAiTurn() — full model generates reply
                 └─ ProactiveCallbacks: sendText, sendSticker, sendChatAction
@@ -134,7 +134,7 @@ If all retries still dismiss:
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  Cloudflare AI Gateway → Gemini 2.5 Flash              │
+│  Cloudflare AI Gateway → Gemini 3 Flash Preview         │
 │                                                          │
 │  • describeImage() — vision descriptions for DeepSeek    │
 │  • describeTweetPhotos() — tweet photo descriptions      │
@@ -144,7 +144,7 @@ If all retries still dismiss:
 ### Why two providers?
 
 - **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
-- **Gemini 2.5 Flash** handles image understanding via the Cloudflare AI Gateway. Descriptions are generated at request time and injected as `[图片: description]` text into DeepSeek's prompt.
+- **Gemini 3 Flash Preview** handles image understanding via the Cloudflare AI Gateway. Descriptions are generated at request time and injected as `[图片: description]` text into DeepSeek's prompt.
 
 ### Forced Web Search
 
@@ -156,7 +156,7 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 60 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
+- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Image entries include inline Gemini descriptions (e.g. `[图片: a cat sleeping]`); URL entries only include successfully fetched content (tweets: `[推文]: [Tweet url | @x: text | 配图: ...]`, normal: `[链接内容]: title — desc`). Raw URLs never enter the buffer to avoid proactive noise on unfetchable links.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Image cache**: Firestore `images/{fileId}` with 30-day TTL. On cache hit, the stored description is reused instead of re-downloading and re-describing the image.
 
@@ -166,7 +166,7 @@ This prevents the model from skipping the search tool call.
 
 Built per-turn with:
 
-- Catgirl persona and naturalness guidelines (based on human vs AI chat analysis)
+- Persona (name/reading/identity from env) and naturalness guidelines (based on human vs AI chat analysis)
 - Current user context (nickname, uid, memories)
 - Recent members list (for uid validation in memory/nickname tools)
 - Recent chat history
@@ -189,14 +189,14 @@ A lean variant for the proactive probe gate — persona only, no per-user memori
 3. **`sendAiMessages()`**:
    - Formats each message via `formatForTelegramHtml()` (Markdown → Telegram HTML, LaTeX → Unicode)
    - First message replies to the user's message; subsequent messages are standalone
-   - Staggers messages with 400ms delay (mimics human typing)
+   - Staggers messages with env-configurable delay (default 400ms; mimics human typing)
    - Dispatches sticker after all text messages (or sticker-only with reply reference)
    - Falls back to plain text if HTML parsing fails
 4. **Buffer push**: Each sent message is pushed to the conversation buffer
 
 ## Proactive Speaking (Two-Stage Probe)
 
-Every 15 seconds, `proactive.ts` checks the last 3 minutes of buffer history:
+`proactive.ts` checks recent buffer history on env-configurable intervals/windows (defaults: every 15 seconds, last 3 minutes):
 
 | Activity level | Recent user messages | Cooldown    |
 | -------------- | -------------------- | ----------- |
@@ -211,7 +211,7 @@ If cooldown has elapsed:
 
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.
 
-The proactive checker stops after 5 consecutive failures.
+The proactive checker stops after env-configurable consecutive failures (default: 5).
 
 ## Diary System
 
@@ -225,12 +225,12 @@ The bot records conversational observations via the `writeDiary` AI tool. The mo
 
 ### Midnight Generation
 
-A 60-second interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`) detects UTC+8 date changes:
+An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) detects date changes based on `APP_TIMEZONE`:
 
 1. When the date rolls over, it fetches yesterday's diary entries from Firestore.
 2. If entries exist, it calls DeepSeek v4 Pro (`proThinkModel`) with a system prompt to compose a natural first-person catgirl diary.
 3. The generated diary is saved to Firestore (`diary` field + `generatedAt` timestamp).
-4. If `GITHUB_TOKEN` and `GITHUB_REPO` are configured, the diary is pushed to the `nyarbot-diary` Hexo blog via GitHub Content API (`src/services/github.ts`).
+4. If `GITHUB_TOKEN` and `GITHUB_REPO` are configured, the diary is pushed to the target Hexo blog repo via GitHub Content API (`src/services/github.ts`).
 5. The GitHub push triggers a GitHub Actions workflow that builds and deploys to GitHub Pages.
 
 ### Admin /diary Command
@@ -249,4 +249,4 @@ diary/{YYYY-MM-DD}
 
 ### Timezone
 
-All date formatting uses UTC+8 (`Asia/Shanghai`), centralized in `src/libs/time.ts` via `dayjs`. Functions: `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`.
+All date formatting uses env-configurable timezone (`APP_TIMEZONE`, default `Asia/Shanghai`), centralized in `src/libs/time.ts` via `dayjs`. Functions: `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`.

@@ -1,11 +1,12 @@
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
+import config from "../configs/env.js";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const TZ = "Asia/Shanghai";
+const TZ = config.appTimezone;
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
@@ -31,5 +32,6 @@ export function formatTimestamp(tsMs: number, fmt: string): string {
 
 export function formatSystemPromptTime(): string {
   const t = now();
-  return `${t.format("YYYY年MM月DD日")} 周${WEEKDAYS[t.day()]} ${t.format("HH:mm")} (UTC+8)`;
+  const tzOffset = t.format("Z");
+  return `${t.format("YYYY年MM月DD日")} 周${WEEKDAYS[t.day()]} ${t.format("HH:mm")} (${TZ}, UTC${tzOffset})`;
 }

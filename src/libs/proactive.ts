@@ -9,17 +9,17 @@ import { getStickerByFileId } from "./sticker-store.js";
 // Configuration
 // ---------------------------------------------------------------------------
 
-const CHECK_INTERVAL_MS = 15_000; // check every 15 seconds
-const WINDOW_MS = 3 * 60 * 1000; // look at last 3 minutes of messages
+const CHECK_INTERVAL_MS = config.proactiveCheckIntervalMs; // check interval
+const WINDOW_MS = config.proactiveWindowMs; // lookback window
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
-const MESSAGE_DELAY_MS = 400;
+const MESSAGE_DELAY_MS = config.proactiveMessageDelayMs;
 
 // Cooldown between bot messages, based on group activity
 function getCooldownMs(activityCount: number): number {
-  if (activityCount >= 7) return 90_000; // high: up to every 1.5 min
-  if (activityCount >= 3) return 180_000; // medium: every 3 min
-  return 360_000; // low: every 6 min
+  if (activityCount >= 7) return config.proactiveCooldownHighMs; // high activity
+  if (activityCount >= 3) return config.proactiveCooldownMediumMs; // medium activity
+  return config.proactiveCooldownLowMs; // low activity
 }
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ let lastBotMessageTime = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let stopped = false;
 let consecutiveFailures = 0;
-const MAX_FAILURES = 5;
+const MAX_FAILURES = config.proactiveMaxFailures;
 
 // ---------------------------------------------------------------------------
 // Callback interface for sending messages to Telegram

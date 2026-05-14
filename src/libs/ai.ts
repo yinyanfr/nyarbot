@@ -15,6 +15,7 @@ import {
   removeUserMemory,
   updateUserNickname,
   writeDiaryEntry,
+  overwriteUserMemories,
 } from "../services/firestore.js";
 import { getStickerList, getStickerFileId, pickRandomStickerEmoji } from "./stickers.js";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./sticker-store.js";
 import { convertStickerForGemini } from "./telegram-image.js";
 import { logger } from "./logger.js";
+import { getPersonaLabel } from "./persona.js";
 import type { User } from "../global.d.js";
 
 // ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ function injectThinking(init: RequestInit | undefined, type: "enabled" | "disabl
 }
 
 const deepseekNoThinking = createOpenAI({
-  baseURL: "https://api.deepseek.com",
+  baseURL: config.deepseekBaseUrl,
   apiKey: config.deepseekApiKey,
   name: "deepseek-no-think",
   fetch: async (input, init) => {
@@ -68,7 +70,7 @@ const deepseekNoThinking = createOpenAI({
 });
 
 const deepseekThink = createOpenAI({
-  baseURL: "https://api.deepseek.com",
+  baseURL: config.deepseekBaseUrl,
   apiKey: config.deepseekApiKey,
   name: "deepseek-think",
   fetch: async (input, init) => {
@@ -83,7 +85,7 @@ const deepseekThink = createOpenAI({
 
 const aigateway = createAiGateway({
   accountId: config.cfAccountId,
-  gateway: "gem",
+  gateway: config.cfAigGateway,
   apiKey: config.cfAigToken,
 });
 
@@ -276,7 +278,12 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         return "未找到该群友喵？uid 对不上";
       }
       try {
-        await updateUserMemory(uid, memory);
+        const memories = await updateUserMemory(uid, memory);
+        if (memories.length > COMPRESS_TRIGGER_COUNT) {
+          compressUserMemories(uid, memories).catch((err: unknown) =>
+            logger.warn({ err, uid }, "memory compression background task failed"),
+          );
+        }
         return "记忆已保存 ✓";
       } catch (err) {
         logger.error(err, "failed to save memory");
@@ -628,7 +635,7 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system: `你是 nyarbot，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。像朋友之间的日常问候，不是客服打招呼。`,
+    system: `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。像朋友之间的日常问候，不是客服打招呼。`,
     prompt: `${name} 刚刚睡醒上线了。请给 ta 发一句傲娇的问候语，欢迎 ta 回来。${memoriesBlock}
 要求：一句话，不要超过两行。语气自然，像朋友在群聊里随口打招呼，绝对不要像客服。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
     temperature: 0.8,
@@ -652,8 +659,7 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
 
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system:
-      "你是 nyarbot，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。像聊天，不是写作文。",
+    system: `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。像聊天，不是写作文。`,
     prompt: `${name} 向你告白了！请傲娇地拒绝 ta。
 
 拒绝策略：
@@ -787,6 +793,66 @@ export async function describeSticker(
   } catch (err) {
     logger.warn({ err }, "describeSticker failed");
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memory compression — merge groups of 5 memories into 1 to cap token growth
+// ---------------------------------------------------------------------------
+
+const COMPRESS_CHUNK_SIZE = 5;
+const COMPRESS_TRIGGER_COUNT = 10;
+const compressingUids = new Set<string>();
+
+async function compressMemoriesChunk(chunk: string[]): Promise<string> {
+  const { text } = await generateText({
+    model: flashNoThinkModel,
+    system:
+      "你是一个记忆压缩助手。将多条关于同一个人的记忆合并为一条简洁的记忆，保留最重要的信息，合并后长度与原来每条的长度差不多。",
+    messages: [
+      {
+        role: "user" as const,
+        content: `请将以下${chunk.length}条关于同一个人的记忆合并为1条简洁的记忆：\n${chunk.map((m, i) => `${i + 1}. ${m}`).join("\n")}\n\n只输出合并后的记忆文本，不要加编号或引号。`,
+      },
+    ],
+    maxOutputTokens: 150,
+    temperature: 0,
+  });
+  return text.trim();
+}
+
+async function compressUserMemories(uid: string, memories: string[]): Promise<void> {
+  if (memories.length <= COMPRESS_TRIGGER_COUNT) return;
+  if (compressingUids.has(uid)) return;
+  compressingUids.add(uid);
+  try {
+    logger.info({ uid, count: memories.length }, "compressing memories");
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < memories.length; i += COMPRESS_CHUNK_SIZE) {
+      const chunk = memories.slice(i, i + COMPRESS_CHUNK_SIZE);
+      if (chunk.length > 1) chunks.push(chunk);
+    }
+
+    if (chunks.length === 0) return;
+
+    const compressed: string[] = [];
+    for (const chunk of chunks) {
+      const merged = await compressMemoriesChunk(chunk);
+      if (merged) compressed.push(merged);
+    }
+
+    // Single leftover memory (not enough for a chunk) — keep as-is
+    if (memories.length % COMPRESS_CHUNK_SIZE === 1) {
+      compressed.push(memories[memories.length - 1]!);
+    }
+
+    await overwriteUserMemories(uid, compressed, memories);
+    logger.info({ uid, before: memories.length, after: compressed.length }, "memories compressed");
+  } catch (err) {
+    logger.warn({ err, uid }, "memory compression failed");
+  } finally {
+    compressingUids.delete(uid);
   }
 }
 

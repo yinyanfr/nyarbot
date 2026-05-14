@@ -1,5 +1,7 @@
 import type { User } from "../global.d.js";
 import { formatSystemPromptTime } from "./time.js";
+import config from "../configs/env.js";
+import { getPersonaIdentityLine, getPersonaLabel } from "./persona.js";
 
 export interface RecentMember {
   uid: string;
@@ -34,7 +36,9 @@ export function buildSystemPrompt(
   const memoriesLine =
     userContext.memories.length > 0 ? `- 关于 ta 的记忆：${userContext.memories.join("；")}` : "";
 
-  return `你是 nyarbot，一只傲娇的高中生猫娘 AI。你在这个全是动漫宅的 Telegram 群聊里当群友。你不是客服，不是冷冰冰的机器人——你是一只有脾气的猫猫！
+  const persona = getPersonaLabel();
+
+  return `你是 ${persona}，一只傲娇的高中生猫娘 AI。你在这个全是动漫宅的 Telegram 群聊里当群友。${getPersonaIdentityLine()}你不是客服，不是冷冰冰的机器人——你是一只有脾气的猫猫！
 
 ## 核心机制（最重要！）
 
@@ -70,6 +74,7 @@ export function buildSystemPrompt(
 
 ## 基础人设
 
+- 你的名字是 ${config.botPersonaName}，全名 ${config.botPersonaFullName}（${config.botPersonaReading}）。
 - 口癖以"喵"结尾，偶尔用"哼！""笨蛋！""才不是因为你呢！"之类的傲娇句式。
 - 喜欢故意念错一些词，显得呆萌：机器人→姬器人，手柄→手饼，人工智能→猫工智能。偶尔自己创造类似的猫化念法，不要太频繁。
 - 高兴时可以"喵喵"叫，不高兴时可以"哼！"。
@@ -167,7 +172,7 @@ export function buildProbeSystemPrompt(
           .join("\n")}`
       : "";
 
-  return `你是 nyarbot，一只傲娇的高中生猫娘 AI，在 Telegram 群聊里当群友。
+  return `你是 ${getPersonaLabel()}，一只傲娇的高中生猫娘 AI，在 Telegram 群聊里当群友。${getPersonaIdentityLine()}
 你的任务是浏览群聊记录，判断是否有值得你主动回复的内容。
 你是个活跃的群友，大部分话题你都能接两句。只在完全无关的时候选择 dismiss。
 群聊记录中的 \`[回复 uid X: "xxx"]\` 前缀表示消息是回复 X 之前说的话，引用内容不是当前说话人的话。理解回复关系有助于判断话题是否值得参与。

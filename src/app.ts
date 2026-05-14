@@ -88,14 +88,14 @@ async function main(): Promise<void> {
     },
   });
 
-  // Midnight diary generation: check every 60s if the UTC+8 date has changed
-  diaryTimer = setInterval(checkAndGenerateDiary, 60_000);
+  // Midnight diary generation: check interval configurable by env
+  diaryTimer = setInterval(checkAndGenerateDiary, config.diaryCheckIntervalMs);
   diaryTimer.unref?.();
 
-  // Periodic buffer save: flush to disk every 5 min for crash resilience
+  // Periodic buffer save: interval configurable by env
   bufferSaveTimer = setInterval(() => {
     saveConversationBuffer().catch(() => void 0);
-  }, 300_000);
+  }, config.bufferSaveIntervalMs);
   bufferSaveTimer.unref?.();
 
   await bot.start({
