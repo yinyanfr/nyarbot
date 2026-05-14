@@ -16,8 +16,9 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
 - 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
+- 📔 **Diary System** — Bot auto-records observational notes during chat, generates a consolidated catgirl diary at midnight, publishes to Hexo blog
 - 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
-- 🎨 **Sticker Replies** — Select stickers by Chinese description (multi-level matching), standalone or alongside text
+- 🎨 **Sticker Replies** — Select stickers by emoji + keywords (two-stage pre-filter + semantic match), standalone or alongside text
 - 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
 - ⌨️ **Typing Indicator** — Shows "typing..." while AI generates
 - 📝 **Markdown→Telegram HTML** — Replies auto-convert Markdown bold/italic/code/links to Telegram HTML
@@ -33,6 +34,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 | Vision                 | Gemini 2.5 Flash (via Cloudflare AI Gateway)          |
 | Web Search             | `@tavily/ai-sdk`                                      |
 | Database               | `firebase-admin` (Firestore)                          |
+| Date/Time              | `dayjs` (UTC+8, Asia/Shanghai)                        |
 | Runtime                | Node.js, TypeScript (ESM, moduleResolution: nodenext) |
 
 ---
@@ -62,18 +64,21 @@ src/
 │   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
 │   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
 │   │                           #   naturalness late-binding prompt
-│   ├── stickers.ts             # Sticker facade (description selection + emoji lookup + random fallback)
+│   ├── stickers.ts             # Sticker facade (keyword/description selection + emoji lookup + random fallback)
 │   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
 │   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
 │   │                           #   two-stage probe, cooldown, sticker/typing dispatch
+│   ├── diary.ts                # Diary: midnight timer, per-date diary generation
+│   ├── time.ts                 # dayjs timezone utils (UTC+8)
 │   ├── telegram-image.ts       # Telegram file download → base64 data URL
 │   ├── logger.ts                # Pino logger
 │   └── index.ts                # Barrel re-exports
 ├── services/
 │   ├── index.ts                # Firebase Admin SDK initialization
-│   ├── firestore.ts            # Firestore CRUD (users, image cache, nighty/morning)
+│   ├── firestore.ts            # Firestore CRUD (users, image cache, diary, nighty/morning)
+│   ├── github.ts               # GitHub Content API: push diary to Hexo blog
 │   └── serviceAccountKey.json  # Firebase credentials (gitignored)
-└── global.d.ts                 # User type definition
+└── global.d.ts                 # User, DiaryEntry type definitions
 ```
 
 See [Architecture Docs](docs/architecture.md) for details.
@@ -113,6 +118,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | `/nighty` | Say goodnight; bot sends a morning greeting 8+ hours later  |
 | `/status` | Bot status — uptime, buffer size, memory count (admin only) |
 | `/reset`  | Clear conversation history buffer (admin only)              |
+| `/diary`  | Generate today's diary preview (admin only, private chat)   |
 
 | Scenario           | Trigger                                                            |
 | ------------------ | ------------------------------------------------------------------ |
@@ -122,6 +128,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | Save memory        | Tell her "remember XXX"                                            |
 | Share URL          | Send a link directly (@ her for a summary, otherwise context only) |
 | Send image/sticker | Send directly, Gemini identifies and catgirl comments              |
+| Diary observation  | Bot auto-records notes via writeDiary tool during conversation     |
 
 ---
 
@@ -129,17 +136,45 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 
 See [Configuration Docs](docs/configuration.md) for details.
 
-| Variable           | Required | Description                                     |
-| ------------------ | -------- | ----------------------------------------------- |
-| `BOT_API_KEY`      | ✅       | Telegram Bot Token                              |
-| `TG_GROUP_ID`      | ✅       | Target group ID (bot only works in this group)  |
-| `TG_ADMIN_UID`     | ✅       | Admin Telegram user ID                          |
-| `DEEPSEEK_API_KEY` | ✅       | DeepSeek API Key                                |
-| `TAVILY_API_KEY`   | ✅       | Tavily Search API Key                           |
-| `CF_AIG_TOKEN`     | ✅       | Cloudflare AI Gateway Token (for Gemini vision) |
-| `CF_ACCOUNT_ID`    | ✅       | Cloudflare Account ID (for Gemini vision)       |
-| `BOT_USERNAME`     | ❌       | Bot username, default `nyarbot`                 |
-| `LOG_LEVEL`        | ❌       | Log level, default `info`                       |
+| Variable                | Required | Description                                      |
+| ----------------------- | -------- | ------------------------------------------------ |
+| `BOT_API_KEY`           | ✅       | Telegram Bot Token                               |
+| `BOT_PERSONA_NAME`      | ❌       | Bot persona display name, default `にゃる`       |
+| `BOT_PERSONA_FULL_NAME` | ❌       | Bot persona full name, default `晴海猫月`        |
+| `BOT_PERSONA_READING`   | ❌       | Persona reading, default `はるみ にゃる`         |
+| `TG_GROUP_ID`           | ✅       | Target group ID (bot only works in this group)   |
+| `TG_ADMIN_UID`          | ✅       | Admin Telegram user ID                           |
+| `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API Key                                 |
+| `TAVILY_API_KEY`        | ✅       | Tavily Search API Key                            |
+| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway Token (for Gemini vision)  |
+| `CF_ACCOUNT_ID`         | ✅       | Cloudflare Account ID (for Gemini vision)        |
+| `BOT_USERNAME`          | ✅       | Bot username (must match actual Telegram handle) |
+| `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog      |
+| `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format               |
+| `LOG_LEVEL`             | ❌       | Log level, default `info`                        |
+
+### Optional Advanced Configuration (with defaults)
+
+| Variable                       | Default                         | Description                                           |
+| ------------------------------ | ------------------------------- | ----------------------------------------------------- |
+| `DEEPSEEK_BASE_URL`            | `https://api.deepseek.com`      | DeepSeek API base URL (proxy/gateway friendly)        |
+| `CF_AIG_GATEWAY`               | `gem`                           | Cloudflare AI Gateway name                            |
+| `GITHUB_API_BASE`              | `https://api.github.com`        | GitHub API base URL (customize for GHES)              |
+| `GITHUB_API_VERSION`           | `2022-11-28`                    | GitHub API version header                             |
+| `APP_TIMEZONE`                 | `Asia/Shanghai`                 | App timezone (IANA name; invalid value fails startup) |
+| `LOG_APP_NAME`                 | `nyarbot`                       | Logger service name                                   |
+| `ADMIN_DM_MIN_INTERVAL_MS`     | `5000`                          | Min admin DM log interval in ms                       |
+| `CONVERSATION_BUFFER_PATH`     | `data/conversation-buffer.json` | Conversation buffer persistence path                  |
+| `BOT_MESSAGE_DELAY_MS`         | `400`                           | Delay between passive multi-message replies (ms)      |
+| `PROACTIVE_CHECK_INTERVAL_MS`  | `15000`                         | Proactive checker polling interval (ms)               |
+| `PROACTIVE_WINDOW_MS`          | `180000`                        | Proactive lookback window (ms)                        |
+| `PROACTIVE_MESSAGE_DELAY_MS`   | `400`                           | Delay between proactive multi-message sends (ms)      |
+| `PROACTIVE_MAX_FAILURES`       | `5`                             | Consecutive failures before proactive loop stops      |
+| `PROACTIVE_COOLDOWN_HIGH_MS`   | `90000`                         | Cooldown for high activity (ms)                       |
+| `PROACTIVE_COOLDOWN_MEDIUM_MS` | `180000`                        | Cooldown for medium activity (ms)                     |
+| `PROACTIVE_COOLDOWN_LOW_MS`    | `360000`                        | Cooldown for low activity (ms)                        |
+| `DIARY_CHECK_INTERVAL_MS`      | `60000`                         | Cross-day diary check interval (ms)                   |
+| `BUFFER_SAVE_INTERVAL_MS`      | `300000`                        | Conversation buffer auto-save interval (ms)           |
 
 ---
 

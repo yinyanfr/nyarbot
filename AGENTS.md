@@ -47,16 +47,20 @@ node dist/app.js   # run the compiled bot
 - `src/libs/sticker-store.ts` — Firestore-backed sticker cache: `stickers` (bot's library) + `received_stickers` (user-sent), in-memory `onSnapshot` sync, `getStickerByDescription()`, `getStickerByFileId()`
 - `src/libs/telegram-image.ts` — Telegram file download as data URL + sticker conversion (webm→webp via `fluent-ffmpeg` + `ffmpeg-static`, signature-based `application/octet-stream` detection)
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
+- `src/libs/diary.ts` — diary system: `checkAndGenerateDiary()` (midnight timer), `generateDiaryForDate()` (on-demand, used by admin /diary), imports `proThinkModel` from ai.ts
+- `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, fixed TZ `Asia/Shanghai`
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization
-- `src/services/firestore.ts` — Firestore operations: `getOrCreateUser`, `cacheImage`, `getCachedImage`
-- `src/global.d.ts` — shared types (`User` with uid, nickname, memories)
+- `src/services/firestore.ts` — Firestore operations: `getOrCreateUser`, `cacheImage`, `getCachedImage`, `writeDiaryEntry`, `getDiaryEntries`, `writeGeneratedDiary`
+- `src/services/github.ts` — GitHub Content API: `pushDiaryToGithub()` pushes Hexo-formatted diary markdown to `nyarbot-diary` repo (source/\_posts/), triggers Pages deploy via Actions
+- `src/global.d.ts` — shared types (`User` with uid, nickname, memories, `DiaryEntry` with ts/content)
 
 ## Secrets (important)
 
 - All secrets live in `.env` (gitignored). Template at `.env.example`.
 - `dotenv/config` is imported at the top of `src/app.ts`.
 - Firebase service account JSON is at `src/services/serviceAccountKey.json` (gitignored).
+- `GITHUB_TOKEN` and `GITHUB_REPO` are optional — bot runs fine without GitHub publishing.
 
 ## Conventions
 
@@ -73,3 +77,5 @@ node dist/app.js   # run the compiled bot
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`tavilySearch` tool**: Must be conditionally included via spread syntax (`...(needsSearch ? { webSearch: ... } : {})`) not set to `undefined`.
 - **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.
+- **Diary system**: Model writes observations via `writeDiary` tool. Midnight (UTC+8) auto-generates yesterday's diary via DeepSeek v4 Pro with thinking. Admin `/diary` in private DM generates today's diary on demand (preview only, no save/push). GitHub push (via `GITHUB_TOKEN`) only on midnight generation, not on `/diary`.
+- **Timezone**: All date formatting is UTC+8 (`Asia/Shanghai`), centralized in `src/libs/time.ts`. Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.

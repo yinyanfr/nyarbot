@@ -4,18 +4,38 @@
 
 所有配置通过 `.env` 文件（已 gitignore）。模板在 `.env.example`。
 
-| 变量               | 必填 | 说明                                                                        |
-| ------------------ | ---- | --------------------------------------------------------------------------- |
-| `BOT_API_KEY`      | ✅   | Telegram Bot Token（来自 [@BotFather](https://t.me/BotFather)）             |
-| `TG_ADMIN_UID`     | ✅   | 你的 Telegram 用户 ID（用于 `/status` 和 `/reset` 权限控制）                |
-| `TG_GROUP_ID`      | ✅   | 目标群组 ID — bot 忽略所有其他聊天/私聊的消息                               |
-| `DEEPSEEK_API_KEY` | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
-| `TAVILY_API_KEY`   | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
-| `CF_AIG_TOKEN`     | ✅   | Cloudflare AI Gateway token，用于 Gemini 图片识别调用                       |
-| `CF_ACCOUNT_ID`    | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
-| `BOT_USERNAME`     | ❌   | Bot 用户名（默认：`nyarbot`）                                               |
-| `LOG_LEVEL`        | ❌   | Pino 日志级别（默认：`info`）                                               |
-| `PORT`             | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
+| 变量                    | 必填 | 说明                                                                        |
+| ----------------------- | ---- | --------------------------------------------------------------------------- |
+| `BOT_API_KEY`           | ✅   | Telegram Bot Token（来自 [@BotFather](https://t.me/BotFather)）             |
+| `BOT_PERSONA_NAME`      | ❌   | 人设显示名（用于提示词/帮助文案，默认：`にゃる`）                           |
+| `BOT_PERSONA_FULL_NAME` | ❌   | 人设全名（默认：`晴海猫月`）                                                |
+| `BOT_PERSONA_READING`   | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
+| `TG_ADMIN_UID`          | ✅   | 你的 Telegram 用户 ID（用于 `/status` 和 `/reset` 权限控制）                |
+| `TG_GROUP_ID`           | ✅   | 目标群组 ID — bot 忽略所有其他聊天/私聊的消息                               |
+| `DEEPSEEK_API_KEY`      | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
+| `TAVILY_API_KEY`        | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
+| `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway token，用于 Gemini 图片识别调用                       |
+| `CF_ACCOUNT_ID`         | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
+| `BOT_USERNAME`          | ✅   | Telegram bot 用户名（必填，用于 @提及匹配）                                 |
+| `GITHUB_TOKEN`          | ❌   | GitHub PAT，用于推送日记到 Hexo 博客（格式 `ghp_...`）                      |
+| `GITHUB_REPO`           | ❌   | GitHub 仓库名，格式 `owner/repo`（如 `yinyanfr/nyarbot-diary`）             |
+| `LOG_LEVEL`             | ❌   | Pino 日志级别（默认：`info`）                                               |
+| `PORT`                  | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
+
+其他可选变量（带默认值）：
+
+- `DEEPSEEK_BASE_URL`（`https://api.deepseek.com`）
+- `CF_AIG_GATEWAY`（`gem`）
+- `GITHUB_API_BASE`（`https://api.github.com`）
+- `GITHUB_API_VERSION`（`2022-11-28`）
+- `APP_TIMEZONE`（`Asia/Shanghai`，启动时会校验 IANA 时区，非法值直接报错）
+- `LOG_APP_NAME`、`ADMIN_DM_MIN_INTERVAL_MS`
+- `CONVERSATION_BUFFER_PATH`、`BUFFER_SAVE_INTERVAL_MS`
+- `BOT_MESSAGE_DELAY_MS`
+- `PROACTIVE_CHECK_INTERVAL_MS`、`PROACTIVE_WINDOW_MS`、`PROACTIVE_MESSAGE_DELAY_MS`、
+  `PROACTIVE_MAX_FAILURES`、`PROACTIVE_COOLDOWN_HIGH_MS`、
+  `PROACTIVE_COOLDOWN_MEDIUM_MS`、`PROACTIVE_COOLDOWN_LOW_MS`
+- `DIARY_CHECK_INTERVAL_MS`
 
 ## Firebase
 
@@ -30,6 +50,7 @@
 | ----------------- | ---------------- | ------------------------------------------------------------------------ |
 | `users/{uid}`     | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?` |
 | `images/{fileId}` | Telegram file_id | `fileId`、`description`、`cachedAt`                                      |
+| `diary/{date}`    | 日期 YYYY-MM-DD  | `date`、`entries[]`、`diary?`、`generatedAt?`                            |
 
 ## DeepSeek 模型
 
@@ -40,14 +61,15 @@ Bot 使用两个模型，各有两种思考模式变体：
 | `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、好人卡、探测门、URL/图片描述                 |
 | `deepseek-v4-flash` | 启用（`thinking: {type: "enabled"}`）  | 复杂对话（tier=`complex`），带 send_message/dismiss 工具调用 |
 | `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 技术问题（tier=`tech`），带 send_message/dismiss 工具调用    |
+| `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 日记生成（午夜汇总 / `/diary` 命令）                         |
 
-思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 为 `https://api.deepseek.com`（无 `/v1` 后缀）。
+思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
 
 ## Cloudflare AI Gateway
 
-Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称 `gem` 在 `ai.ts` 中设置；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
+Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-使用的模型：`google-ai-studio/gemini-2.5-flash` — 快速、便宜，且支持视觉输入。也用于 `describeTweetPhotos()` 中的批量推文配图描述。
+使用的模型：`google-ai-studio/gemini-3-flash-preview` — 快速、便宜，且支持视觉输入。也用于 `describeTweetPhotos()` 中的批量推文配图描述。
 
 ## 工具调用架构
 
@@ -60,7 +82,8 @@ Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 | `saveMemory`   | 记录关于群友的记忆（uid 已验证）                      |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 通过中文描述选择贴纸（编号列表）                      |
+| `sendSticker`  | 通过 emoji + 关键词选择贴纸（两阶段预选 + 语义匹配）  |
+| `writeDiary`   | 记录关于当前对话的观察笔记                            |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 
 当 `needsSearch=true` 时，追加一条强制指令确保模型在回答前调用 `webSearch`。

@@ -5,6 +5,7 @@ export interface StickerDoc {
   file_id: string;
   emoji: string[];
   description: string;
+  keywords?: string[];
   source: "migration" | "adopted";
   adoptedAt?: number;
 }
@@ -13,6 +14,7 @@ export interface ReceivedStickerDoc {
   file_id: string;
   emoji: string[];
   description: string;
+  keywords?: string[];
   receivedAt: number;
 }
 
@@ -115,12 +117,58 @@ export function getStickerByDescription(description: string): StickerDoc | null 
   return null;
 }
 
-export function getAllStickerList(): { description: string; emoji: string }[] {
-  const result: { description: string; emoji: string }[] = [];
+export function getAllStickerList(): { description: string; keywords: string[]; emoji: string }[] {
+  const result: { description: string; keywords: string[]; emoji: string }[] = [];
   for (const [, doc] of cache) {
-    result.push({ description: doc.description, emoji: doc.emoji[0] ?? "" });
+    result.push({
+      description: doc.description,
+      keywords: doc.keywords ?? [],
+      emoji: doc.emoji[0] ?? "",
+    });
   }
   return result;
+}
+
+export function filterStickersByKeywords(
+  keywords: string[],
+  limit = 5,
+): { description: string; emoji: string; fileId: string }[] {
+  const scored: { doc: StickerDoc; score: number }[] = [];
+  for (const [, doc] of cache) {
+    const docKeywords = doc.keywords ?? [];
+    if (docKeywords.length === 0) continue;
+    let score = 0;
+    for (const kw of keywords) {
+      for (const dk of docKeywords) {
+        if (dk === kw) score += 3;
+        else if (dk.includes(kw) || kw.includes(dk)) score += 1;
+      }
+    }
+    if (score > 0) scored.push({ doc, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  const matched = scored.slice(0, limit).map((s) => ({
+    description: s.doc.description,
+    emoji: s.doc.emoji[0] ?? "",
+    fileId: s.doc.file_id,
+  }));
+  if (matched.length > 0) return matched;
+
+  // Fallback: no keyword matches — return stickers without keywords,
+  // so the Flash model can still pick from them during semantic match.
+  const noKeyword: { description: string; emoji: string; fileId: string }[] = [];
+  for (const [, doc] of cache) {
+    if (noKeyword.length >= limit) break;
+    const docKeywords = doc.keywords ?? [];
+    if (docKeywords.length === 0 && doc.description && doc.description.length >= 3) {
+      noKeyword.push({
+        description: doc.description,
+        emoji: doc.emoji[0] ?? "",
+        fileId: doc.file_id,
+      });
+    }
+  }
+  return noKeyword;
 }
 
 export function stickerStoreSize(): number {

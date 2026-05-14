@@ -45,7 +45,7 @@ The previous streaming architecture (`streamText` + `sendMessage` + `editMessage
 
 Additional benefits:
 
-- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers by Chinese description. The `adoptSticker` tool lets the model adopt user-sent stickers into its library.
+- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers by emoji + keywords (two-stage shortlist + semantic match). The `adoptSticker` tool lets the model adopt user-sent stickers into its library.
 - **Memory tools**: `saveMemory`, `setNickname`, `deleteMemory` are first-class operations with uid validation.
 - **Dismiss retry**: When triggered but dismissed, the handler can retry with escalating hints.
 
@@ -68,6 +68,19 @@ DeepSeek outputs Markdown (bold, italic, code, links, LaTeX math). Telegram's Bo
 ### Why dismiss retry only on triggered paths?
 
 When the user @mentions or replies to the bot, silence is almost always wrong — the user expects a response. Retrying with escalating hints ensures the model eventually speaks. For proactive messages, silence is a valid and expected choice, so no retry is needed.
+
+### Why a diary system?
+
+The bot records conversational observations via the `writeDiary` AI tool rather than post-hoc extraction. The model decides what's worth recording based on the conversation context — no rule-based triggers or frequency limits. At midnight (based on `APP_TIMEZONE`), observations are consolidated into a natural first-person catgirl diary using DeepSeek v4 Pro with thinking. The generated diary is pushed to a Hexo blog via GitHub Content API for public reading.
+
+### Why dayjs for date handling?
+
+`dayjs` (2KB) was chosen over `date-fns`, `luxon`, or `Temporal` for:
+
+- Smallest bundle size with timezone support
+- Plugin system (`utc` + `timezone` plugins)
+- Moment.js-compatible API (familiar, concise)
+- All timezone-aware formatting centralized in `src/libs/time.ts` with env-configurable `APP_TIMEZONE` (default `Asia/Shanghai`)
 
 ### In-memory state
 
@@ -118,4 +131,19 @@ interface CachedImage {
   description: string; // Gemini-generated Chinese description
   cachedAt: number; // ms since epoch, 30-day TTL
 }
+```
+
+### `diary/{date}`
+
+```typescript
+interface DiaryEntry {
+  ts: number; // ms since epoch
+  content: string; // natural-language observation
+}
+
+// Document fields:
+// date: string (e.g., "2026-05-13")
+// entries: DiaryEntry[] (via arrayUnion)
+// diary?: string (generated diary text)
+// generatedAt?: number (ms since epoch)
 ```

@@ -1,6 +1,6 @@
 # 架构
 
-nyarbot 是一个用 TypeScript (ESM) 编写的单群组 Telegram 机器人，拥有猫娘人设。
+nyarbot 是一个用 TypeScript (ESM) 编写的单群组 Telegram 机器人，拥有可配置的猫娘人设。
 
 ## 数据流
 
@@ -54,12 +54,13 @@ handlers/index.ts（setupHandlers）
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-    │     │           deleteMemory、sendSticker、adoptSticker
-    │     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
+│     │           deleteMemory、sendSticker、adoptSticker
+│     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
+│     ├─ 可选：writeDiary → firestore.ts（diary/{date}）
     │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
     │     └─ 通过 sendAiMessages 发送（打字指示、消息间隔、贴纸分发）
-    └─ 主动插话检查器（proactive.ts，每15秒）
+    └─ 主动插话检查器（proactive.ts，间隔可由环境变量配置）
           ├─ 阶段一：probeGate() — 廉价模型判断话题相关性
           └─ 阶段二：generateAiTurn() — 完整模型生成回复
                 └─ ProactiveCallbacks：sendText、sendSticker、sendChatAction
@@ -71,16 +72,17 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 
 ### 可用工具
 
-| 工具           | 用途                                                                                                                              |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                                                                    |
-| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                                                                   |
-| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                                                                      |
-| `setNickname`  | 设置/更新群友的昵称                                                                                                               |
-| `deleteMemory` | 删除关于群友的指定记忆                                                                                                            |
-| `sendSticker`  | 通过中文描述选择贴纸（编号列表），多级回退：精确/子串 → DeepSeek Flash 语义匹配 → emoji → 随机。直接返回 file_id。                |
-| `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。设置 `stickerFileId` 以便贴纸发送到聊天。拒绝无有效描述的贴纸。 |
-| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                             |
+| 工具           | 用途                                                                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                                                                                  |
+| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                                                                                 |
+| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                                                                                    |
+| `setNickname`  | 设置/更新群友的昵称                                                                                                                             |
+| `deleteMemory` | 删除关于群友的指定记忆                                                                                                                          |
+| `sendSticker`  | 通过 emoji + 关键词从紧凑索引中选择贴纸，两阶段预选：关键词重叠打分（最多 5 个候选）→ Flash 在候选内语义匹配。回退到 emoji 精确匹配或随机贴纸。 |
+| `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。设置 `stickerFileId` 以便贴纸发送到聊天。从缓存条目中保存描述和关键词。       |
+| `writeDiary`   | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。                                                               |
+| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                                           |
 
 ### AiTurnResult
 
@@ -132,7 +134,7 @@ type AiTurnResult =
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  Cloudflare AI Gateway → Gemini 2.5 Flash              │
+│  Cloudflare AI Gateway → Gemini 3 Flash Preview         │
 │                                                          │
 │  • describeImage() — 为 DeepSeek 生成图片描述            │
 │  • describeTweetPhotos() — 推文配图描述                  │
@@ -142,7 +144,7 @@ type AiTurnResult =
 ### 为什么用两个提供商？
 
 - **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 2.5 Flash** 通过 Cloudflare AI Gateway 处理图片理解。描述在请求时生成，以 `[图片: 描述]` 文本形式注入到 DeepSeek 的提示词中。
+- **Gemini 3 Flash Preview** 通过 Cloudflare AI Gateway 处理图片理解。描述在请求时生成，以 `[图片: 描述]` 文本形式注入到 DeepSeek 的提示词中。
 
 ### 强制联网搜索
 
@@ -154,7 +156,7 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **对话缓冲区**：内存环形缓冲区（每组最多 60 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。图片条目包含 Gemini 行内描述（如 `[图片: 一只猫在睡觉]`）；URL 条目仅包含成功抓取的内容（推文：`[推文]: [Tweet url | @x: 文本 | 配图: ...]`，普通链接：`[链接内容]: 标题 — 描述`）。原始 URL 绝不进入缓冲区，避免对无法抓取的链接产生主动噪音。
+- **对话缓冲区**：内存环形缓冲区（每组最多 30 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。图片条目包含 Gemini 行内描述（如 `[图片: 一只猫在睡觉]`）；URL 条目仅包含成功抓取的内容（推文：`[推文]: [Tweet url | @x: 文本 | 配图: ...]`，普通链接：`[链接内容]: 标题 — 描述`）。原始 URL 绝不进入缓冲区，避免对无法抓取的链接产生主动噪音。
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **图片缓存**：Firestore `images/{fileId}`，30 天 TTL。缓存命中时直接使用存储的描述，避免重新下载和重新描述图片。
 
@@ -164,7 +166,7 @@ type AiTurnResult =
 
 每轮构建，包含：
 
-- 猫娘人设和自然度指南（基于真人 vs AI 群聊对比分析）
+- 人设（名字/读音/身份来自环境变量）与自然度指南（基于真人 vs AI 群聊对比分析）
 - 当前用户上下文（昵称、uid、记忆）
 - 最近群友列表（用于记忆/昵称工具的 uid 验证）
 - 最近聊天历史
@@ -187,14 +189,14 @@ type AiTurnResult =
 3. **`sendAiMessages()`**：
    - 通过 `formatForTelegramHtml()` 格式化每条消息（Markdown → Telegram HTML，LaTeX → Unicode）
    - 第一条消息回复用户消息；后续消息独立发送
-   - 消息间隔 400ms（模拟人类打字节奏）
+   - 消息间隔由环境变量配置（默认 400ms，模拟人类打字节奏）
    - 所有文本消息后分发贴纸（或纯贴纸带回复引用）
    - 如果 HTML 解析失败，回退到纯文本
 4. **缓冲区推送**：每条发送的消息推送到对话缓冲区
 
 ## 主动插话（两阶段探测）
 
-每 15 秒，`proactive.ts` 检查最近 3 分钟的缓冲区历史：
+`proactive.ts` 通过环境变量配置的间隔和窗口检查缓冲区历史（默认每 15 秒检查最近 3 分钟）：
 
 | 活跃度       | 最近用户消息数 | 冷却时间 |
 | ------------ | -------------- | -------- |
@@ -209,4 +211,42 @@ type AiTurnResult =
 
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。
 
-主动插话检查器在连续 5 次失败后停止。
+主动插话检查器在连续失败达到环境变量阈值后停止（默认 5 次）。
+
+## 日记系统
+
+Bot 通过 `writeDiary` AI 工具记录对话观察笔记。由模型决定什么值得记录——无频率限制，无规则提取。
+
+### 观察记录
+
+- `writeDiary` 工具将自然语言观察写入 Firestore `diary/{YYYY-MM-DD}`，使用 `arrayUnion`。
+- 每条观察包含 `ts`（毫秒时间戳）和 `content`（观察文本）。
+- 观察按日期累积在同一文档中。
+
+### 午夜生成
+
+一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检测日期变化：
+
+1. 日期变更时，从 Firestore 获取昨天的日记条目。
+2. 如果有条目，调用 DeepSeek v4 Pro（`proThinkModel`）以系统提示词引导撰写自然的猫娘第一人称日记。
+3. 生成的日记保存到 Firestore（`diary` 字段 + `generatedAt` 时间戳）。
+4. 如果配置了 `GITHUB_TOKEN` 和 `GITHUB_REPO`，日记通过 GitHub Content API（`src/services/github.ts`）推送到目标 Hexo 仓库。
+5. GitHub 推送触发 GitHub Actions 工作流，构建并部署到 GitHub Pages。
+
+### /diary 管理员命令
+
+`/diary` 命令（私聊，仅管理员）使用相同的 `generateDiaryForDate()` 函数按需从今天的条目生成日记。仅为预览——不保存到 Firestore，不推送到 GitHub。
+
+### Firestore Schema
+
+```
+diary/{YYYY-MM-DD}
+  ├── date: string（如 "2026-05-13"）
+  ├── entries: DiaryEntry[]  （via arrayUnion）
+  ├── diary?: string         （生成的日记文本）
+  └── generatedAt?: number   （时间戳）
+```
+
+### 时区
+
+所有日期格式化使用环境变量配置的时区（`APP_TIMEZONE`，默认 `Asia/Shanghai`），集中在 `src/libs/time.ts` 中通过 `dayjs` 实现。函数：`todayDateStr()`、`yesterdayDateStr()`、`formatTimestamp()`、`formatSystemPromptTime()`。

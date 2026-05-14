@@ -13,6 +13,7 @@ export interface StickerContent {
   emoji: string;
   fileId: string;
   description: string;
+  keywords: string[];
 }
 
 export interface MediaDescriptor {
@@ -224,27 +225,34 @@ export async function extractContent(
         emoji: cached.emoji[0] ?? stickerEmoji,
         fileId: cached.file_id,
         description: cached.description,
+        keywords: cached.keywords ?? [],
       };
     } else {
       // Download and describe
       try {
         const dataUrl = await downloadTelegramStickerAsDataUrl(fileId);
         if (dataUrl) {
-          const desc = await describeSticker(dataUrl);
-          if (!desc) {
+          const result = await describeSticker(dataUrl);
+          if (!result) {
             logger.warn({ fileId }, "sticker description failed, not caching");
-            stickerContent = { emoji: stickerEmoji || "🐱", fileId, description: "" };
+            stickerContent = { emoji: stickerEmoji || "🐱", fileId, description: "", keywords: [] };
           } else {
             const emojis = stickerEmoji ? [stickerEmoji] : ["🐱"];
             await cacheReceivedSticker({
               file_id: fileId,
               emoji: emojis,
-              description: desc,
+              description: result.description,
+              keywords: result.keywords,
               receivedAt: Date.now(),
             }).catch((err: unknown) => {
               logger.warn({ err, fileId }, "failed to cache received sticker");
             });
-            stickerContent = { emoji: emojis[0] ?? stickerEmoji, fileId, description: desc };
+            stickerContent = {
+              emoji: emojis[0] ?? stickerEmoji,
+              fileId,
+              description: result.description,
+              keywords: result.keywords,
+            };
           }
         }
       } catch (err) {

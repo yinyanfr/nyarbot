@@ -29,6 +29,7 @@ async function main(): Promise<void> {
         file_id: data.file_id,
         emoji: data.emoji,
         description: data.description,
+        keywords: data.keywords ?? [],
         receivedAt: Date.now(),
       });
       updated++;

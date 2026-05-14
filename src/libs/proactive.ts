@@ -9,17 +9,17 @@ import { getStickerByFileId } from "./sticker-store.js";
 // Configuration
 // ---------------------------------------------------------------------------
 
-const CHECK_INTERVAL_MS = 15_000; // check every 15 seconds
-const WINDOW_MS = 3 * 60 * 1000; // look at last 3 minutes of messages
+const CHECK_INTERVAL_MS = config.proactiveCheckIntervalMs; // check interval
+const WINDOW_MS = config.proactiveWindowMs; // lookback window
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
-const MESSAGE_DELAY_MS = 400;
+const MESSAGE_DELAY_MS = config.proactiveMessageDelayMs;
 
 // Cooldown between bot messages, based on group activity
 function getCooldownMs(activityCount: number): number {
-  if (activityCount >= 7) return 90_000; // high: up to every 1.5 min
-  if (activityCount >= 3) return 180_000; // medium: every 3 min
-  return 360_000; // low: every 6 min
+  if (activityCount >= 7) return config.proactiveCooldownHighMs; // high activity
+  if (activityCount >= 3) return config.proactiveCooldownMediumMs; // medium activity
+  return config.proactiveCooldownLowMs; // low activity
 }
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ let lastBotMessageTime = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let stopped = false;
 let consecutiveFailures = 0;
-const MAX_FAILURES = 5;
+const MAX_FAILURES = config.proactiveMaxFailures;
 
 // ---------------------------------------------------------------------------
 // Callback interface for sending messages to Telegram
@@ -91,17 +91,29 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     const recentHistory = history.filter((e) => e.timestamp > now - WINDOW_MS);
 
     // Collect recent members for the probe gate context
-    const memberMap = new Map<string, string>();
+    const memberMap = new Map<string, { name: string; username?: string }>();
     for (const entry of recentHistory) {
       if (entry.uid !== "bot" && entry.uid !== "system" && !memberMap.has(entry.uid)) {
-        memberMap.set(entry.uid, entry.name);
+        memberMap.set(entry.uid, {
+          name: entry.name,
+          ...(entry.username ? { username: entry.username } : {}),
+        });
       }
     }
-    const recentMembers = Array.from(memberMap.entries()).map(([uid, name]) => ({ uid, name }));
+    const recentMembers = Array.from(memberMap.entries()).map(([uid, info]) => ({
+      uid,
+      name: info.name,
+      ...(info.username ? { username: info.username } : {}),
+    }));
     const allowedUids = new Set(memberMap.keys());
 
     const shouldProceed = await probeGate({
-      recentConversation: recentHistory.map((entry) => `[${entry.name}]: ${entry.text}`).join("\n"),
+      recentConversation: recentHistory
+        .map((entry) => {
+          const label = entry.username ? `[${entry.name} (@${entry.username})]` : `[${entry.name}]`;
+          return `${label}: ${entry.text}`;
+        })
+        .join("\n"),
       recentMembers,
     });
 
@@ -117,8 +129,17 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       return;
     }
 
+    // Lock the cooldown slot *before* calling generateAiTurn
+    // This prevents a race condition where users chat during the proactive generation
+    // window and end up triggering a double bot response.
+    touchBotActivity();
+
     // Signal "typing..." to the group while the full model runs
-    await callbacks.sendChatAction("typing");
+    // Use an interval to keep it alive during long DeepSeek thinking phases
+    const typingTimer = setInterval(() => {
+      callbacks.sendChatAction("typing").catch(() => void 0);
+    }, 4500);
+    await callbacks.sendChatAction("typing").catch(() => void 0);
 
     const formattedHistory = formatHistoryAsContext(recentHistory);
 
@@ -129,19 +150,24 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       .slice(-5);
 
     // Use the current conversation context for the proactive response
-    const result = await generateAiTurn({
-      userContext: { uid: "proactive", nickname: "", memories: [] },
-      userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
-      recentConversation: formattedHistory,
-      recentMembers,
-      allowedUids,
-      tier: "simple", // proactive messages should always be short
-      needsSearch: false,
-      systemHint: null,
-      wasMentioned: false,
-      wasRepliedTo: false,
-      recentBotMessages,
-    });
+    let result;
+    try {
+      result = await generateAiTurn({
+        userContext: { uid: "proactive", nickname: "", memories: [] },
+        userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
+        recentConversation: formattedHistory,
+        recentMembers,
+        allowedUids,
+        tier: "simple", // proactive messages should always be short
+        needsSearch: false,
+        systemHint: null,
+        wasMentioned: false,
+        wasRepliedTo: false,
+        recentBotMessages,
+      });
+    } finally {
+      clearInterval(typingTimer);
+    }
 
     if (result.action === "dismiss") {
       logger.info("proactive: full model chose to dismiss after probe activation");

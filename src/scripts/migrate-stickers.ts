@@ -59,8 +59,8 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const desc = await describeSticker(dataUrl);
-      if (!desc) {
+      const result = await describeSticker(dataUrl);
+      if (!result) {
         logger.warn({ fileId }, "sticker description failed, skipping");
         skipped++;
         continue;
@@ -69,12 +69,13 @@ async function main(): Promise<void> {
       await saveSticker({
         file_id: fileId,
         emoji: [emoji],
-        description: desc,
+        description: result.description,
+        keywords: result.keywords,
         source: "migration",
       });
 
       success++;
-      logger.info({ emoji, fileId, desc }, "saved");
+      logger.info({ emoji, fileId, desc: result.description, keywords: result.keywords }, "saved");
     } catch (err) {
       logger.error({ err, emoji, fileId }, "failed to migrate sticker");
       failed++;
