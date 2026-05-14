@@ -22,11 +22,9 @@ export function initDiaryCallbacks(callbacks: DiaryCallbacks): void {
 function buildDiaryUrl(date: string): string | null {
   const repo = config.githubRepo;
   if (!repo) return null;
-  const [owner] = repo.split("/");
-  if (!owner) return null;
-  const [year, month, day] = date.split("-");
-  if (!year || !month || !day) return null;
-  return `https://${owner}.github.io/${repo.replace(`${owner}/`, "")}/${year}/${month}/${day}/diary/`;
+  const [owner, repoName] = repo.split("/");
+  if (!owner || !repoName) return null;
+  return `https://${owner}.github.io/${repoName}/${date}-diary/`;
 }
 
 async function generateDiaryNotification(
