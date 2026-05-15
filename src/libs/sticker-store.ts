@@ -2,6 +2,7 @@ import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import { logger } from "./logger.js";
 
 export interface StickerDoc {
+  file_unique_id: string;
   file_id: string;
   emoji: string[];
   description: string;
@@ -11,6 +12,7 @@ export interface StickerDoc {
 }
 
 export interface ReceivedStickerDoc {
+  file_unique_id: string;
   file_id: string;
   emoji: string[];
   description: string;
@@ -25,6 +27,19 @@ function db(): Firestore {
 }
 
 const cache = new Map<string, StickerDoc>();
+const fileIdToUniqueId = new Map<string, string>();
+
+function removeFileIdMappingsForUniqueId(fileUniqueId: string): void {
+  for (const [fileId, uniqueId] of fileIdToUniqueId) {
+    if (uniqueId === fileUniqueId) fileIdToUniqueId.delete(fileId);
+  }
+}
+
+function upsertFileIdMapping(fileUniqueId: string, fileId: string): void {
+  removeFileIdMappingsForUniqueId(fileUniqueId);
+  fileIdToUniqueId.set(fileId, fileUniqueId);
+}
+
 let _readyResolve: (() => void) | null = null;
 const _readyPromise = new Promise<void>((resolve) => {
   _readyResolve = resolve;
@@ -43,8 +58,10 @@ export function initStickerStore(): void {
             case "added":
             case "modified":
               cache.set(change.doc.id, data);
+              upsertFileIdMapping(change.doc.id, data.file_id);
               break;
             case "removed":
+              removeFileIdMappingsForUniqueId(change.doc.id);
               cache.delete(change.doc.id);
               break;
           }
@@ -179,21 +196,35 @@ export function hasSticker(fileId: string): boolean {
   return cache.has(fileId);
 }
 
+export function hasStickerByUniqueId(fileUniqueId: string): boolean {
+  return cache.has(fileUniqueId);
+}
+
 export function getStickerByFileId(fileId: string): StickerDoc | null {
-  return cache.get(fileId) ?? null;
+  const uniqueId = fileIdToUniqueId.get(fileId);
+  if (uniqueId) return cache.get(uniqueId) ?? null;
+  for (const [, doc] of cache) {
+    if (doc.file_id === fileId) return doc;
+  }
+  return null;
+}
+
+export function getStickerByUniqueId(fileUniqueId: string): StickerDoc | null {
+  return cache.get(fileUniqueId) ?? null;
 }
 
 export async function saveSticker(data: StickerDoc): Promise<void> {
-  await db().collection("stickers").doc(data.file_id).set(data, { merge: true });
-  cache.set(data.file_id, data);
+  await db().collection("stickers").doc(data.file_unique_id).set(data, { merge: true });
+  cache.set(data.file_unique_id, data);
+  upsertFileIdMapping(data.file_unique_id, data.file_id);
 }
 
-export async function getReceivedSticker(fileId: string): Promise<ReceivedStickerDoc | null> {
-  const doc = await db().collection("received_stickers").doc(fileId).get();
+export async function getReceivedSticker(fileUniqueId: string): Promise<ReceivedStickerDoc | null> {
+  const doc = await db().collection("received_stickers").doc(fileUniqueId).get();
   if (!doc.exists) return null;
   return doc.data() as ReceivedStickerDoc;
 }
 
 export async function cacheReceivedSticker(data: ReceivedStickerDoc): Promise<void> {
-  await db().collection("received_stickers").doc(data.file_id).set(data);
+  await db().collection("received_stickers").doc(data.file_unique_id).set(data, { merge: true });
 }

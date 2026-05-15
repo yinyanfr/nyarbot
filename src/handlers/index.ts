@@ -23,7 +23,7 @@ import {
   clearHistory,
 } from "../libs/conversation-buffer.js";
 import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
-import { getStickerByFileId, hasSticker } from "../libs/sticker-store.js";
+import { getStickerByFileId, hasStickerByUniqueId } from "../libs/sticker-store.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
 import { todayDateStr } from "../libs/time.js";
@@ -41,6 +41,18 @@ import { getPersonaLabel } from "../libs/persona.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
+
+const RESET_REPLIES = [
+  "刚才断片了喵",
+  "前情提要被我吃掉了喵",
+  "脑袋重启完成喵 刚才聊到哪了",
+  "咳 刚才那段我不记得了喵",
+] as const;
+
+function pickResetReply(): string {
+  const idx = Math.floor(Math.random() * RESET_REPLIES.length);
+  return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
 
 /**
  * Build the user-facing text for the AI call by stitching together the raw
@@ -543,7 +555,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
       if (matchCommand(privEntities, privText, "/reset", botUsername)) {
         clearHistory(config.tgGroupId);
-        await ctx.reply("对话历史已清除喵~").catch((err: unknown) => {
+        await ctx.reply(pickResetReply()).catch((err: unknown) => {
           logger.warn({ err }, "private /reset reply failed");
         });
         return;
@@ -597,11 +609,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // Build sticker display text: Gemini description + file_id for adoption tool.
     // Only include sticker_id for stickers not yet adopted — avoid leaking
     // "already collected" info to the LLM for already-adopted stickers.
-    const alreadyAdopted = stickerContent ? hasSticker(stickerContent.fileId) : false;
+    const alreadyAdopted = stickerContent
+      ? hasStickerByUniqueId(stickerContent.fileUniqueId)
+      : false;
     const stickerDisplay = stickerContent?.description
       ? alreadyAdopted
         ? stickerContent.description
-        : `${stickerContent.description} (sticker_id: ${stickerContent.fileId})`
+        : `${stickerContent.description} (sticker_id: ${stickerContent.fileUniqueId})`
       : stickerEmoji;
 
     // Merge cached descriptions with fresh Gemini-described images.
@@ -734,7 +748,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
       clearHistory(config.tgGroupId);
-      await replyAndTrack(ctx, "对话历史已清除喵~", msg.message_id);
+      await replyAndTrack(ctx, pickResetReply(), msg.message_id);
       return;
     }
 

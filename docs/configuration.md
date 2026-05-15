@@ -46,11 +46,13 @@ Additional optional envs with defaults:
 
 Firestore collections used:
 
-| Collection        | Document ID      | Fields                                                                   |
-| ----------------- | ---------------- | ------------------------------------------------------------------------ |
-| `users/{uid}`     | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?` |
-| `images/{fileId}` | Telegram file_id | `fileId`, `description`, `cachedAt`                                      |
-| `diary/{date}`    | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                            |
+| Collection                           | Document ID             | Fields                                                                                                   |
+| ------------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `users/{uid}`                        | Telegram user ID        | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`                                 |
+| `images/{fileId}`                    | Telegram file_id        | `fileId`, `description`, `cachedAt`                                                                      |
+| `stickers/{file_unique_id}`          | Telegram file_unique_id | `file_unique_id`, `file_id` (latest dispatch/download ID), `emoji`, `description`, `keywords?`, `source` |
+| `received_stickers/{file_unique_id}` | Telegram file_unique_id | `file_unique_id`, `file_id` (latest observed ID), `emoji`, `description`, `keywords?`, `seen_at`         |
+| `diary/{date}`                       | Date YYYY-MM-DD         | `date`, `entries[]`, `diary?`, `generatedAt?`                                                            |
 
 ## DeepSeek Models
 

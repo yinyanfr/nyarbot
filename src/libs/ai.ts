@@ -21,7 +21,7 @@ import { getStickerList, getStickerFileId, pickRandomStickerEmoji } from "./stic
 import {
   getReceivedSticker,
   saveSticker,
-  hasSticker,
+  hasStickerByUniqueId,
   filterStickersByKeywords,
 } from "./sticker-store.js";
 import { convertStickerForGemini } from "./telegram-image.js";
@@ -240,6 +240,14 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   let dismissed = false;
   let adoptedSticker = false;
 
+  const adoptionClaimPattern = /(收下|收藏|收入贴纸库|加入贴纸库|归我了)/;
+
+  function sanitizeAdoptionClaim(text: string): string {
+    if (adoptedSticker) return text;
+    if (!adoptionClaimPattern.test(text)) return text;
+    return "这张挺可爱喵";
+  }
+
   const sendMessageTool = tool({
     description:
       "向群聊发送一条消息。这是你向群里说话的唯一方式——不调用这个工具就是沉默。" +
@@ -249,7 +257,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       text: z.string().describe("要发送的消息文本。要像真人在群聊里打字一样自然简短。"),
     }),
     execute: async ({ text }) => {
-      sentMessages.push(text);
+      sentMessages.push(sanitizeAdoptionClaim(text));
       return "消息已发送 ✓";
     },
   });
@@ -426,15 +434,18 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       "将群友发送的有趣贴纸收入你自己的贴纸库，此后你可以在聊天中使用它。" +
       "贴纸的 sticker_id 可以从上下文中找到（格式如 sticker_id: xxx）。" +
       "只在收到你真心觉得好看或有用的贴纸时调用。同样内容的贴纸不要重复收录。" +
-      "收入后你**必须**再调用 send_message 用傲娇猫娘口吻告诉对方你收下了（如'哼，这图不错，本喵收下了~'之类的）。",
+      "仅当工具返回贴纸已收入 ✓ 时，你才可以调用 send_message 告诉对方你收下了。" +
+      "如果已在库中或失败，禁止说你刚收下/收藏了。",
     inputSchema: z.object({
       sticker_id: z
         .string()
-        .describe("要收入的贴纸的 sticker_id（从消息上下文中的 (sticker_id: xxx) 获取）"),
+        .describe(
+          "要收入的贴纸的 sticker_id（即 file_unique_id，从消息上下文中的 (sticker_id: xxx) 获取）",
+        ),
     }),
     execute: async ({ sticker_id }) => {
-      if (hasSticker(sticker_id)) {
-        return "已在库中，正常回复对方即可，无需提及贴纸已收藏";
+      if (hasStickerByUniqueId(sticker_id)) {
+        return "已在库中，正常夸夸或接话即可。不要说你刚收下或刚收藏。";
       }
       const received = await getReceivedSticker(sticker_id);
       if (!received) {
@@ -446,6 +457,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       const safeKeywords =
         received.keywords && received.keywords.length > 0 ? received.keywords : [];
       await saveSticker({
+        file_unique_id: received.file_unique_id,
         file_id: received.file_id,
         emoji: received.emoji,
         description: received.description,
@@ -455,7 +467,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       });
       stickerFileId = received.file_id;
       adoptedSticker = true;
-      return `贴纸已收入 ✓ (${received.emoji.join(" ")})。记得用 send_message 傲娇地告诉对方你收下了~`;
+      return `贴纸已收入 ✓ (${received.emoji.join(" ")})。现在可以用 send_message 傲娇地告诉对方你收下了~`;
     },
   });
 
@@ -508,7 +520,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   // When adoptSticker was called but no send_message: promote the model's
   // raw text (inner monologue) to a visible message so it reaches the chat.
   if (adoptedSticker && sentMessages.length === 0 && rawText) {
-    sentMessages.push(rawText);
+    sentMessages.push(sanitizeAdoptionClaim(rawText));
   }
 
   // If the model called dismiss but also produced output (e.g. sticker),

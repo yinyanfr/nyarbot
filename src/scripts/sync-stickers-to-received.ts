@@ -18,7 +18,8 @@ async function main(): Promise<void> {
   for (const doc of stickersSnap.docs) {
     const data = doc.data();
     try {
-      const receivedRef = db.collection("received_stickers").doc(data.file_id);
+      const fileUniqueId = (data.file_unique_id as string) || doc.id;
+      const receivedRef = db.collection("received_stickers").doc(fileUniqueId);
       const existing = await receivedRef.get();
       if (existing.exists) {
         skipped++;
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
       }
 
       await receivedRef.set({
+        file_unique_id: fileUniqueId,
         file_id: data.file_id,
         emoji: data.emoji,
         description: data.description,

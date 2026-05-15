@@ -20,6 +20,7 @@ async function main(): Promise<void> {
   for (const doc of stickersSnap.docs) {
     const data = doc.data();
     const fileId = data.file_id as string;
+    const fileUniqueId = (data.file_unique_id as string) || doc.id;
     try {
       logger.info({ fileId, oldDesc: data.description?.slice(0, 40) }, "processing...");
 
@@ -46,7 +47,7 @@ async function main(): Promise<void> {
       );
 
       // Also update received_stickers if this sticker was synced
-      const receivedRef = db.collection("received_stickers").doc(fileId);
+      const receivedRef = db.collection("received_stickers").doc(fileUniqueId);
       const receivedSnap = await receivedRef.get();
       if (receivedSnap.exists) {
         await receivedRef.set(

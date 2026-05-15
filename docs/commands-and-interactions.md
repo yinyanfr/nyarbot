@@ -48,9 +48,9 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 
 ### Stickers
 
-User-sent stickers are downloaded, format-converted (webm→webp via ffmpeg for animated stickers), and described by Gemini. The description (≤30 chars) and keywords (3-5) are cached in `received_stickers`. Only stickers with valid AI-generated descriptions are cached.
+User-sent stickers are downloaded, format-converted (webm→webp via ffmpeg for animated stickers), and described by Gemini. The description (≤30 chars) and keywords (3-5) are cached in `received_stickers`. Sticker documents are keyed by Telegram `file_unique_id` (stable identity), while the latest `file_id` is stored in the document for actual sending/downloading. Only stickers with valid AI-generated descriptions are cached.
 
-The LLM can adopt stickers from the `received_stickers` cache into the bot's own `stickers` library using the `adoptSticker` tool. When adopting, the sticker is sent to chat and the model is instructed to call `send_message` with an傲娇 verbal acknowledgment.
+The LLM can adopt stickers from the `received_stickers` cache into the bot's own `stickers` library using the `adoptSticker` tool. `sticker_id` in prompt context maps to `file_unique_id` (not `file_id`). When adopting, the sticker is sent to chat and the model is instructed to call `send_message` with an傲娇 verbal acknowledgment.
 
 When answering, the LLM can respond with:
 
@@ -119,7 +119,7 @@ User message → classifyMessage() → generateAiTurn()
                                         ├─ Model calls saveMemory → Firestore write
                                         ├─ Model calls setNickname → Firestore write
                                         ├─ Model calls deleteMemory → Firestore delete
-                                         ├─ Model calls sendSticker → file_id saved
+                                         ├─ Model calls sendSticker → file_id selected for dispatch
                                          ├─ Model calls writeDiary → Firestore diary write
                                          ├─ Model calls webSearch → Tavily search executed
                                         │

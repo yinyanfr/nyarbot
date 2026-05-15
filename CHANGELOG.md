@@ -13,6 +13,9 @@
   - `BOT_USERNAME` is now required.
   - Added configurable envs for `DEEPSEEK_BASE_URL`, `CF_AIG_GATEWAY`, `GITHUB_API_BASE`, `GITHUB_API_VERSION`, timezone, logger naming/rate limit, proactive intervals/cooldowns, bot message delay, and buffer save path/interval.
   - `APP_TIMEZONE` now validates IANA timezone format at startup and fails fast on invalid values.
+- **Sticker identity migration to `file_unique_id`** (`src/libs/sticker-store.ts`, `src/handlers/extract-content.ts`, `src/handlers/index.ts`, `src/libs/ai.ts`, scripts/docs): sticker documents are now keyed by Telegram `file_unique_id` (stable identity) in both `stickers` and `received_stickers`. Runtime still uses latest `file_id` for send/download.
+- **`adoptSticker` context semantics updated** (`src/libs/ai.ts`, docs): tool/input `sticker_id` now represents `file_unique_id` (not `file_id`) to prevent duplicate adoption across mutable file IDs.
+- **Migration/sync scripts aligned with unique IDs** (`src/scripts/migrate-sticker-doc-ids-to-unique.ts`, `src/scripts/migrate-stickers.ts`, `src/scripts/sync-stickers-to-received.ts`, `src/scripts/rewrite-sticker-descriptions.ts`): added/updated scripts to migrate legacy document IDs, merge collisions, refresh mappings, and delete old `file_id`-keyed docs.
 
 ### Fixed
 

@@ -133,6 +133,39 @@ interface CachedImage {
 }
 ```
 
+### `stickers/{file_unique_id}` and `received_stickers/{file_unique_id}`
+
+```typescript
+interface StickerDoc {
+  file_unique_id: string; // Stable Telegram sticker identity (document ID)
+  file_id: string; // Mutable Telegram file_id used for send/download
+  emoji: string;
+  description: string;
+  keywords?: string[];
+  source?: string;
+}
+
+interface ReceivedStickerDoc {
+  file_unique_id: string; // Stable Telegram sticker identity (document ID)
+  file_id: string; // Latest observed file_id for this sticker
+  emoji: string;
+  description: string;
+  keywords?: string[];
+  seen_at: number;
+}
+```
+
+Sticker identity is keyed by `file_unique_id`, while runtime dispatch still uses `file_id`.
+
+### Sticker ID migration script
+
+Run `src/scripts/migrate-sticker-doc-ids-to-unique.ts` when upgrading legacy data keyed by `file_id`:
+
+- Migrates both `stickers` and `received_stickers` to `file_unique_id` document IDs
+- Reuses existing `file_unique_id` when present, otherwise resolves via Telegram `getFile(file_id)`
+- Merges collisions onto the target `file_unique_id` document and deletes old legacy doc IDs
+- Exits non-zero if unresolved records remain, so deployment pipelines can fail fast
+
 ### `diary/{date}`
 
 ```typescript

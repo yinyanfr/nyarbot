@@ -46,11 +46,13 @@
 
 使用的 Firestore 集合：
 
-| 集合              | 文档 ID          | 字段                                                                     |
-| ----------------- | ---------------- | ------------------------------------------------------------------------ |
-| `users/{uid}`     | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?` |
-| `images/{fileId}` | Telegram file_id | `fileId`、`description`、`cachedAt`                                      |
-| `diary/{date}`    | 日期 YYYY-MM-DD  | `date`、`entries[]`、`diary?`、`generatedAt?`                            |
+| 集合                                 | 文档 ID                 | 字段                                                                                           |
+| ------------------------------------ | ----------------------- | ---------------------------------------------------------------------------------------------- |
+| `users/{uid}`                        | Telegram 用户 ID        | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?`                       |
+| `images/{fileId}`                    | Telegram file_id        | `fileId`、`description`、`cachedAt`                                                            |
+| `stickers/{file_unique_id}`          | Telegram file_unique_id | `file_unique_id`、`file_id`（最新发送/下载 ID）、`emoji`、`description`、`keywords?`、`source` |
+| `received_stickers/{file_unique_id}` | Telegram file_unique_id | `file_unique_id`、`file_id`（最新观测 ID）、`emoji`、`description`、`keywords?`、`seen_at`     |
+| `diary/{date}`                       | 日期 YYYY-MM-DD         | `date`、`entries[]`、`diary?`、`generatedAt?`                                                  |
 
 ## DeepSeek 模型
 

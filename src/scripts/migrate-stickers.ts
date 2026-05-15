@@ -4,6 +4,8 @@ import { describeSticker } from "../libs/ai.js";
 import { saveSticker } from "../libs/sticker-store.js";
 import { downloadTelegramStickerAsDataUrl } from "../libs/telegram-image.js";
 import { logger } from "../libs/logger.js";
+import { Bot } from "grammy";
+import config from "../configs/env.js";
 
 // Miaohaha sticker pack — hardcoded emoji → file_id mapping (migrated to Firestore)
 const HARDCODED_STICKERS: Record<string, string> = {
@@ -42,6 +44,7 @@ const STICKER_COUNT = Object.keys(HARDCODED_STICKERS).length;
 
 async function main(): Promise<void> {
   initFirebase();
+  const bot = new Bot(config.botApiKey);
   logger.info(`migrating ${STICKER_COUNT} hardcoded stickers to Firestore...`);
 
   let success = 0;
@@ -66,7 +69,15 @@ async function main(): Promise<void> {
         continue;
       }
 
+      const tgFile = await bot.api.getFile(fileId);
+      if (!tgFile.file_unique_id) {
+        logger.warn({ fileId }, "missing file_unique_id from Telegram getFile, skipping");
+        skipped++;
+        continue;
+      }
+
       await saveSticker({
+        file_unique_id: tgFile.file_unique_id,
         file_id: fileId,
         emoji: [emoji],
         description: result.description,

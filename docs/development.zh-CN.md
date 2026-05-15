@@ -133,6 +133,39 @@ interface CachedImage {
 }
 ```
 
+### `stickers/{file_unique_id}` 与 `received_stickers/{file_unique_id}`
+
+```typescript
+interface StickerDoc {
+  file_unique_id: string; // Telegram 贴纸稳定身份（文档 ID）
+  file_id: string; // 可变的 Telegram file_id，用于发送/下载
+  emoji: string;
+  description: string;
+  keywords?: string[];
+  source?: string;
+}
+
+interface ReceivedStickerDoc {
+  file_unique_id: string; // Telegram 贴纸稳定身份（文档 ID）
+  file_id: string; // 该贴纸最近一次观测到的 file_id
+  emoji: string;
+  description: string;
+  keywords?: string[];
+  seen_at: number;
+}
+```
+
+贴纸身份以 `file_unique_id` 为主键，运行时发送仍使用 `file_id`。
+
+### 贴纸 ID 迁移脚本
+
+升级历史上以 `file_id` 作为文档 ID 的数据时，运行 `src/scripts/migrate-sticker-doc-ids-to-unique.ts`：
+
+- 同时迁移 `stickers` 与 `received_stickers` 到 `file_unique_id` 文档 ID
+- 优先复用已有 `file_unique_id` 字段；缺失时通过 Telegram `getFile(file_id)` 解析
+- 冲突合并到目标 `file_unique_id` 文档，并删除旧的 legacy 文档 ID
+- 若仍有无法解析的记录，脚本非零退出，便于部署流程快速失败
+
 ### `diary/{date}`
 
 ```typescript

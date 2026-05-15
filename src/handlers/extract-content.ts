@@ -12,6 +12,7 @@ import type { BotContext, RequestState } from "./context.js";
 export interface StickerContent {
   emoji: string;
   fileId: string;
+  fileUniqueId: string;
   description: string;
   keywords: string[];
 }
@@ -217,13 +218,20 @@ export async function extractContent(
   if (msg.sticker) {
     stickerEmoji = msg.sticker.emoji ?? "";
     const fileId = msg.sticker.file_id;
+    const fileUniqueId = msg.sticker.file_unique_id;
 
     // Check cache first
-    const cached = await getReceivedSticker(fileId).catch(() => null);
+    const cached = await getReceivedSticker(fileUniqueId).catch(() => null);
     if (cached) {
+      if (cached.file_id !== fileId) {
+        await cacheReceivedSticker({ ...cached, file_id: fileId }).catch((err: unknown) => {
+          logger.warn({ err, fileId, fileUniqueId }, "failed to refresh sticker file_id");
+        });
+      }
       stickerContent = {
         emoji: cached.emoji[0] ?? stickerEmoji,
-        fileId: cached.file_id,
+        fileId,
+        fileUniqueId,
         description: cached.description,
         keywords: cached.keywords ?? [],
       };
@@ -235,10 +243,17 @@ export async function extractContent(
           const result = await describeSticker(dataUrl);
           if (!result) {
             logger.warn({ fileId }, "sticker description failed, not caching");
-            stickerContent = { emoji: stickerEmoji || "🐱", fileId, description: "", keywords: [] };
+            stickerContent = {
+              emoji: stickerEmoji || "🐱",
+              fileId,
+              fileUniqueId,
+              description: "",
+              keywords: [],
+            };
           } else {
             const emojis = stickerEmoji ? [stickerEmoji] : ["🐱"];
             await cacheReceivedSticker({
+              file_unique_id: fileUniqueId,
               file_id: fileId,
               emoji: emojis,
               description: result.description,
@@ -250,6 +265,7 @@ export async function extractContent(
             stickerContent = {
               emoji: emojis[0] ?? stickerEmoji,
               fileId,
+              fileUniqueId,
               description: result.description,
               keywords: result.keywords,
             };
