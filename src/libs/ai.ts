@@ -17,17 +17,19 @@ import {
   writeDiaryEntry,
   overwriteUserMemories,
 } from "../services/firestore.js";
-import { getStickerList, getStickerFileId, pickRandomStickerEmoji } from "./stickers.js";
-import {
-  getReceivedSticker,
-  saveSticker,
-  hasStickerByUniqueId,
-  filterStickersByKeywords,
-} from "./sticker-store.js";
-import { convertStickerForGemini } from "./telegram-image.js";
+import { getStickerEmojis, getStickerFileId } from "./stickers.js";
 import { logger } from "./logger.js";
 import { getPersonaLabel } from "./persona.js";
 import type { User } from "../global.d.js";
+
+function xmlEscape(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
 
 // ---------------------------------------------------------------------------
 // DeepSeek providers (OpenAI-compatible, base URL without /v1)
@@ -105,17 +107,19 @@ export const proThinkModel = deepseekThink.chat("deepseek-v4-pro");
 // Message classification (中文 prompt, fast model, thinking disabled)
 // ---------------------------------------------------------------------------
 
-const classificationPrompt = `请把下面的用户消息归到以下三个层级之一：
-
-- "simple" —— 闲聊、打招呼、简单问题、随口接话、没啥深度的日常对话
-- "complex" —— 需要多步推理、较长的解释、有争议的话题、创意写作、带观点的讨论
-- "tech" —— 编程、数学、学术、技术分析、专业领域问题
-
-同时判断是否需要联网搜索：
-- needsSearch: true —— 仅当消息涉及最新事件、实时信息、当前事实时才为 true
-
-请严格以JSON格式回复，不要加任何其他内容：
-{"tier":"simple/complex/tech","needsSearch":true/false}`;
+const classificationPrompt = `<classification_system>
+  <task>将用户消息分类并判断是否需要联网搜索</task>
+  <tiers>
+    <tier id="simple">闲聊、打招呼、简单问题、随口接话、日常对话</tier>
+    <tier id="complex">需要多步推理、较长解释、有争议话题、创意写作、带观点讨论</tier>
+    <tier id="tech">编程、数学、学术、技术分析、专业问题</tier>
+  </tiers>
+  <search_rule>
+    <needsSearch>true 仅当消息涉及最新事件、实时信息、当前事实</needsSearch>
+  </search_rule>
+  <output_format>{"tier":"simple/complex/tech","needsSearch":true/false}</output_format>
+  <constraints>严格输出 JSON，不要输出其他内容</constraints>
+</classification_system>`;
 
 interface ClassificationResult {
   tier: "simple" | "complex" | "tech";
@@ -229,7 +233,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   // When search is needed, inject a mandatory instruction so the model
   // doesn't skip the webSearch tool call.
   const finalPromptText = needsSearch
-    ? `${promptText}\n\n<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
+    ? `${promptText}\n\n<mandatory_instruction><reason>消息涉及最新/实时信息</reason><rule>必须先调用 webSearch 再回答</rule><forbidden>不要凭记忆直接回答</forbidden></mandatory_instruction>`
     : promptText;
 
   const messages = [{ role: "user" as const, content: finalPromptText }];
@@ -238,15 +242,6 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   const sentMessages: string[] = [];
   let stickerFileId: string | null = null;
   let dismissed = false;
-  let adoptedSticker = false;
-
-  const adoptionClaimPattern = /(收下|收藏|收入贴纸库|加入贴纸库|归我了)/;
-
-  function sanitizeAdoptionClaim(text: string): string {
-    if (adoptedSticker) return text;
-    if (!adoptionClaimPattern.test(text)) return text;
-    return "这张挺可爱喵";
-  }
 
   const sendMessageTool = tool({
     description:
@@ -257,7 +252,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       text: z.string().describe("要发送的消息文本。要像真人在群聊里打字一样自然简短。"),
     }),
     execute: async ({ text }) => {
-      sentMessages.push(sanitizeAdoptionClaim(text));
+      sentMessages.push(text);
       return "消息已发送 ✓";
     },
   });
@@ -367,107 +362,14 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     description:
       "当你的回复内容很简短（如 噢、好的、很棒、哈哈），或者对话已经自然结束，可以发送一个贴纸代替或结束对话。" +
       "不要在 send_message 的文本中只发一个 emoji——想发贴纸就用 sendSticker。" +
-      "贴纸关键词速查（选最匹配的 emoji + 关键词）：" +
-      getStickerList()
-        .map((s) => `${s.emoji} ${s.keywords.join(",")}`)
-        .join(" | "),
+      `可用贴纸 emoji：${getStickerEmojis().join(" ")}`,
     inputSchema: z.object({
-      emoji: z.string().describe("贴纸对应的 emoji，从上面速查表中选取"),
-      keywords: z.string().describe("贴纸的关键词，从上面速查表中对应 emoji 后面的关键词复选"),
+      emoji: z.string().describe("贴纸对应的 emoji，从可用列表中选取"),
     }),
-    execute: async ({ emoji, keywords }) => {
-      const parsedKeywords = keywords
-        .split(/[,，]/)
-        .map((k) => k.trim())
-        .filter(Boolean);
-
-      // Fast path: exact emoji match
+    execute: async ({ emoji }) => {
       stickerFileId = getStickerFileId(emoji);
       if (stickerFileId) return "贴纸已发送 ✓";
-
-      // Pre-filter by keywords → top 5 candidates
-      const candidates = filterStickersByKeywords(parsedKeywords, 5);
-      if (candidates.length === 0) {
-        const randomEmoji = pickRandomStickerEmoji();
-        stickerFileId = getStickerFileId(randomEmoji);
-        if (stickerFileId) return "贴纸已发送 ✓";
-        return "贴纸库为空，无法选择";
-      }
-
-      if (candidates.length === 1) {
-        stickerFileId = candidates[0]!.fileId;
-        return "贴纸已发送 ✓";
-      }
-
-      // Multiple candidates: use Flash to pick the best match
-      try {
-        const { text } = await generateText({
-          model: flashNoThinkModel,
-          system:
-            "从以下贴纸候选中选出与需求语义最匹配的一个，只返回其编号（纯数字），不要任何其他内容。",
-          messages: [
-            {
-              role: "user" as const,
-              content: `需求：emoji=${emoji}，关键词=${parsedKeywords.join(",")}\n\n候选贴纸：\n${candidates.map((c, i) => `${i + 1}. ${c.description} (${c.emoji})`).join("\n")}`,
-            },
-          ],
-          maxOutputTokens: 10,
-          temperature: 0,
-        });
-        const idx = parseInt(text.trim(), 10);
-        if (!isNaN(idx) && idx >= 1 && idx <= candidates.length) {
-          stickerFileId = candidates[idx - 1]!.fileId;
-        }
-      } catch (err) {
-        logger.warn({ err, emoji, keywords }, "sendSticker: semantic match failed");
-      }
-      if (stickerFileId) return "贴纸已发送 ✓";
-
-      // Fallback: pick first candidate
-      stickerFileId = candidates[0]!.fileId;
-      return "贴纸已发送 ✓";
-    },
-  });
-
-  const adoptStickerTool = tool({
-    description:
-      "将群友发送的有趣贴纸收入你自己的贴纸库，此后你可以在聊天中使用它。" +
-      "贴纸的 sticker_id 可以从上下文中找到（格式如 sticker_id: xxx）。" +
-      "只在收到你真心觉得好看或有用的贴纸时调用。同样内容的贴纸不要重复收录。" +
-      "仅当工具返回贴纸已收入 ✓ 时，你才可以调用 send_message 告诉对方你收下了。" +
-      "如果已在库中或失败，禁止说你刚收下/收藏了。",
-    inputSchema: z.object({
-      sticker_id: z
-        .string()
-        .describe(
-          "要收入的贴纸的 sticker_id（即 file_unique_id，从消息上下文中的 (sticker_id: xxx) 获取）",
-        ),
-    }),
-    execute: async ({ sticker_id }) => {
-      if (hasStickerByUniqueId(sticker_id)) {
-        return "已在库中，正常夸夸或接话即可。不要说你刚收下或刚收藏。";
-      }
-      const received = await getReceivedSticker(sticker_id);
-      if (!received) {
-        return "未找到该贴纸的缓存信息，请确认 sticker_id 正确";
-      }
-      if (!received.description || received.description === received.emoji.join("")) {
-        return "这张贴纸没有生成有效描述，无法收入";
-      }
-      const safeKeywords =
-        received.keywords && received.keywords.length > 0 ? received.keywords : [];
-      await saveSticker({
-        file_unique_id: received.file_unique_id,
-        file_id: received.file_id,
-        emoji: received.emoji,
-        description: received.description,
-        ...(safeKeywords.length > 0 ? { keywords: safeKeywords } : {}),
-        source: "adopted",
-        adoptedAt: Date.now(),
-      });
-      stickerFileId = received.file_id;
-      adoptedSticker = true;
-      return `贴纸已收入 ✓ (${received.emoji.join(" ")})。现在可以用 send_message 傲娇地告诉对方你收下了~`;
+      return "这个 emoji 没有对应贴纸，已取消发送";
     },
   });
 
@@ -483,7 +385,6 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       deleteMemory: deleteMemoryTool,
       writeDiary: writeDiaryTool,
       sendSticker: sendStickerTool,
-      adoptSticker: adoptStickerTool,
       ...(needsSearch
         ? {
             webSearch: tavilySearch({
@@ -516,12 +417,6 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   // Determine the outcome
   const rawText = result.text?.trim();
   const rawTextProp = rawText || undefined;
-
-  // When adoptSticker was called but no send_message: promote the model's
-  // raw text (inner monologue) to a visible message so it reaches the chat.
-  if (adoptedSticker && sentMessages.length === 0 && rawText) {
-    sentMessages.push(sanitizeAdoptionClaim(rawText));
-  }
 
   // If the model called dismiss but also produced output (e.g. sticker),
   // prefer the output over silence.
@@ -578,8 +473,7 @@ export async function probeGate(opts: ProbeGateOptions): Promise<boolean> {
 
   // Lightweight version of the late-binding prompt for probe context
   const lateBinding =
-    "你没有被直接提及。你只是在浏览群聊，决定是否有值得说的话。" +
-    "大部分时候你应该选择 dismiss。只有当你真的有独特且有趣的东西可补充时才调用 send_message。";
+    "<probe_context><mention_state>not_directly_mentioned</mention_state><task>浏览群聊并判断是否值得回复</task><default>大部分时候选择 dismiss</default><allow>仅当有独特且有趣的补充时调用 send_message</allow></probe_context>";
 
   let probedDismiss = false;
 
@@ -647,9 +541,8 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system: `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。你的语气温暖、带点傲娇但很可爱。像朋友之间的日常问候，不是客服打招呼。`,
-    prompt: `${name} 刚刚睡醒上线了。请给 ta 发一句傲娇的问候语，欢迎 ta 回来。${memoriesBlock}
-要求：一句话，不要超过两行。语气自然，像朋友在群聊里随口打招呼，绝对不要像客服。如果记忆里有关于 ta 今天/近期要做的事，可以顺便提一下。只输出问候语本身，不要加引号或解释。`,
+    system: `<morning_greeting_system><persona>${xmlEscape(getPersonaLabel())}</persona><tone>温暖、轻微傲娇、朋友式问候，禁止客服口吻</tone></morning_greeting_system>`,
+    prompt: `<morning_greeting_request><user name="${xmlEscape(name)}" /><memory>${xmlEscape(memoriesBlock)}</memory><constraints><line_count>一句话</line_count><max_lines>2</max_lines><style>自然、群聊口吻</style><output>只输出问候语本身</output></constraints></morning_greeting_request>`,
     temperature: 0.8,
     maxOutputTokens: 80,
   });
@@ -658,10 +551,10 @@ export async function generateMorningGreeting(userContext: User): Promise<string
 }
 
 // ---------------------------------------------------------------------------
-// Love rejection:傲娇好人卡
+// Love response: memory-based affection scoring
 // ---------------------------------------------------------------------------
 
-export async function generateLoveRejection(userContext: User): Promise<string> {
+export async function generateLoveResponse(userContext: User): Promise<string> {
   const name = userContext.nickname || "大哥哥";
 
   const memoriesBlock =
@@ -669,24 +562,27 @@ export async function generateLoveRejection(userContext: User): Promise<string> 
       ? `关于 ${name} 的记忆：${userContext.memories.join("；")}。`
       : `我对 ${name} 还不太了解，几乎没有什么记忆。`;
 
-  const { text } = await generateText({
+  const { text, finishReason } = await generateText({
     model: flashNoThinkModel,
-    system: `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。有群友向你告白了，你要傲娇地发好人卡拒绝 ta。语气要傲娇但绝对不能伤人。像聊天，不是写作文。`,
-    prompt: `${name} 向你告白了！请傲娇地拒绝 ta。
-
-拒绝策略：
-- 如果我对 ta 几乎不了解、记忆很少或没有，就说"我还不了解你呢"，不能随便接受。
-- 如果记忆里提到了 ta 的爱好、特点或做过的事，就根据那条记忆编一个俏皮的拒绝理由。
-- 无论怎样，最后都要补一句好人卡：告诉 ta 是个好人，一定能找到适合 ta 的女孩子（或适合 ta 的人）。
-
-${memoriesBlock}
-
-要求：3-4句话，自然傲娇，带猫娘口癖（喵、哼、笨蛋等）。像聊天一样说，不要写成长篇大论。只输出拒绝语本身，不要加引号或解释。`,
+    system: `<love_affection_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>根据记忆计算好感度并回应告白</task><tone>傲娇、可爱、群聊口吻，不要伤人</tone><output_rule>最终回复必须是普通聊天文本，禁止输出 XML/HTML/Markdown 标签</output_rule></love_affection_system>`,
+    prompt: `<love_affection_request><user name="${xmlEscape(name)}" /><memories>${xmlEscape(memoriesBlock)}</memories><scoring><rule>你可以自由制定加减分标准</rule><rule>评分条目必须基于 memories，禁止编造不存在的事件</rule><rule>评分明细最多 10 条，每条使用"描述 +/-分值"格式</rule><rule>如果记忆太少，可以给"了解不足"相关条目并保持低置信</rule><rule>最后必须给出总分</rule></scoring><response_policy><rule>根据总分自由决定态度（嘴硬、观察、暧昧、轻微接受、傲娇拒绝等）</rule><rule>回复要符合猫娘人设、自然口语</rule><rule>回应部分最多 5 句话，不要写长篇剧情</rule></response_policy><output_format><rule>只输出普通纯文本，不要输出任何尖括号标签</rule><rule>格式为：评分明细：换行条目；总分：X；回应：一句到三句话</rule></output_format></love_affection_request>`,
     temperature: 0.9,
-    maxOutputTokens: 150,
+    maxOutputTokens: 1000,
   });
 
-  return text.trim();
+  if (finishReason === "length") {
+    logger.warn({ uid: userContext.uid }, "generateLoveResponse: output truncated by model");
+  }
+
+  return sanitizeLoveResponse(text);
+}
+
+function sanitizeLoveResponse(text: string): string {
+  return text
+    .replace(/<\/?(?:评分明细|总分|回应)>/g, "")
+    .replace(/<\/?[a-zA-Z_][a-zA-Z0-9_-]*[^>]*>/g, "")
+    .replace(/&lt;\/?[a-zA-Z_][^&]*&gt;/g, "")
+    .trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -706,11 +602,7 @@ export async function describeImage(
     : "";
   const { text, finishReason } = await generateText({
     model: geminiFlashModel,
-    system: `请用中文详细描述这张图片，要求：
-1. 详细描述图片的内容、细节和氛围，描述要充分具体
-2. 如果图片中包含文字，把所有文字完整提取出来${captionNote}${mediaNote}
-3. 如果图片是一道题目，尝试解题并给出解答过程
-只输出描述本身，不要加引号或任何前缀。`,
+    system: `<image_description_system><language>zh-CN</language><rules><rule>详细描述内容、细节、氛围</rule><rule>完整提取图片内文字${captionNote}${mediaNote}</rule><rule>若是题目，尝试解题并给出过程</rule><rule>只输出描述本身</rule></rules></image_description_system>`,
     messages: [
       {
         role: "user" as const,
@@ -734,81 +626,6 @@ export async function describeImage(
 }
 
 // ---------------------------------------------------------------------------
-// Sticker description (for caching and adoption)
-// ---------------------------------------------------------------------------
-
-export async function describeSticker(
-  dataUrl: string,
-): Promise<{ description: string; keywords: string[] } | null> {
-  try {
-    const convertedUrl = await convertStickerForGemini(dataUrl);
-    if (!convertedUrl) {
-      logger.warn("describeSticker: convertStickerForGemini returned empty, skipping");
-      return null;
-    }
-
-    const systemPrompt = `请用中文描述这个贴纸。输出格式为：描述|关键词1,关键词2,关键词3
-
-描述要求：一句话描述画面内容，包括人物、动作、表情、氛围（15-30字）
-关键词要求：3-5个中文词，涵盖情绪、场景、画面元素
-
-示例：白色猫咪戴红色派对帽开心庆祝|庆祝,生日,开心,猫猫,派对`;
-
-    let text = "";
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const { text: resultText } = await generateText({
-        model: geminiFlashModel,
-        system:
-          attempt === 0
-            ? systemPrompt
-            : "用一句话中文描述贴纸（15-30字），然后竖线，然后3-5个关键词逗号分隔。示例：小猫挥手说拜拜|告别,可爱,挥手,猫猫",
-        messages: [
-          {
-            role: "user" as const,
-            content: [
-              { type: "text" as const, text: "请描述这个贴纸。" },
-              { type: "image" as const, image: convertedUrl },
-            ],
-          },
-        ],
-        maxOutputTokens: 800,
-        temperature: 0,
-      });
-      text = resultText.trim();
-      if (text.includes("|")) break;
-      logger.warn(
-        { attempt, text: text.slice(0, 40) },
-        "describeSticker: no pipe separator, retrying",
-      );
-    }
-
-    const trimmed = text.trim();
-    const pipeIdx = trimmed.indexOf("|");
-    if (pipeIdx === -1 || !trimmed || trimmed.length < 4) {
-      logger.warn({ text: trimmed }, "describeSticker: no pipe separator after retries");
-      return trimmed && trimmed.length >= 4 ? { description: trimmed, keywords: [] } : null;
-    }
-    const description = trimmed.slice(0, pipeIdx).trim();
-    const keywords = trimmed
-      .slice(pipeIdx + 1)
-      .split(/[,，]/)
-      .map((k) => k.trim())
-      .filter(Boolean);
-    if (!description || description.length < 3) {
-      logger.warn({ text: trimmed }, "describeSticker: description empty or too short");
-      return null;
-    }
-    if (keywords.length === 0) {
-      logger.warn({ text: trimmed }, "describeSticker: no keywords parsed, using description only");
-    }
-    return { description, keywords };
-  } catch (err) {
-    logger.warn({ err }, "describeSticker failed");
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Memory compression — merge groups of 5 memories into 1 to cap token growth
 // ---------------------------------------------------------------------------
 
@@ -820,7 +637,7 @@ async function compressMemoriesChunk(chunk: string[]): Promise<string> {
   const { text } = await generateText({
     model: flashNoThinkModel,
     system:
-      "你是一个记忆压缩助手。将多条关于同一个人的记忆合并为一条简洁的记忆，保留最重要的信息，合并后长度与原来每条的长度差不多。",
+      "<memory_compression_system><task>将同一人的多条记忆压缩为一条</task><rules><rule>保留关键信息</rule><rule>长度接近单条原始记忆</rule></rules></memory_compression_system>",
     messages: [
       {
         role: "user" as const,
@@ -908,7 +725,7 @@ async function describeTweetPhotos(
     const content: ({ type: "text"; text: string } | { type: "image"; image: string })[] = [
       {
         type: "text",
-        text: `请用中文分别描述以下推文配图，每条不超过150字，简洁准确。${hint}\n\n按图片顺序输出，每行一条描述，不编号不前缀。`,
+        text: `<tweet_photo_description_request><language>zh-CN</language><hint>${xmlEscape(hint)}</hint><constraints><max_length_each>150字</max_length_each><style>简洁准确</style><output>按图片顺序逐行输出，不编号不前缀</output></constraints></tweet_photo_description_request>`,
       },
     ];
     for (const dataUrl of dataUrls) {
@@ -1031,8 +848,8 @@ async function fetchTavilyContent(url: string): Promise<string | null> {
         }),
       },
       system:
-        "你是一个网页内容提取工具。必须使用 urlExtract 工具访问给定的链接，提取其核心内容，然后用中文简短总结（不超过80字）。",
-      prompt: `提取并总结这个链接的内容：${url}\n\n注意：必须先调用 urlExtract 工具获取内容！如果无法访问或没有有意义的内容，只输出 NULL（大写）。`,
+        "<url_extract_system><task>使用 urlExtract 抓取给定链接并中文摘要</task><constraints><must_call>urlExtract</must_call><max_length>80字</max_length><failure_output>NULL</failure_output></constraints></url_extract_system>",
+      prompt: `<url_extract_request><url>${xmlEscape(url)}</url><must_call_tool>urlExtract</must_call_tool><failure>无法访问或无有效内容时仅输出 NULL</failure></url_extract_request>`,
       maxOutputTokens: 150,
       temperature: 0,
     });

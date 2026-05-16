@@ -14,7 +14,7 @@ import {
   generateAiTurn,
   generateMorningGreeting,
   describeImage,
-  generateLoveRejection,
+  generateLoveResponse,
 } from "../libs/ai.js";
 import {
   pushMessage,
@@ -22,8 +22,11 @@ import {
   formatHistoryAsContext,
   clearHistory,
 } from "../libs/conversation-buffer.js";
-import { getStickerFileId, pickRandomStickerEmoji } from "../libs/stickers.js";
-import { getStickerByFileId, hasStickerByUniqueId } from "../libs/sticker-store.js";
+import {
+  getStickerEmojiByFileId,
+  getStickerFileId,
+  pickRandomStickerEmoji,
+} from "../libs/stickers.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
 import { todayDateStr } from "../libs/time.js";
@@ -54,6 +57,15 @@ function pickResetReply(): string {
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
 }
 
+function xmlEscape(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
 /**
  * Build the user-facing text for the AI call by stitching together the raw
  * text with media context, reply-to context, and fetched URL summaries.
@@ -66,6 +78,7 @@ function buildUserMessage(params: {
   stickerEmoji: string;
   replyTo: Message | undefined;
   isRepliedToBot: boolean;
+  isMentioned?: boolean;
   urlContents: Map<string, string | null>;
   mediaDescriptors?: MediaDescriptor[];
 }): string {
@@ -78,75 +91,107 @@ function buildUserMessage(params: {
     mediaDescriptors,
     replyTo,
     isRepliedToBot,
+    isMentioned,
     urlContents,
   } = params;
 
-  let msg = rawText;
-
-  if (imageDescriptions.length > 0) {
-    const desc = imageDescriptions.map((d) => `[图片: ${d}]`).join("\n");
-    msg = msg ? `${desc}\n${displayName}说: ${msg}` : desc;
-  } else if (hasImage) {
-    msg = msg ? `[图片见上]\n${displayName}说: ${msg}` : "[图片见上]";
-  }
-
-  if (stickerEmoji) {
-    msg = (msg ? `${msg}\n` : "") + `[贴纸: ${stickerEmoji}]`;
-  }
-
-  if (mediaDescriptors && mediaDescriptors.length > 0) {
-    const lines = mediaDescriptors
-      .map((d) => (d.description ? `[${d.label}: ${d.description}]` : `[${d.label}]`))
-      .join("\n");
-    msg = msg ? `${lines}\n${msg}` : lines;
-  }
+  const sections: string[] = [];
+  sections.push("<current_turn>");
+  sections.push(`  <speaker name="${xmlEscape(displayName)}" />`);
+  sections.push(
+    `  <trigger mode="${isMentioned || isRepliedToBot ? "passive_triggered" : "not_triggered"}" mentioned="${isMentioned ? "true" : "false"}" replied_to_bot="${isRepliedToBot ? "true" : "false"}" />`,
+  );
 
   if (replyTo && !isRepliedToBot) {
     const replyUid = replyTo.from?.id?.toString() ?? "";
     const replyFirstName = replyTo.from?.first_name ?? "某人";
     const replyUsername = replyTo.from?.username;
     const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
+    sections.push(`  <reply_to uid="${xmlEscape(replyUid)}" name="${xmlEscape(replyName)}">`);
     const replyText = replyTo.text ?? replyTo.caption ?? "";
-    let replyDesc = "";
     if (replyText) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: "${replyText}"]`;
+      sections.push(`    <quoted_text>${xmlEscape(replyText)}</quoted_text>`);
     } else if (replyTo.photo?.length) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: [图片]]`;
+      sections.push('    <quoted_media type="image" />');
     } else if (replyTo.sticker) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: [贴纸: ${replyTo.sticker.emoji}]]`;
+      sections.push(
+        `    <quoted_media type="sticker" emoji="${xmlEscape(replyTo.sticker.emoji ?? "")}" />`,
+      );
     } else if (replyTo.video) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: [视频]]`;
+      sections.push('    <quoted_media type="video" />');
     } else if (replyTo.animation) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: [GIF动画]]`;
+      sections.push('    <quoted_media type="animation" />');
     } else if (replyTo.video_note) {
-      replyDesc = `[回复 ${replyUid} ${replyName}: [视频消息]]`;
+      sections.push('    <quoted_media type="video_note" />');
     } else if (replyTo.document) {
-      const docName = replyTo.document.file_name ? `: ${replyTo.document.file_name}` : "";
-      replyDesc = `[回复 ${replyUid} ${replyName}: [文件${docName}]]`;
+      sections.push(
+        `    <quoted_media type="document" filename="${xmlEscape(replyTo.document.file_name ?? "")}" />`,
+      );
     } else if (replyTo.audio) {
-      const audioName = replyTo.audio.title || replyTo.audio.file_name || "";
-      const audioLabel = audioName ? `: ${audioName}` : "";
-      replyDesc = `[回复 ${replyUid} ${replyName}: [音频${audioLabel}]]`;
+      sections.push(
+        `    <quoted_media type="audio" title="${xmlEscape(replyTo.audio.title || replyTo.audio.file_name || "")}" />`,
+      );
     }
-    if (replyDesc) {
-      msg = `${replyDesc}\n${msg}`;
+    sections.push("    <note>reply_to 内容是被回复消息，不是当前说话人的新消息</note>");
+    sections.push("  </reply_to>");
+  }
+
+  if (rawText) {
+    sections.push(`  <text>${xmlEscape(rawText)}</text>`);
+  }
+
+  if (
+    imageDescriptions.length > 0 ||
+    hasImage ||
+    stickerEmoji ||
+    (mediaDescriptors && mediaDescriptors.length > 0)
+  ) {
+    sections.push("  <media>");
+    if (imageDescriptions.length > 0) {
+      for (const desc of imageDescriptions) {
+        sections.push(`    <image><description>${xmlEscape(desc)}</description></image>`);
+      }
+    } else if (hasImage) {
+      sections.push('    <image status="present_but_undescribed" />');
     }
+    if (stickerEmoji) {
+      sections.push(`    <sticker><emoji>${xmlEscape(stickerEmoji)}</emoji></sticker>`);
+    }
+    if (mediaDescriptors?.length) {
+      for (const md of mediaDescriptors) {
+        const label = xmlEscape(md.label);
+        if (md.description) {
+          sections.push(
+            `    <media_item label="${label}" thumbnail_only="true"><description>${xmlEscape(md.description)}</description></media_item>`,
+          );
+        } else {
+          sections.push(`    <media_item label="${label}" thumbnail_only="true" />`);
+        }
+      }
+    }
+    sections.push("  </media>");
   }
 
   const urlLines: string[] = [];
   for (const [url, content] of urlContents) {
     if (content) {
-      // Tweet content from fetchUrlContent is already self-contained: [Tweet url | ...]
-      urlLines.push(content.startsWith("[Tweet ") ? content : `[链接 ${url}: ${content}]`);
+      urlLines.push(
+        `    <link url="${xmlEscape(url)}" status="success"><summary>${xmlEscape(content)}</summary></link>`,
+      );
     } else {
-      urlLines.push(`[链接 ${url}: 无法获取内容]`);
+      urlLines.push(
+        `    <link url="${xmlEscape(url)}" status="failed"><error>无法获取内容</error></link>`,
+      );
     }
   }
   if (urlLines.length > 0) {
-    msg = `${msg}\n${urlLines.join("\n")}`;
+    sections.push("  <links>");
+    sections.push(...urlLines);
+    sections.push("  </links>");
   }
 
-  return msg;
+  sections.push("</current_turn>");
+  return sections.join("\n");
 }
 
 /**
@@ -297,7 +342,8 @@ async function sendAiMessages(params: {
   }
 }
 
-const MANDATORY_REPLY_HINT = "[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]";
+const MANDATORY_REPLY_HINT =
+  "<mandatory_reply_hint><rule>用户明确@了你或回复了你</rule><action>必须回复，不要选择沉默</action></mandatory_reply_hint>";
 
 /**
  * Handle an AI turn: classify the message, run the full AI pipeline with
@@ -472,8 +518,7 @@ async function handleAiTurn(params: {
 
     // Sticker-only: push a sticker marker so the buffer stays coherent
     if (result.messages.length === 0 && result.stickerFileId) {
-      const sticker = getStickerByFileId(result.stickerFileId);
-      const emoji = sticker?.emoji[0] ?? "🐱";
+      const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
       pushMessage(
         config.tgGroupId,
         "bot",
@@ -600,23 +645,12 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       imageDataUrls,
       imageDescriptions: cachedImageDescriptions,
       stickerEmoji,
-      stickerContent,
       urlFetchPromise,
       mediaDescriptors: cachedMediaDescriptors,
       pendingMediaThumbnails,
     } = await extractContent(ctx, msg, { rawText, entities });
 
-    // Build sticker display text: Gemini description + file_id for adoption tool.
-    // Only include sticker_id for stickers not yet adopted — avoid leaking
-    // "already collected" info to the LLM for already-adopted stickers.
-    const alreadyAdopted = stickerContent
-      ? hasStickerByUniqueId(stickerContent.fileUniqueId)
-      : false;
-    const stickerDisplay = stickerContent?.description
-      ? alreadyAdopted
-        ? stickerContent.description
-        : `${stickerContent.description} (sticker_id: ${stickerContent.fileUniqueId})`
-      : stickerEmoji;
+    const stickerDisplay = stickerEmoji;
 
     // Merge cached descriptions with fresh Gemini-described images.
     const imageDescriptions = [...cachedImageDescriptions];
@@ -726,7 +760,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // 6. /love — public
     if (matchCommand(entities, rawText, "/love", botUsername)) {
-      const rejection = await generateLoveRejection(user);
+      const rejection = await generateLoveResponse(user);
       await replyAndTrack(ctx, rejection, msg.message_id, true);
       return;
     }
@@ -771,7 +805,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       if (isMentioned || isRepliedToBot) {
         // Merged path: AI reply will include the greeting opener.
         await setMorningGreeted(user.uid, now);
-        systemHint = `[系统提示: 该用户刚睡醒上线，请在回答开头带一句傲娇的早安，然后再回答 ta 的问题。]`;
+        systemHint =
+          "<system_hint><event>user_just_woke_up</event><rule>回答开头先说一句傲娇早安，再回答问题</rule></system_hint>";
       } else {
         // Standalone path: send greeting, then fall through to return.
         try {
@@ -815,9 +850,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // Reset proactive cooldown immediately to prevent double-reply.
     touchBotActivity();
 
-    // 13. Love confession → templated rejection (no full AI pipeline needed)
+    // 13. Love confession → memory-based affection scoring
     if (LOVE_REGEX.test(rawText)) {
-      const rejection = await generateLoveRejection(user);
+      const rejection = await generateLoveResponse(user);
       await replyAndTrack(ctx, rejection, msg.message_id, true);
       touchBotActivity();
       pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
@@ -833,6 +868,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       stickerEmoji: stickerDisplay,
       replyTo,
       isRepliedToBot,
+      isMentioned,
       urlContents,
       mediaDescriptors,
     });
@@ -929,7 +965,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
-      const rejection = await generateLoveRejection(user);
+      const rejection = await generateLoveResponse(user);
       await replyAndTrack(ctx, rejection, msg.message_id, true);
       touchBotActivity();
       pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
@@ -945,6 +981,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       mediaDescriptors: [],
       replyTo,
       isRepliedToBot,
+      isMentioned,
       urlContents,
     });
 

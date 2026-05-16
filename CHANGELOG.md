@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.2] — 2026-05-16
+
+### Changed
+
+- **Sticker system rollback** (`src/libs/stickers.ts`, `src/libs/ai.ts`, `src/handlers/extract-content.ts`, `src/handlers/index.ts`, `src/libs/proactive.ts`, `src/libs/telegram-image.ts`): removed sticker persistence, sticker descriptions, sticker collection, and semantic selection. Stickers are now selected only by hardcoded emoji→file_id mapping again.
+- **Invalid sticker emoji handling** (`src/libs/ai.ts`): when the model picks an emoji without a matching hardcoded sticker, sticker sending is cancelled instead of falling back to another sticker.
+- **Sticker migration scripts removed** (`src/scripts/migrate-stickers.ts`, `src/scripts/migrate-sticker-doc-ids-to-unique.ts`, `src/scripts/sync-stickers-to-received.ts`, `src/scripts/rewrite-sticker-descriptions.ts`): deleted obsolete scripts that were only needed for the persistence-based sticker system.
+
+### Removed
+
+- **Sticker storage layer** (`src/libs/sticker-store.ts`) and sticker-related Firestore schema/docs.
+- **Sticker description/collection dependencies** (`fluent-ffmpeg`, `ffmpeg-static`, `@types/fluent-ffmpeg`).
+
 ## [0.8.1] — 2026-05-14
 
 ### Added

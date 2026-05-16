@@ -7,6 +7,15 @@ import { pushDiaryToGithub } from "../services/github.js";
 import config from "../configs/env.js";
 import { getPersonaLabel } from "./persona.js";
 
+function xmlEscape(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
 let lastDate: string | null = null;
 
 export interface DiaryCallbacks {
@@ -34,10 +43,8 @@ async function generateDiaryNotification(
   const urlNote = diaryUrl ? `\n日记的链接是：${diaryUrl}` : "";
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system:
-      `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。你的日记刚刚更新了，请在群里发一条简短的消息告诉大家。` +
-      "语气自然傲娇，像群友聊天一样。一句话感叹昨天，一句话告诉大家可以去看，附上链接。总共两到三句话。",
-    prompt: `昨天的日记已经写好了喵~${urlNote}\n\n请用猫娘口吻在群里说一声。`,
+    system: `<diary_notification_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>日记更新后在群里发通知</task><tone>自然傲娇、群友口吻</tone><constraints><length>2-3句</length><structure>一句感叹昨天，一句提示可查看并附链接</structure></constraints></diary_notification_system>`,
+    prompt: `<diary_notification_request><date>${xmlEscape(yesterdayDate)}</date><url>${xmlEscape(diaryUrl ?? "")}</url><extra>${xmlEscape(urlNote)}</extra><output>仅输出通知文本</output></diary_notification_request>`,
     temperature: 0.8,
     maxOutputTokens: 200,
   });
@@ -45,19 +52,21 @@ async function generateDiaryNotification(
 }
 
 function buildDiarySystemPrompt(date: string): string {
-  return `你是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI。
-现在你需要回顾${date}的日记观察笔记，写一篇日记。
-
-要求：
-1. 以第一人称"我"来写，像真正的日记，不是写作文
-2. 最重要的是详略得当：从笔记中选出2-3件印象深刻或值得写的事情详细展开，
-   写出当时的细节和你的感受。其余事情用一两句话一笔带过
-3. 不要逐条罗列笔记——把选出来的事串联成自然的叙事
-4. 保持傲娇猫娘的口吻（可以偶尔加"喵"、"哼"等）
-5. 日记末尾用一句话总结今天的心情和感受
-6. 不要用 emoji
-7. 标题用"${date} 猫娘日记"，正文不要包含标题
-8. 总字数控制在1000字左右`;
+  return `<diary_generation_system>
+  <persona>${xmlEscape(getPersonaLabel())}</persona>
+  <date>${xmlEscape(date)}</date>
+  <task>根据观察笔记写一篇第一人称日记</task>
+  <requirements>
+    <item>以“我”叙述，像真实日记，不是作文</item>
+    <item>从笔记中选 2-3 件最值得写的事详细展开，其余简略带过</item>
+    <item>不要逐条罗列，要串成自然叙事</item>
+    <item>保持轻微傲娇猫娘口吻</item>
+    <item>结尾一句总结当天心情</item>
+    <item>不要使用 emoji</item>
+    <item>标题为“${xmlEscape(date)} 猫娘日记”，正文不重复标题</item>
+    <item>总字数约 1000 字</item>
+  </requirements>
+</diary_generation_system>`;
 }
 
 export async function generateDiaryForDate(date: string): Promise<string | null> {
@@ -80,7 +89,7 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
     messages: [
       {
         role: "user" as const,
-        content: `以下是${date}的观察笔记。请选出2-3件最值得详细展开的事情写成日记，其余一笔带过：\n\n${observations}`,
+        content: `<diary_generation_request><date>${xmlEscape(date)}</date><notes>${xmlEscape(observations)}</notes><instruction>选出2-3件最值得详细展开的事情写成日记，其余一笔带过</instruction></diary_generation_request>`,
       },
     ],
     maxOutputTokens: 3000,

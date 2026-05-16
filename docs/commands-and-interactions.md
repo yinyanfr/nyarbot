@@ -5,7 +5,7 @@
 | Command   | Who        | Description                                                |
 | --------- | ---------- | ---------------------------------------------------------- |
 | `/help`   | Anyone     | Show help text                                             |
-| `/love`   | Anyone     | Receive a tsundere rejection                               |
+| `/love`   | Anyone     | Get affection scoring breakdown + tsundere response        |
 | `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
 | `/status` | Admin only | Show uptime, buffer size, memory count, image cache count  |
 | `/reset`  | Admin only | Clear the conversation buffer                              |
@@ -48,9 +48,7 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 
 ### Stickers
 
-User-sent stickers are downloaded, format-converted (webm→webp via ffmpeg for animated stickers), and described by Gemini. The description (≤30 chars) and keywords (3-5) are cached in `received_stickers`. Sticker documents are keyed by Telegram `file_unique_id` (stable identity), while the latest `file_id` is stored in the document for actual sending/downloading. Only stickers with valid AI-generated descriptions are cached.
-
-The LLM can adopt stickers from the `received_stickers` cache into the bot's own `stickers` library using the `adoptSticker` tool. `sticker_id` in prompt context maps to `file_unique_id` (not `file_id`). When adopting, the sticker is sent to chat and the model is instructed to call `send_message` with an傲娇 verbal acknowledgment.
+Stickers are no longer described or cached. The bot only reads the emoji on incoming stickers for lightweight context and can send hardcoded stickers by emoji when responding.
 
 When answering, the LLM can respond with:
 
@@ -58,7 +56,7 @@ When answering, the LLM can respond with:
 - **Sticker only**: Calls only `sendSticker` without `send_message` — sticker is sent with a reply reference.
 - **No sticker**: Calls only `send_message` — plain text reply.
 
-The `sendSticker` tool exposes a compact emoji→keywords index (`😀 开心,庆祝 | 😭 大哭,崩溃 | ...`). The LLM selects by providing an emoji and keywords. The tool pre-filters stickers by keyword overlap (max 5 candidates), then uses Flash for semantic match within the shortlist. Falls back to emoji exact match or random sticker.
+The `sendSticker` tool exposes the hardcoded emoji list. The LLM selects by providing an emoji. Invalid emoji cancels sticker sending.
 
 ### Videos, GIFs, Video Messages, Documents, and Audio
 
@@ -77,7 +75,7 @@ The bot downloads thumbnails via `getFile(thumbnail_file_id)`, describes them th
 - **Cached**: Thumbnail descriptions are cached in Firestore `images/{thumbnail_file_id}` — the same cache used for photos (shared 30-day TTL).
 - **Text-only fallback**: If no thumbnail is available (rare), text markers like `[视频]` or `[文件: report.pdf]` are injected instead, so the bot at least knows media was sent.
 - **Reply-to media**: Thumbnails from replied-to video/animation/video_note/document/audio messages are also processed, matching the existing reply-to photo behavior.
-- **Zero ffmpeg usage**: Thumbnails are pre-generated JPEG/WebP images by Telegram. No video extraction is needed.
+- **Zero sticker processing**: Stickers are not downloaded, described, cached, or migrated. Thumbnails are still pre-generated JPEG/WebP images by Telegram, so no video extraction is needed.
 - **Unconditional caching**: All media thumbnails are described and cached regardless of trigger state — proactive context is always available.
 
 ### Goodnight / Good Morning
@@ -89,7 +87,7 @@ The bot downloads thumbnails via `getFile(thumbnail_file_id)`, describes them th
 
 ### Love Confession
 
-Text matching `LOVE_REGEX` (我爱你, 喜欢你, 嫁给我, love, etc.) triggers `generateLoveRejection()` — a dedicated prompt that uses the user's memories to craft a personalized tsundere rejection.
+Text matching `LOVE_REGEX` (我爱你, 喜欢你, 嫁给我, love, etc.) triggers `generateLoveResponse()` — a dedicated prompt that scores affection based on the user's memories (freeform scoring criteria, memory-based items, total score) and delivers a persona-consistent tsundere response.
 
 ## LLM Tools
 
@@ -102,8 +100,7 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `saveMemory`   | Record a memory about a group member (uid must be from the recent members list)   |
 | `setNickname`  | Set/update a group member's preferred nickname                                    |
 | `deleteMemory` | Remove a specific memory about a group member                                     |
-| `sendSticker`  | Select a sticker by emoji + keywords; two-stage pre-filter then semantic match    |
-| `adoptSticker` | Adopt a user-sent sticker into the bot's library with description and keywords    |
+| `sendSticker`  | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending  |
 | `writeDiary`   | Record a diary observation about the current conversation                         |
 | `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)         |
 

@@ -46,24 +46,22 @@ Additional optional envs with defaults:
 
 Firestore collections used:
 
-| Collection                           | Document ID             | Fields                                                                                                   |
-| ------------------------------------ | ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| `users/{uid}`                        | Telegram user ID        | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`                                 |
-| `images/{fileId}`                    | Telegram file_id        | `fileId`, `description`, `cachedAt`                                                                      |
-| `stickers/{file_unique_id}`          | Telegram file_unique_id | `file_unique_id`, `file_id` (latest dispatch/download ID), `emoji`, `description`, `keywords?`, `source` |
-| `received_stickers/{file_unique_id}` | Telegram file_unique_id | `file_unique_id`, `file_id` (latest observed ID), `emoji`, `description`, `keywords?`, `seen_at`         |
-| `diary/{date}`                       | Date YYYY-MM-DD         | `date`, `entries[]`, `diary?`, `generatedAt?`                                                            |
+| Collection        | Document ID      | Fields                                                                   |
+| ----------------- | ---------------- | ------------------------------------------------------------------------ |
+| `users/{uid}`     | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?` |
+| `images/{fileId}` | Telegram file_id | `fileId`, `description`, `cachedAt`                                      |
+| `diary/{date}`    | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                            |
 
 ## DeepSeek Models
 
 The bot uses two models with two thinking-mode variants each:
 
-| Model               | Thinking                                  | Usage                                                                                    |
-| ------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, love rejection, probe gate, image/URL description             |
-| `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss |
-| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss           |
-| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Diary generation (midnight summary and `/diary` command)                                 |
+| Model               | Thinking                                  | Usage                                                                                      |
+| ------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, affection-scoring love reply, probe gate, image/URL description |
+| `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss   |
+| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss             |
+| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Diary generation (midnight summary and `/diary` command)                                   |
 
 Thinking mode is injected via a custom `fetch` wrapper that modifies the request body before sending. Base URL is configurable via `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`, no `/v1` suffix).
 
@@ -77,16 +75,16 @@ Model used: `google-ai-studio/gemini-3-flash-preview` — fast, cheap, and suppo
 
 The bot uses `generateText()` (not streaming) with the following tools exposed to the model:
 
-| Tool           | Purpose                                                                      |
-| -------------- | ---------------------------------------------------------------------------- |
-| `send_message` | Send a message to the group — the only way to speak                          |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                            |
-| `saveMemory`   | Record a memory about a group member (uid validated)                         |
-| `setNickname`  | Set/update a group member's preferred nickname                               |
-| `deleteMemory` | Remove a specific memory about a group member                                |
-| `sendSticker`  | Select a sticker by emoji + keywords (two-stage pre-filter + semantic match) |
-| `writeDiary`   | Record an observational note about the conversation                          |
-| `webSearch`    | Tavily search (only when `needsSearch=true` from classification)             |
+| Tool           | Purpose                                                                          |
+| -------------- | -------------------------------------------------------------------------------- |
+| `send_message` | Send a message to the group — the only way to speak                              |
+| `dismiss`      | Choose not to reply (binary speak/silence choice)                                |
+| `saveMemory`   | Record a memory about a group member (uid validated)                             |
+| `setNickname`  | Set/update a group member's preferred nickname                                   |
+| `deleteMemory` | Remove a specific memory about a group member                                    |
+| `sendSticker`  | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending |
+| `writeDiary`   | Record an observational note about the conversation                              |
+| `webSearch`    | Tavily search (only when `needsSearch=true` from classification)                 |
 
 When `needsSearch=true`, a mandatory instruction is appended to ensure the model calls `webSearch` before answering.
 

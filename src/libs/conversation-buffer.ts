@@ -18,6 +18,15 @@ const MAX_HISTORY = 30;
 const MAX_TEXT_LEN = 500;
 const buffers = new Map<string, HistoryEntry[]>();
 
+function xmlEscape(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
 export function pushMessage(
   groupId: string,
   uid: string,
@@ -47,12 +56,14 @@ export function getHistory(groupId: string): HistoryEntry[] {
 
 export function formatHistoryAsContext(history: HistoryEntry[]): string {
   if (history.length === 0) return "";
-  return history
-    .map((entry) => {
-      const label = entry.username ? `[${entry.name} (@${entry.username})]` : `[${entry.name}]`;
-      return `${label}: ${entry.text}`;
-    })
-    .join("\n");
+  const lines: string[] = ['<recent_history order="oldest_to_newest">'];
+  for (const entry of history) {
+    lines.push(
+      `  <message uid="${xmlEscape(entry.uid)}" name="${xmlEscape(entry.name)}" username="${xmlEscape(entry.username ?? "")}" ts="${entry.timestamp}">${xmlEscape(entry.text)}</message>`,
+    );
+  }
+  lines.push("</recent_history>");
+  return lines.join("\n");
 }
 
 export function clearHistory(groupId: string): void {

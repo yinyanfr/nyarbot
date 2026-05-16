@@ -26,6 +26,10 @@ node dist/app.js    # run the compiled bot
 
 Pre-commit hooks (Husky + lint-staged) auto-format and lint staged `.ts` files.
 
+## Prompt Contract
+
+Prompt and dynamic context XML tags are documented in `docs/prompt-xml-schema.md`.
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`/`master`:
@@ -45,7 +49,7 @@ The previous streaming architecture (`streamText` + `sendMessage` + `editMessage
 
 Additional benefits:
 
-- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers by emoji + keywords (two-stage shortlist + semantic match). The `adoptSticker` tool lets the model adopt user-sent stickers into its library.
+- **Sticker dispatch**: The `sendSticker` tool lets the model choose hardcoded stickers by emoji. Invalid emoji cancels sending.
 - **Memory tools**: `saveMemory`, `setNickname`, `deleteMemory` are first-class operations with uid validation.
 - **Dismiss retry**: When triggered but dismissed, the handler can retry with escalating hints.
 
@@ -132,39 +136,6 @@ interface CachedImage {
   cachedAt: number; // ms since epoch, 30-day TTL
 }
 ```
-
-### `stickers/{file_unique_id}` and `received_stickers/{file_unique_id}`
-
-```typescript
-interface StickerDoc {
-  file_unique_id: string; // Stable Telegram sticker identity (document ID)
-  file_id: string; // Mutable Telegram file_id used for send/download
-  emoji: string;
-  description: string;
-  keywords?: string[];
-  source?: string;
-}
-
-interface ReceivedStickerDoc {
-  file_unique_id: string; // Stable Telegram sticker identity (document ID)
-  file_id: string; // Latest observed file_id for this sticker
-  emoji: string;
-  description: string;
-  keywords?: string[];
-  seen_at: number;
-}
-```
-
-Sticker identity is keyed by `file_unique_id`, while runtime dispatch still uses `file_id`.
-
-### Sticker ID migration script
-
-Run `src/scripts/migrate-sticker-doc-ids-to-unique.ts` when upgrading legacy data keyed by `file_id`:
-
-- Migrates both `stickers` and `received_stickers` to `file_unique_id` document IDs
-- Reuses existing `file_unique_id` when present, otherwise resolves via Telegram `getFile(file_id)`
-- Merges collisions onto the target `file_unique_id` document and deletes old legacy doc IDs
-- Exits non-zero if unresolved records remain, so deployment pipelines can fail fast
 
 ### `diary/{date}`
 

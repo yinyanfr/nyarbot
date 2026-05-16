@@ -9,7 +9,6 @@ import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
 import { cleanupExpiredImageCache } from "./services/firestore.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
-import { initStickerStore, stickerStoreReady } from "./libs/sticker-store.js";
 import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 
@@ -17,7 +16,6 @@ let diaryTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
 
 initFirebase();
-initStickerStore();
 
 type BotContext = import("./handlers/context.js").BotContext;
 
@@ -38,9 +36,6 @@ async function main(): Promise<void> {
   initAdminNotify(bot.api);
 
   setupHandlers(bot, botInfo);
-
-  // Wait for sticker store to load from Firestore before accepting messages
-  await stickerStoreReady();
 
   // Restore conversation context from last session
   await loadConversationBuffer();

@@ -24,16 +24,14 @@ handlers/index.ts（setupHandlers）
     │     │     → 缓存查询（缩略图 file_id）→ 下载缩略图
     │     │     → Gemini 描述（共享图片缓存）
     │     │     （含回复中的媒体；无需 ffmpeg — Telegram 预生成缩略图）
-    │     └─ 贴纸：缓存查询（received_stickers）→ 下载 →
-    │           格式转换（webm→webp via ffmpeg）→ Gemini 描述
-    │           → 缓存到 received_stickers（仅描述成功时）
+    │     └─ 贴纸：从硬编码 emoji 表查找 → 直接发送 file_id
     ├─ 缓冲区推送（conversation-buffer.ts）
     │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
     │     └─ 媒体：推送类型标签描述（"[视频: 描述]"、"[GIF动画: 描述]" 等）
     ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
     ├─ 命令路由（match-command.ts）
     │     ├─ /help
-    │     ├─ /love → generateLoveRejection()
+    │     ├─ /love → generateLoveResponse()
     │     ├─ /status（管理员）
     │     └─ /reset（管理员）
     ├─ 晚安检测 → setNightyTimestamp()
@@ -54,7 +52,7 @@ handlers/index.ts（setupHandlers）
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-│     │           deleteMemory、sendSticker、adoptSticker
+│     │           deleteMemory、sendSticker
 │     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
 │     ├─ 可选：writeDiary → firestore.ts（diary/{date}）
     │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
@@ -72,17 +70,16 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 
 ### 可用工具
 
-| 工具           | 用途                                                                                                                                                                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                                                                                                                                                           |
-| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                                                                                                                                                          |
-| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                                                                                                                                                             |
-| `setNickname`  | 设置/更新群友的昵称                                                                                                                                                                                                      |
-| `deleteMemory` | 删除关于群友的指定记忆                                                                                                                                                                                                   |
-| `sendSticker`  | 通过 emoji + 关键词从紧凑索引中选择贴纸，两阶段预选：关键词重叠打分（最多 5 个候选）→ Flash 在候选内语义匹配。回退到 emoji 精确匹配或随机贴纸。                                                                          |
-| `adoptSticker` | 将群友发送的贴纸收入 bot 的贴纸库（从 `received_stickers` 缓存）。其中 `sticker_id` 表示 Telegram `file_unique_id`（稳定身份）。设置 `stickerFileId`（最新 `file_id`）以便贴纸发送到聊天。从缓存条目中保存描述和关键词。 |
-| `writeDiary`   | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。                                                                                                                                        |
-| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                                                                                                                                                                    |
+| 工具           | 用途                                                                              |
+| -------------- | --------------------------------------------------------------------------------- |
+| `send_message` | 向群聊发送消息（必须调用才能说话；可多次调用）                                    |
+| `dismiss`      | 选择不回复（二选一：说话/沉默）                                                   |
+| `saveMemory`   | 记录关于群友的记忆（uid 须来自最近群友列表）                                      |
+| `setNickname`  | 设置/更新群友的昵称                                                               |
+| `deleteMemory` | 删除关于群友的指定记忆                                                            |
+| `sendSticker`  | 通过 emoji 直接选择硬编码贴纸。无效 emoji 会取消贴纸发送，不再回退到智能选择。    |
+| `writeDiary`   | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。 |
+| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                             |
 
 ### AiTurnResult
 
@@ -119,7 +116,7 @@ type AiTurnResult =
 │  │  │              │ │  │                          │ │ │
 │  │  │ • 消息分类   │ │  │ • 复杂对话                │ │ │
 │  │  │ • 早安问候   │ │  │ • 工具调用回复             │ │ │
-│  │  │ • 好人卡     │ │  │   （send_message、dismiss │ │ │
+│  │  │ • 告白好感度评分 │ │  │   （send_message、dismiss │ │ │
 │  │  │ • 图片描述   │ │  │    saveMemory 等）        │ │ │
 │  │  │ • URL 描述   │ │  │                          │ │ │
 │  │  │ • 探测门     │ │  │                          │ │ │

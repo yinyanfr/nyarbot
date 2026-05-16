@@ -3,19 +3,9 @@ import type { PhotoSize } from "grammy/types";
 import type { Video } from "grammy/types";
 import { getCachedImage } from "../services/firestore.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
-import { downloadTelegramStickerAsDataUrl } from "../libs/telegram-image.js";
-import { fetchUrlContent, describeSticker } from "../libs/ai.js";
-import { getReceivedSticker, cacheReceivedSticker } from "../libs/sticker-store.js";
+import { fetchUrlContent } from "../libs/ai.js";
 import { logger } from "../libs/logger.js";
 import type { BotContext, RequestState } from "./context.js";
-
-export interface StickerContent {
-  emoji: string;
-  fileId: string;
-  fileUniqueId: string;
-  description: string;
-  keywords: string[];
-}
 
 export interface MediaDescriptor {
   label: string;
@@ -37,8 +27,7 @@ export interface PendingMediaThumbnail {
  *   bot token into prompts) and uses the Firestore cache when available.
  * - Reply-to images: when the user replies to a message that contains photos,
  *   those photos are processed too (e.g. replying "what do you think?" to an image).
- * - Sticker handling: downloads sticker, describes via Gemini, caches to
- *   received_stickers for future reuse and potential adoption.
+ * - Sticker handling: only reads sticker emoji for lightweight context.
  * - Media thumbnails: video, animation, GIF, video note, document, and audio
  *   thumbnails are extracted (via their tiny thumbnail/cover files, not the full
  *   media) and queued for AI description. Text-only markers fall back when no
@@ -54,7 +43,6 @@ export async function extractContent(
   imageDataUrls: string[];
   imageDescriptions: string[];
   stickerEmoji: string;
-  stickerContent: StickerContent | null;
   urlFetchPromise: Promise<Map<string, string | null>>;
   mediaDescriptors: MediaDescriptor[];
   pendingMediaThumbnails: PendingMediaThumbnail[];
@@ -213,68 +201,9 @@ export async function extractContent(
 
   // Sticker — download and describe (cache-first)
   let stickerEmoji = "";
-  let stickerContent: StickerContent | null = null;
 
   if (msg.sticker) {
     stickerEmoji = msg.sticker.emoji ?? "";
-    const fileId = msg.sticker.file_id;
-    const fileUniqueId = msg.sticker.file_unique_id;
-
-    // Check cache first
-    const cached = await getReceivedSticker(fileUniqueId).catch(() => null);
-    if (cached) {
-      if (cached.file_id !== fileId) {
-        await cacheReceivedSticker({ ...cached, file_id: fileId }).catch((err: unknown) => {
-          logger.warn({ err, fileId, fileUniqueId }, "failed to refresh sticker file_id");
-        });
-      }
-      stickerContent = {
-        emoji: cached.emoji[0] ?? stickerEmoji,
-        fileId,
-        fileUniqueId,
-        description: cached.description,
-        keywords: cached.keywords ?? [],
-      };
-    } else {
-      // Download and describe
-      try {
-        const dataUrl = await downloadTelegramStickerAsDataUrl(fileId);
-        if (dataUrl) {
-          const result = await describeSticker(dataUrl);
-          if (!result) {
-            logger.warn({ fileId }, "sticker description failed, not caching");
-            stickerContent = {
-              emoji: stickerEmoji || "🐱",
-              fileId,
-              fileUniqueId,
-              description: "",
-              keywords: [],
-            };
-          } else {
-            const emojis = stickerEmoji ? [stickerEmoji] : ["🐱"];
-            await cacheReceivedSticker({
-              file_unique_id: fileUniqueId,
-              file_id: fileId,
-              emoji: emojis,
-              description: result.description,
-              keywords: result.keywords,
-              receivedAt: Date.now(),
-            }).catch((err: unknown) => {
-              logger.warn({ err, fileId }, "failed to cache received sticker");
-            });
-            stickerContent = {
-              emoji: emojis[0] ?? stickerEmoji,
-              fileId,
-              fileUniqueId,
-              description: result.description,
-              keywords: result.keywords,
-            };
-          }
-        }
-      } catch (err) {
-        logger.warn({ err, fileId }, "failed to process sticker");
-      }
-    }
   }
 
   return {
@@ -283,7 +212,6 @@ export async function extractContent(
     imageDataUrls,
     imageDescriptions,
     stickerEmoji,
-    stickerContent,
     urlFetchPromise,
     mediaDescriptors,
     pendingMediaThumbnails,
