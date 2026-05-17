@@ -22,6 +22,22 @@ import { logger } from "./logger.js";
 import { getPersonaLabel } from "./persona.js";
 import type { User } from "../global.d.js";
 
+export type RichMediaType =
+  | "image"
+  | "sticker"
+  | "video"
+  | "animation"
+  | "video_note"
+  | "document"
+  | "audio";
+
+export interface RichMediaRef {
+  type: RichMediaType;
+  source: "current" | "reply_to";
+  fileId?: string;
+  thumbnailFileId?: string;
+}
+
 function xmlEscape(text: string): string {
   return text
     .replaceAll("&", "&amp;")
@@ -29,6 +45,48 @@ function xmlEscape(text: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+const SESSION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const SESSION_MEDIA_CACHE_MAX = 1000;
+const SESSION_URL_CACHE_MAX = 1000;
+
+const mediaDescriptionCache = new Map<string, { value: string | null; ts: number }>();
+const urlContentCache = new Map<string, { value: string | null; ts: number }>();
+
+function pruneSessionCache<T>(cache: Map<string, { value: T; ts: number }>, maxSize: number): void {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (now - entry.ts > SESSION_CACHE_TTL_MS) cache.delete(key);
+  }
+  if (cache.size <= maxSize) return;
+  const overflow = cache.size - maxSize;
+  let removed = 0;
+  for (const key of cache.keys()) {
+    cache.delete(key);
+    removed++;
+    if (removed >= overflow) break;
+  }
+}
+
+function getSessionCached<T>(cache: Map<string, { value: T; ts: number }>, key: string): T | null {
+  const hit = cache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > SESSION_CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+function setSessionCached<T>(
+  cache: Map<string, { value: T; ts: number }>,
+  key: string,
+  value: T,
+  maxSize: number,
+): void {
+  cache.set(key, { value, ts: Date.now() });
+  pruneSessionCache(cache, maxSize);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +246,14 @@ export interface GenerateOptions {
   wasRepliedTo?: boolean;
   /** Recent bot messages for human-likeness feedback (last N send_message texts). */
   recentBotMessages?: string[];
+  /** Raw media refs present in the current turn (for on-demand description tools). */
+  mediaRefs?: RichMediaRef[];
+  /** Raw URLs present in the current turn (for on-demand URL tools). */
+  urls?: string[];
+  /** Resolve Telegram file_id to data URL for vision description. */
+  resolveTelegramFileAsDataUrl?: (fileId: string) => Promise<string | null>;
+  /** Allow media/url tools for this turn (passive only). */
+  allowRichContentTools?: boolean;
 }
 
 export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResult> {
@@ -203,6 +269,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     wasMentioned,
     wasRepliedTo,
     recentBotMessages,
+    mediaRefs,
+    urls,
+    resolveTelegramFileAsDataUrl,
+    allowRichContentTools,
   } = opts;
 
   const systemPrompt = buildSystemPrompt(userContext, recentConversation, recentMembers);
@@ -373,6 +443,80 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     },
   });
 
+  const allowedUrlSet = new Set((urls ?? []).map((u) => u.trim()).filter(Boolean));
+  const allowedMediaMap = new Map<string, { type: RichMediaType; viaThumbnail: boolean }>();
+  for (const ref of mediaRefs ?? []) {
+    if (ref.fileId) {
+      allowedMediaMap.set(ref.fileId, { type: ref.type, viaThumbnail: false });
+    }
+    if (ref.thumbnailFileId) {
+      allowedMediaMap.set(ref.thumbnailFileId, { type: ref.type, viaThumbnail: true });
+    }
+  }
+
+  const describeTelegramMediaTool = tool({
+    description:
+      "按需查看当前这轮消息中的 Telegram 媒体（通过 file_id）并返回中文描述。" +
+      "仅在你明确需要图片/封面信息来回答时调用。" +
+      "如果媒体不重要，或你已经能回答，就不要调用。",
+    inputSchema: z.object({
+      file_id: z.string().describe("当前轮消息里出现过的 file_id 或 thumbnail_file_id"),
+      prompt: z
+        .string()
+        .optional()
+        .describe("你给视觉模型的任务说明，可选。例如：提取文字、描述场景、关注表情"),
+    }),
+    execute: async ({ file_id, prompt }) => {
+      const meta = allowedMediaMap.get(file_id);
+      if (!meta) {
+        return "这个 file_id 不在当前轮可用媒体里，已取消";
+      }
+
+      const cacheKey = `media:${file_id}:${prompt ?? ""}`;
+      const cached = getSessionCached(mediaDescriptionCache, cacheKey);
+      if (cached !== null) return cached || "描述失败";
+
+      if (!resolveTelegramFileAsDataUrl) {
+        return "当前会话未启用媒体解析能力";
+      }
+
+      const dataUrl = await resolveTelegramFileAsDataUrl(file_id);
+      if (!dataUrl) {
+        setSessionCached(mediaDescriptionCache, cacheKey, null, SESSION_MEDIA_CACHE_MAX);
+        return "媒体下载失败";
+      }
+
+      const mediaTypeHint = meta.viaThumbnail ? `${meta.type} 缩略图/封面` : meta.type;
+      const description = await describeImage(dataUrl, prompt, mediaTypeHint).catch(
+        (err: unknown) => {
+          logger.warn({ err, file_id, mediaTypeHint }, "describeTelegramMedia tool failed");
+          return "";
+        },
+      );
+      const result = description.trim() || null;
+      setSessionCached(mediaDescriptionCache, cacheKey, result, SESSION_MEDIA_CACHE_MAX);
+      return result ?? "描述失败";
+    },
+  });
+
+  const fetchUrlContentTool = tool({
+    description:
+      "按需抓取当前轮消息里的链接内容并返回中文摘要。" +
+      "只在链接内容对回答重要时调用，不重要可忽略。",
+    inputSchema: z.object({
+      url: z.string().describe("当前轮消息中出现过的 URL"),
+    }),
+    execute: async ({ url }) => {
+      if (!allowedUrlSet.has(url)) return "这个 URL 不在当前轮里，已取消";
+      const cacheKey = `url:${url}`;
+      const cached = getSessionCached(urlContentCache, cacheKey);
+      if (cached !== null) return cached || "抓取失败";
+      const content = await fetchUrlContent(url);
+      setSessionCached(urlContentCache, cacheKey, content, SESSION_URL_CACHE_MAX);
+      return content ?? "抓取失败";
+    },
+  });
+
   const generateParams: Parameters<typeof generateText>[0] = {
     model,
     system: systemPrompt,
@@ -385,6 +529,12 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       deleteMemory: deleteMemoryTool,
       writeDiary: writeDiaryTool,
       sendSticker: sendStickerTool,
+      ...(allowRichContentTools
+        ? {
+            describeTelegramMedia: describeTelegramMediaTool,
+            fetchUrlContent: fetchUrlContentTool,
+          }
+        : {}),
       ...(needsSearch
         ? {
             webSearch: tavilySearch({
@@ -748,17 +898,32 @@ async function describeTweetPhotos(
   }
 }
 
-interface FxTweetResponse {
+interface FxStatusAuthor {
+  name?: string;
+  screen_name?: string;
+}
+
+interface FxStatusMediaPhoto {
+  url: string;
+  altText?: string;
+}
+
+interface FxStatusMedia {
+  photos?: FxStatusMediaPhoto[];
+}
+
+interface FxStatus {
+  type?: string;
+  id?: string;
+  text?: string;
+  author?: FxStatusAuthor;
+  media?: FxStatusMedia;
+  quote?: FxStatus;
+}
+
+interface FxStatusResponse {
   code: number;
-  tweet?: {
-    text?: string;
-    author?: { name?: string; screen_name?: string };
-    media?: { photos?: { url: string; altText?: string }[] };
-    qrt?: {
-      text?: string;
-      author?: { name?: string; screen_name?: string };
-    };
-  };
+  status?: FxStatus;
 }
 
 async function fetchTwitterContent(
@@ -767,13 +932,13 @@ async function fetchTwitterContent(
   tweetId: string,
 ): Promise<string | null> {
   try {
-    const apiUrl = `https://api.fxtwitter.com/${username}/status/${tweetId}`;
+    const apiUrl = `https://api.fxtwitter.com/2/status/${tweetId}`;
     const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return null;
-    const data = (await res.json()) as FxTweetResponse;
-    if (data.code !== 200 || !data.tweet) return null;
+    const data = (await res.json()) as FxStatusResponse;
+    if (data.code !== 200 || !data.status || data.status.type !== "status") return null;
 
-    const tweet = data.tweet;
+    const tweet = data.status;
     const author = `${tweet.author?.name ?? username} (@${tweet.author?.screen_name ?? username})`;
 
     let mediaDesc = "";
@@ -797,8 +962,8 @@ async function fetchTwitterContent(
     }
 
     let qrtDesc = "";
-    if (tweet.qrt) {
-      const qrt = tweet.qrt;
+    if (tweet.quote && tweet.quote.type === "status") {
+      const qrt = tweet.quote;
       const qrtAuthor = qrt.author?.screen_name ?? "";
       qrtDesc = ` | 引用 @${qrtAuthor}: ${qrt.text ?? ""}`;
     }

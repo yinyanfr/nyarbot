@@ -39,7 +39,7 @@ node dist/app.js   # run the compiled bot
 - `src/app.ts` — bot entrypoint (imports `dotenv/config`, creates Bot, registers handlers, creates ProactiveCallbacks, starts proactive checker)
 - `src/configs/env.ts` — typed config reader from `process.env`
 - `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, AI routing, tool-call architecture, dismiss retry, typing indicator, sendAiMessages
-- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking), `classifyMessage()`, `generateAiTurn()` with tool-call architecture, `probeGate()` for proactive, `describeImage()`, `fetchUrlContent()`
+- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking), `classifyMessage()`, `generateAiTurn()` with tool-call architecture, `probeGate()` for proactive, on-demand rich-content tools (`describeTelegramMedia`, `fetchUrlContent`), `describeImage()` backend helper
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (persona + naturalness), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (per-turn human-likeness feedback)
 - `src/libs/conversation-buffer.ts` — in-memory ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
@@ -50,7 +50,7 @@ node dist/app.js   # run the compiled bot
 - `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, fixed TZ `Asia/Shanghai`
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization
-- `src/services/firestore.ts` — Firestore operations: `getOrCreateUser`, `cacheImage`, `getCachedImage`, `writeDiaryEntry`, `getDiaryEntries`, `writeGeneratedDiary`
+- `src/services/firestore.ts` — Firestore operations: `getOrCreateUser`, `writeDiaryEntry`, `getDiaryEntries`, `writeGeneratedDiary`
 - `src/services/github.ts` — GitHub Content API: `pushDiaryToGithub()` pushes Hexo-formatted diary markdown to `nyarbot-diary` repo (source/\_posts/), triggers Pages deploy via Actions
 - `src/global.d.ts` — shared types (`User` with uid, nickname, memories, `DiaryEntry` with ts/content)
 

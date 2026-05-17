@@ -18,14 +18,7 @@ export interface RequestState {
   rawText: string;
   entities: { type: string; offset: number; length: number }[];
   urls: string[];
-  photoFileIds: string[];
-  /** Downloaded image data URLs for vision input — never contains bot token. */
-  imageDataUrls: string[];
-  /** Cached image descriptions (text, no URLs). */
-  imageDescriptions: string[];
   stickerEmoji: string;
-  /** Pending URL-content extraction, resolves to map<url, summary|null>. */
-  urlFetchPromise: Promise<Map<string, string | null>>;
   isMentioned: boolean;
   isRepliedToBot: boolean;
   /** Hint for the next AI call — e.g. "user just woke up". */

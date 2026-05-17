@@ -66,19 +66,15 @@ Semantics:
 
 ```xml
 <links>
-  <link url="https://example.com" status="success">
-    <summary>...</summary>
-  </link>
-  <link url="https://example.org" status="failed">
-    <error>无法获取内容</error>
-  </link>
+  <link url="https://example.com" />
+  <link url="https://example.org" />
 </links>
 ```
 
 Rules:
 
-- `status="success"`: URL content is available; reply should use summary
-- `status="failed"`: URL fetch failed; model may say it cannot access content
+- `link` only indicates which URLs appeared in the user message
+- URL content should be fetched on demand via tool calls when needed
 
 ### `media`
 

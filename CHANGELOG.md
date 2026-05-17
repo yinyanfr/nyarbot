@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.3] — 2026-05-17
+
+### Changed
+
+- **On-demand rich content tools** (`src/handlers/extract-content.ts`, `src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/proactive.ts`, `src/libs/system-prompt.ts`): media and link preprocessing was removed from handlers. The bot now keeps raw `file_id` / `thumbnail_file_id` / URL references in context and lets the LLM call `describeTelegramMedia` / `fetchUrlContent` only when needed. Proactive replies cannot use these tools.
+- **Session-only rich content cache** (`src/libs/ai.ts`): media descriptions and URL summaries are cached in-process for the current session only, instead of being written to Firestore.
+- **Twitter/X integration upgraded to FxEmbed v2** (`src/libs/ai.ts`): tweet fetching now uses `https://api.fxtwitter.com/2/status/{id}` and the new v2 response shape.
+- **Conversation buffer URL markers restored** (`src/handlers/index.ts`): lightweight `[链接: ...]` markers are preserved in the in-memory history so passive/proactive context still retains link presence even without eager fetches.
+
+### Removed
+
+- **Firestore image cache path** (`src/services/firestore.ts`, `src/app.ts`): removed image cache CRUD, startup cleanup, and `/status` image-cache reporting because rich content is no longer persisted there.
+
+### Docs
+
+- **Prompt/context schema and interaction docs** (`docs/prompt-xml-schema.md`, `docs/architecture.md`, `docs/architecture.zh-CN.md`, `docs/commands-and-interactions.md`, `docs/commands-and-interactions.zh-CN.md`, `README.md`, `AGENTS.md`): updated to describe raw-reference context, passive-only rich-content tools, and the new on-demand fetch flow.
+
 ## [0.8.2] — 2026-05-16
 
 ### Changed

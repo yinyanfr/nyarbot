@@ -7,7 +7,6 @@ import { initFirebase } from "./services/index.js";
 import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
-import { cleanupExpiredImageCache } from "./services/firestore.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
@@ -39,11 +38,6 @@ async function main(): Promise<void> {
 
   // Restore conversation context from last session
   await loadConversationBuffer();
-
-  // Fire-and-forget cache cleanup; failures shouldn't block startup.
-  cleanupExpiredImageCache().catch((err: unknown) => {
-    logger.warn({ err }, "image cache cleanup failed");
-  });
 
   const proactiveCallbacks: ProactiveCallbacks = {
     sendText: async (text: string) => {

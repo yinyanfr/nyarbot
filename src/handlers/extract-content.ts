@@ -1,51 +1,43 @@
 import type { Message } from "grammy/types";
-import type { PhotoSize } from "grammy/types";
-import type { Video } from "grammy/types";
-import { getCachedImage } from "../services/firestore.js";
-import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
-import { fetchUrlContent } from "../libs/ai.js";
-import { logger } from "../libs/logger.js";
 import type { BotContext, RequestState } from "./context.js";
 
-export interface MediaDescriptor {
-  label: string;
-  description: string;
-}
+export type MediaRefType =
+  | "image"
+  | "sticker"
+  | "video"
+  | "animation"
+  | "video_note"
+  | "document"
+  | "audio";
 
-export interface PendingMediaThumbnail {
-  label: string;
-  dataUrl: string;
-  fileId: string;
+export interface MediaRef {
+  type: MediaRefType;
+  source: "current" | "reply_to";
+  fileId?: string;
+  thumbnailFileId?: string;
+  emoji?: string;
+  filename?: string;
+  title?: string;
 }
 
 /**
- * Parse raw message fields into structured state: text, entities, URLs, images, sticker, media thumbnails.
+ * Parse raw message fields into structured state: text, entities, URLs, sticker,
+ * and raw media references (file_id / thumbnail_file_id).
  *
  * - URL detection combines entity-based extraction with a regex fallback so that
  *   bare URLs not tagged by Telegram are still picked up.
- * - Image handling downloads the largest size as a data URL (never putting the
- *   bot token into prompts) and uses the Firestore cache when available.
- * - Reply-to images: when the user replies to a message that contains photos,
- *   those photos are processed too (e.g. replying "what do you think?" to an image).
+ * - Images/media are not downloaded or described here.
+ * - Reply-to images/media are preserved as references too.
  * - Sticker handling: only reads sticker emoji for lightweight context.
- * - Media thumbnails: video, animation, GIF, video note, document, and audio
- *   thumbnails are extracted (via their tiny thumbnail/cover files, not the full
- *   media) and queued for AI description. Text-only markers fall back when no
- *   thumbnail is available.
  */
 export async function extractContent(
-  ctx: BotContext,
+  _ctx: BotContext,
   msg: Message,
   state: Pick<RequestState, "rawText" | "entities">,
 ): Promise<{
   urls: string[];
-  photoFileIds: string[];
-  imageDataUrls: string[];
-  imageDescriptions: string[];
   stickerEmoji: string;
-  urlFetchPromise: Promise<Map<string, string | null>>;
-  mediaDescriptors: MediaDescriptor[];
-  pendingMediaThumbnails: PendingMediaThumbnail[];
+  mediaRefs: MediaRef[];
 }> {
   // URLs — from both text and caption entity arrays
   const textUrls: string[] = (msg.entities ?? [])
@@ -66,140 +58,82 @@ export async function extractContent(
     }
   }
 
-  const urlFetchPromise: Promise<Map<string, string | null>> =
-    urls.length > 0
-      ? Promise.all(
-          urls.map(async (u) => {
-            const content = await fetchUrlContent(u);
-            return [u, content] as const;
-          }),
-        ).then((entries) => new Map(entries))
-      : Promise.resolve(new Map());
+  const mediaRefs: MediaRef[] = [];
 
-  // Images — message's own photos and reply-to photos
-  const photoFileIds: string[] = [];
-  const imageDataUrls: string[] = [];
-  const imageDescriptions: string[] = [];
+  function collectFromMessage(m: Message, source: "current" | "reply_to"): void {
+    const photo = m.photo?.[m.photo.length - 1];
+    if (photo?.file_id) {
+      mediaRefs.push({ type: "image", source, fileId: photo.file_id });
+    }
 
-  // Helper: process an array of PhotoSize and merge results into the output arrays.
-  async function processPhotoArray(photos: PhotoSize[], source: string): Promise<void> {
-    if (photos.length === 0) return;
-    const largest = photos[photos.length - 1];
-    if (!largest) return;
+    if (m.sticker) {
+      mediaRefs.push({
+        type: "sticker",
+        source,
+        fileId: m.sticker.file_id,
+        emoji: m.sticker.emoji ?? "",
+      });
+    }
 
-    try {
-      const cached = await getCachedImage(largest.file_id);
-      if (cached?.description) {
-        imageDescriptions.push(cached.description);
-        return;
-      }
-      const file = await ctx.api.getFile(largest.file_id);
-      if (file.file_path) {
-        const dataUrl = await downloadTelegramFileAsDataUrl(file.file_path);
-        if (dataUrl) {
-          imageDataUrls.push(dataUrl);
-          photoFileIds.push(largest.file_id);
-        }
-      }
-    } catch (err) {
-      logger.warn({ err }, `failed to process photo (${source})`);
+    if (m.video) {
+      const thumb = m.video.cover?.[m.video.cover.length - 1] ?? m.video.thumbnail;
+      mediaRefs.push({
+        type: "video",
+        source,
+        fileId: m.video.file_id,
+        ...(thumb?.file_id ? { thumbnailFileId: thumb.file_id } : {}),
+      });
+    }
+
+    if (m.animation) {
+      mediaRefs.push({
+        type: "animation",
+        source,
+        fileId: m.animation.file_id,
+        ...(m.animation.thumbnail?.file_id
+          ? { thumbnailFileId: m.animation.thumbnail.file_id }
+          : {}),
+      });
+    }
+
+    if (m.video_note) {
+      mediaRefs.push({
+        type: "video_note",
+        source,
+        fileId: m.video_note.file_id,
+        ...(m.video_note.thumbnail?.file_id
+          ? { thumbnailFileId: m.video_note.thumbnail.file_id }
+          : {}),
+      });
+    }
+
+    if (m.document) {
+      mediaRefs.push({
+        type: "document",
+        source,
+        fileId: m.document.file_id,
+        ...(m.document.file_name ? { filename: m.document.file_name } : {}),
+        ...(m.document.thumbnail?.file_id ? { thumbnailFileId: m.document.thumbnail.file_id } : {}),
+      });
+    }
+
+    if (m.audio) {
+      mediaRefs.push({
+        type: "audio",
+        source,
+        fileId: m.audio.file_id,
+        ...(m.audio.title || m.audio.file_name
+          ? { title: m.audio.title || m.audio.file_name }
+          : {}),
+        ...(m.audio.thumbnail?.file_id ? { thumbnailFileId: m.audio.thumbnail.file_id } : {}),
+      });
     }
   }
 
-  // Process the message's own photos
-  await processPhotoArray(msg.photo ?? [], "direct");
+  collectFromMessage(msg, "current");
+  if (msg.reply_to_message) collectFromMessage(msg.reply_to_message, "reply_to");
 
-  // Process photos from the replied-to message (e.g. user replied "what do you think?" to an image)
-  if (msg.reply_to_message?.photo && msg.reply_to_message.photo.length > 0) {
-    await processPhotoArray(msg.reply_to_message.photo, "reply-to");
-  }
-
-  // Media thumbnails — video/animation/video_note/document/audio
-  const mediaDescriptors: MediaDescriptor[] = [];
-  const pendingMediaThumbnails: PendingMediaThumbnail[] = [];
-
-  function getVideoThumb(video: Video): PhotoSize | undefined {
-    if (video.cover?.length) return video.cover[video.cover.length - 1];
-    return video.thumbnail;
-  }
-
-  async function processThumbnail(thumb: PhotoSize | undefined, label: string): Promise<void> {
-    if (!thumb) {
-      logger.info({ label }, "media: no thumbnail, using text-only marker");
-      mediaDescriptors.push({ label, description: "" });
-      return;
-    }
-    try {
-      const cached = await getCachedImage(thumb.file_id);
-      if (cached?.description) {
-        logger.info({ label, fileId: thumb.file_id }, "media: cached description hit");
-        mediaDescriptors.push({ label, description: cached.description });
-        return;
-      }
-      const file = await ctx.api.getFile(thumb.file_id);
-      if (file.file_path) {
-        const dataUrl = await downloadTelegramFileAsDataUrl(file.file_path);
-        if (dataUrl) {
-          logger.info(
-            { label, fileId: thumb.file_id },
-            "media: thumbnail downloaded for describing",
-          );
-          pendingMediaThumbnails.push({ label, dataUrl, fileId: thumb.file_id });
-          return;
-        }
-        logger.warn({ label, fileId: thumb.file_id }, "media: thumbnail download returned empty");
-      } else {
-        logger.warn({ label, fileId: thumb.file_id }, "media: getFile returned no file_path");
-      }
-      mediaDescriptors.push({ label, description: "" });
-    } catch (err) {
-      logger.warn({ err, label }, "failed to process media thumbnail");
-      mediaDescriptors.push({ label, description: "" });
-    }
-  }
-
-  // Process main message media
-  if (msg.video) {
-    await processThumbnail(getVideoThumb(msg.video), "视频");
-  }
-  if (msg.animation) {
-    await processThumbnail(msg.animation.thumbnail, "GIF动画");
-  }
-  if (msg.video_note) {
-    await processThumbnail(msg.video_note.thumbnail, "视频消息");
-  }
-  if (msg.document) {
-    const label = msg.document.file_name ? `文件: ${msg.document.file_name}` : "文件";
-    await processThumbnail(msg.document.thumbnail, label);
-  }
-  if (msg.audio) {
-    const title = msg.audio.title || msg.audio.file_name;
-    const label = title ? `音频: ${title}` : "音频";
-    await processThumbnail(msg.audio.thumbnail, label);
-  }
-
-  // Process reply-to media thumbnails (same treatment as reply-to photos)
-  const replyTo = msg.reply_to_message;
-  if (replyTo?.video) {
-    await processThumbnail(getVideoThumb(replyTo.video), "视频");
-  }
-  if (replyTo?.animation) {
-    await processThumbnail(replyTo.animation.thumbnail, "GIF动画");
-  }
-  if (replyTo?.video_note) {
-    await processThumbnail(replyTo.video_note.thumbnail, "视频消息");
-  }
-  if (replyTo?.document) {
-    const label = replyTo.document.file_name ? `文件: ${replyTo.document.file_name}` : "文件";
-    await processThumbnail(replyTo.document.thumbnail, label);
-  }
-  if (replyTo?.audio) {
-    const title = replyTo.audio.title || replyTo.audio.file_name;
-    const label = title ? `音频: ${title}` : "音频";
-    await processThumbnail(replyTo.audio.thumbnail, label);
-  }
-
-  // Sticker — download and describe (cache-first)
+  // Sticker emoji (current message only)
   let stickerEmoji = "";
 
   if (msg.sticker) {
@@ -208,12 +142,7 @@ export async function extractContent(
 
   return {
     urls,
-    photoFileIds,
-    imageDataUrls,
-    imageDescriptions,
     stickerEmoji,
-    urlFetchPromise,
-    mediaDescriptors,
-    pendingMediaThumbnails,
+    mediaRefs,
   };
 }

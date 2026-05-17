@@ -3,19 +3,17 @@ import type { Message } from "grammy/types";
 import config from "../configs/env.js";
 import {
   getOrCreateUser,
-  cacheImage,
   setNightyTimestamp,
   setMorningGreeted,
   countUsersWithMemories,
-  countCachedImages,
 } from "../services/firestore.js";
 import {
   classifyMessage,
   generateAiTurn,
   generateMorningGreeting,
-  describeImage,
   generateLoveResponse,
 } from "../libs/ai.js";
+import type { RichMediaRef } from "../libs/ai.js";
 import {
   pushMessage,
   getHistory,
@@ -36,11 +34,12 @@ import type { BotContext, BotInfo } from "./context.js";
 import { MAX_BUFFER_TEXT, LOVE_REGEX, EIGHT_HOURS_MS } from "./constants.js";
 import { matchCommand } from "./match-command.js";
 import { extractContent } from "./extract-content.js";
-import type { MediaDescriptor } from "./extract-content.js";
+import type { MediaRef } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
+import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -68,32 +67,18 @@ function xmlEscape(text: string): string {
 
 /**
  * Build the user-facing text for the AI call by stitching together the raw
- * text with media context, reply-to context, and fetched URL summaries.
+ * text with raw media/link references and reply-to context.
  */
 function buildUserMessage(params: {
   rawText: string;
   displayName: string;
-  imageDescriptions: string[];
-  hasImage: boolean;
-  stickerEmoji: string;
+  mediaRefs: MediaRef[];
   replyTo: Message | undefined;
   isRepliedToBot: boolean;
   isMentioned?: boolean;
-  urlContents: Map<string, string | null>;
-  mediaDescriptors?: MediaDescriptor[];
+  urls: string[];
 }): string {
-  const {
-    rawText,
-    displayName,
-    imageDescriptions,
-    hasImage,
-    stickerEmoji,
-    mediaDescriptors,
-    replyTo,
-    isRepliedToBot,
-    isMentioned,
-    urlContents,
-  } = params;
+  const { rawText, displayName, mediaRefs, replyTo, isRepliedToBot, isMentioned, urls } = params;
 
   const sections: string[] = [];
   sections.push("<current_turn>");
@@ -112,24 +97,35 @@ function buildUserMessage(params: {
     if (replyText) {
       sections.push(`    <quoted_text>${xmlEscape(replyText)}</quoted_text>`);
     } else if (replyTo.photo?.length) {
-      sections.push('    <quoted_media type="image" />');
+      const photo = replyTo.photo[replyTo.photo.length - 1];
+      sections.push(
+        `    <quoted_media type="image" file_id="${xmlEscape(photo?.file_id ?? "")}" />`,
+      );
     } else if (replyTo.sticker) {
       sections.push(
-        `    <quoted_media type="sticker" emoji="${xmlEscape(replyTo.sticker.emoji ?? "")}" />`,
+        `    <quoted_media type="sticker" file_id="${xmlEscape(replyTo.sticker.file_id)}" emoji="${xmlEscape(replyTo.sticker.emoji ?? "")}" />`,
       );
     } else if (replyTo.video) {
-      sections.push('    <quoted_media type="video" />');
+      const thumb =
+        replyTo.video.cover?.[replyTo.video.cover.length - 1] ?? replyTo.video.thumbnail;
+      sections.push(
+        `    <quoted_media type="video" file_id="${xmlEscape(replyTo.video.file_id)}" thumbnail_file_id="${xmlEscape(thumb?.file_id ?? "")}" />`,
+      );
     } else if (replyTo.animation) {
-      sections.push('    <quoted_media type="animation" />');
+      sections.push(
+        `    <quoted_media type="animation" file_id="${xmlEscape(replyTo.animation.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.animation.thumbnail?.file_id ?? "")}" />`,
+      );
     } else if (replyTo.video_note) {
-      sections.push('    <quoted_media type="video_note" />');
+      sections.push(
+        `    <quoted_media type="video_note" file_id="${xmlEscape(replyTo.video_note.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.video_note.thumbnail?.file_id ?? "")}" />`,
+      );
     } else if (replyTo.document) {
       sections.push(
-        `    <quoted_media type="document" filename="${xmlEscape(replyTo.document.file_name ?? "")}" />`,
+        `    <quoted_media type="document" file_id="${xmlEscape(replyTo.document.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.document.thumbnail?.file_id ?? "")}" filename="${xmlEscape(replyTo.document.file_name ?? "")}" />`,
       );
     } else if (replyTo.audio) {
       sections.push(
-        `    <quoted_media type="audio" title="${xmlEscape(replyTo.audio.title || replyTo.audio.file_name || "")}" />`,
+        `    <quoted_media type="audio" file_id="${xmlEscape(replyTo.audio.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.audio.thumbnail?.file_id ?? "")}" title="${xmlEscape(replyTo.audio.title || replyTo.audio.file_name || "")}" />`,
       );
     }
     sections.push("    <note>reply_to 内容是被回复消息，不是当前说话人的新消息</note>");
@@ -140,53 +136,46 @@ function buildUserMessage(params: {
     sections.push(`  <text>${xmlEscape(rawText)}</text>`);
   }
 
-  if (
-    imageDescriptions.length > 0 ||
-    hasImage ||
-    stickerEmoji ||
-    (mediaDescriptors && mediaDescriptors.length > 0)
-  ) {
+  const currentMedia = mediaRefs.filter((m) => m.source === "current");
+  if (currentMedia.length > 0) {
     sections.push("  <media>");
-    if (imageDescriptions.length > 0) {
-      for (const desc of imageDescriptions) {
-        sections.push(`    <image><description>${xmlEscape(desc)}</description></image>`);
-      }
-    } else if (hasImage) {
-      sections.push('    <image status="present_but_undescribed" />');
-    }
-    if (stickerEmoji) {
-      sections.push(`    <sticker><emoji>${xmlEscape(stickerEmoji)}</emoji></sticker>`);
-    }
-    if (mediaDescriptors?.length) {
-      for (const md of mediaDescriptors) {
-        const label = xmlEscape(md.label);
-        if (md.description) {
-          sections.push(
-            `    <media_item label="${label}" thumbnail_only="true"><description>${xmlEscape(md.description)}</description></media_item>`,
-          );
-        } else {
-          sections.push(`    <media_item label="${label}" thumbnail_only="true" />`);
-        }
+    for (const media of currentMedia) {
+      if (media.type === "image") {
+        sections.push(`    <image file_id="${xmlEscape(media.fileId ?? "")}" />`);
+      } else if (media.type === "sticker") {
+        sections.push(
+          `    <sticker file_id="${xmlEscape(media.fileId ?? "")}" emoji="${xmlEscape(media.emoji ?? "")}" />`,
+        );
+      } else if (media.type === "video") {
+        sections.push(
+          `    <video file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
+        );
+      } else if (media.type === "animation") {
+        sections.push(
+          `    <animation file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
+        );
+      } else if (media.type === "video_note") {
+        sections.push(
+          `    <video_note file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
+        );
+      } else if (media.type === "document") {
+        sections.push(
+          `    <document file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" filename="${xmlEscape(media.filename ?? "")}" />`,
+        );
+      } else if (media.type === "audio") {
+        sections.push(
+          `    <audio file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" title="${xmlEscape(media.title ?? "")}" />`,
+        );
       }
     }
     sections.push("  </media>");
   }
 
-  const urlLines: string[] = [];
-  for (const [url, content] of urlContents) {
-    if (content) {
-      urlLines.push(
-        `    <link url="${xmlEscape(url)}" status="success"><summary>${xmlEscape(content)}</summary></link>`,
-      );
-    } else {
-      urlLines.push(
-        `    <link url="${xmlEscape(url)}" status="failed"><error>无法获取内容</error></link>`,
-      );
-    }
-  }
-  if (urlLines.length > 0) {
+  if (urls.length > 0) {
     sections.push("  <links>");
-    sections.push(...urlLines);
+    for (const url of urls) {
+      sections.push(`    <link url="${xmlEscape(url)}" />`);
+    }
     sections.push("  </links>");
   }
 
@@ -201,10 +190,7 @@ function buildUserMessage(params: {
  */
 function buildBufferLine(params: {
   rawText: string;
-  stickerEmoji: string;
-  hasImageContext: boolean;
-  imageDescriptions: string[];
-  mediaDescriptors?: MediaDescriptor[];
+  mediaRefs: MediaRef[];
   urls: string[];
   replyToInfo?: { uid: string; name: string; username?: string; text: string };
 }): string {
@@ -215,19 +201,31 @@ function buildBufferLine(params: {
     parts.push(`[回复 ${ri.uid} ${userLabel}: "${ri.text.slice(0, 100)}"]`);
   }
   if (params.rawText) parts.push(params.rawText);
-  if (params.stickerEmoji) parts.push(`[贴纸: ${params.stickerEmoji}]`);
-  if (params.hasImageContext) {
-    if (params.imageDescriptions.length > 0) {
-      const desc = params.imageDescriptions.join(" | ");
-      parts.push(`[图片: ${desc}]`);
-    } else {
-      parts.push("[图片]");
+  const currentMedia = params.mediaRefs.filter((m) => m.source === "current");
+  if (currentMedia.length > 0) {
+    for (const media of currentMedia) {
+      if (media.type === "image") parts.push(`[图片 file_id=${media.fileId ?? ""}]`);
+      if (media.type === "sticker") parts.push(`[贴纸: ${media.emoji ?? ""}]`);
+      if (media.type === "video")
+        parts.push(`[视频 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
+      if (media.type === "animation")
+        parts.push(`[GIF file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
+      if (media.type === "video_note")
+        parts.push(`[视频消息 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
+      if (media.type === "document")
+        parts.push(
+          `[文件 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""} ${media.filename ?? ""}]`,
+        );
+      if (media.type === "audio")
+        parts.push(
+          `[音频 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""} ${media.title ?? ""}]`,
+        );
     }
   }
-  if (params.mediaDescriptors?.length) {
-    for (const md of params.mediaDescriptors) {
-      const line = md.description ? `[${md.label}: ${md.description}]` : `[${md.label}]`;
-      parts.push(line);
+  if (params.urls.length > 0) {
+    for (const url of params.urls) {
+      const compact = url.length > 120 ? `${url.slice(0, 117)}...` : url;
+      parts.push(`[链接: ${compact}]`);
     }
   }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
@@ -363,6 +361,8 @@ async function handleAiTurn(params: {
   systemHint: string | null;
   isMentioned: boolean;
   isRepliedToBot: boolean;
+  mediaRefs: RichMediaRef[];
+  urls: string[];
   senderUsername?: string;
 }): Promise<void> {
   const {
@@ -373,6 +373,8 @@ async function handleAiTurn(params: {
     systemHint,
     isMentioned,
     isRepliedToBot,
+    mediaRefs,
+    urls,
     senderUsername,
   } = params;
 
@@ -406,6 +408,17 @@ async function handleAiTurn(params: {
   const isTriggered = isMentioned || isRepliedToBot;
 
   try {
+    const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
+      try {
+        const file = await ctx.api.getFile(fileId);
+        if (!file.file_path) return null;
+        return await downloadTelegramFileAsDataUrl(file.file_path);
+      } catch (err) {
+        logger.warn({ err, fileId }, "resolveTelegramFileAsDataUrl failed");
+        return null;
+      }
+    };
+
     // Build the base systemHint, appending the mandatory-reply hint for
     // retries when the user explicitly triggered the bot.
     let currentHint = systemHint;
@@ -421,6 +434,10 @@ async function handleAiTurn(params: {
       wasMentioned: isMentioned,
       wasRepliedTo: isRepliedToBot,
       recentBotMessages,
+      mediaRefs,
+      urls,
+      resolveTelegramFileAsDataUrl,
+      allowRichContentTools: isTriggered,
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -452,6 +469,10 @@ async function handleAiTurn(params: {
           wasMentioned: isMentioned,
           wasRepliedTo: isRepliedToBot,
           recentBotMessages,
+          mediaRefs,
+          urls,
+          resolveTelegramFileAsDataUrl,
+          allowRichContentTools: isTriggered,
         });
 
         if (result.action === "send") break;
@@ -555,22 +576,15 @@ async function buildStatusText(): Promise<string> {
   const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
   const mem = process.memoryUsage();
   const rssMb = Math.round(mem.rss / 1024 / 1024);
-  const [memUsers, cachedImgs] = await Promise.all([
-    countUsersWithMemories().catch((err: unknown) => {
-      logger.warn({ err }, "countUsersWithMemories failed");
-      return null;
-    }),
-    countCachedImages().catch((err: unknown) => {
-      logger.warn({ err }, "countCachedImages failed");
-      return null;
-    }),
-  ]);
+  const memUsers = await countUsersWithMemories().catch((err: unknown) => {
+    logger.warn({ err }, "countUsersWithMemories failed");
+    return null;
+  });
   return [
     `📊 ${config.botPersonaName} 状态`,
     `运行时间: ${uptimeStr}`,
     `缓冲区消息数: ${historyLen}`,
     `记忆用户数: ${memUsers ?? "?"}`,
-    `图片缓存数: ${cachedImgs ?? "?"}`,
     `内存 RSS: ${rssMb} MB`,
   ].join("\n");
 }
@@ -635,52 +649,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    // 3. Extract content (text, URLs, images, sticker)
+    // 3. Extract content references (text, URLs, media file_ids, sticker emoji)
     const rawText = msg.text ?? msg.caption ?? "";
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
-    const {
-      urls,
-      photoFileIds,
-      imageDataUrls,
-      imageDescriptions: cachedImageDescriptions,
-      stickerEmoji,
-      urlFetchPromise,
-      mediaDescriptors: cachedMediaDescriptors,
-      pendingMediaThumbnails,
-    } = await extractContent(ctx, msg, { rawText, entities });
-
-    const stickerDisplay = stickerEmoji;
-
-    // Merge cached descriptions with fresh Gemini-described images.
-    const imageDescriptions = [...cachedImageDescriptions];
-    for (const imgUrl of imageDataUrls) {
-      try {
-        const desc = await describeImage(imgUrl, rawText);
-        imageDescriptions.push(desc);
-      } catch (err) {
-        logger.warn({ err }, "failed to describe image");
-      }
-    }
-
-    // Describe media thumbnails (video/animation/video_note/document/audio)
-    const mediaDescriptors: MediaDescriptor[] = [...cachedMediaDescriptors];
-    for (const pt of pendingMediaThumbnails) {
-      try {
-        const mediaType = pt.label.replace(/:.*$/, "");
-        const desc = await describeImage(pt.dataUrl, rawText, mediaType);
-        logger.info({ label: pt.label, desc: desc.slice(0, 80) }, "media thumbnail described");
-        mediaDescriptors.push({ label: pt.label, description: desc });
-        if (desc) {
-          cacheImage(pt.fileId, { description: desc }).catch((err: unknown) => {
-            logger.warn({ err, fileId: pt.fileId }, "media thumbnail cache failed");
-          });
-        }
-      } catch (err) {
-        logger.warn({ err, label: pt.label }, "failed to describe media thumbnail");
-        mediaDescriptors.push({ label: pt.label, description: "" });
-      }
-    }
+    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
 
     // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
     const replyTo = msg.reply_to_message;
@@ -711,10 +684,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     const bufferLine = buildBufferLine({
       rawText,
-      stickerEmoji: stickerDisplay,
-      hasImageContext: imageDataUrls.length > 0 || imageDescriptions.length > 0,
-      imageDescriptions,
-      mediaDescriptors,
+      mediaRefs,
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
@@ -726,18 +696,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         bufferLine,
         from.username ?? undefined,
       );
-    }
-
-    // 4b. Cache fresh image descriptions so future turns (and proactive) see them
-    for (let i = 0; i < photoFileIds.length; i++) {
-      const fileId = photoFileIds[i];
-      const descIdx = cachedImageDescriptions.length + i;
-      const desc = imageDescriptions[descIdx];
-      if (fileId && desc) {
-        cacheImage(fileId, { description: desc }).catch((err: unknown) => {
-          logger.warn({ err, fileId }, "image cache failed");
-        });
-      }
     }
 
     // 5. /help — public
@@ -826,31 +784,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       }
     }
 
-    // 11. Await URL extractions — their summaries feed both the AI prompt
-    //     and the buffer (as "system" entries).
-    const urlContents = await urlFetchPromise;
-    for (const [, content] of urlContents) {
-      if (content) {
-        if (content.startsWith("[Tweet ")) {
-          pushMessage(config.tgGroupId, "system", "推文", content.slice(0, MAX_BUFFER_TEXT));
-        } else {
-          pushMessage(
-            config.tgGroupId,
-            "system",
-            "链接",
-            `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
-          );
-        }
-      }
-    }
-
-    // 12. If the bot wasn't pinged, we're done.
+    // 11. If the bot wasn't pinged, we're done.
     if (!isMentioned && !isRepliedToBot) return;
 
     // Reset proactive cooldown immediately to prevent double-reply.
     touchBotActivity();
 
-    // 13. Love confession → memory-based affection scoring
+    // 12. Love confession → memory-based affection scoring
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveResponse(user);
       await replyAndTrack(ctx, rejection, msg.message_id, true);
@@ -859,18 +799,15 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    // 14. Main AI path — tool-call architecture
+    // 13. Main AI path — tool-call architecture
     const userMessage = buildUserMessage({
       rawText,
       displayName,
-      imageDescriptions,
-      hasImage: imageDataUrls.length > 0,
-      stickerEmoji: stickerDisplay,
+      mediaRefs,
       replyTo,
       isRepliedToBot,
       isMentioned,
-      urlContents,
-      mediaDescriptors,
+      urls,
     });
 
     await handleAiTurn({
@@ -881,6 +818,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       systemHint,
       isMentioned,
       isRepliedToBot,
+      mediaRefs,
+      urls,
       ...(from.username ? { senderUsername: from.username } : {}),
     });
   });
@@ -943,25 +882,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       from.username ?? undefined,
     );
 
-    // Use extractContent for consistent parsing of URLs and other entities
-    // We don't process images/stickers during edits, so those arrays will just be empty.
-    const { urlFetchPromise } = await extractContent(ctx, msg, { rawText, entities });
-    const urlContents = await urlFetchPromise;
-
-    for (const [, content] of urlContents) {
-      if (content) {
-        if (content.startsWith("[Tweet ")) {
-          pushMessage(config.tgGroupId, "system", "推文", content.slice(0, MAX_BUFFER_TEXT));
-        } else {
-          pushMessage(
-            config.tgGroupId,
-            "system",
-            "链接",
-            `[链接内容: ${content.slice(0, MAX_BUFFER_TEXT)}]`,
-          );
-        }
-      }
-    }
+    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
 
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
@@ -975,14 +896,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const userMessage = buildUserMessage({
       rawText,
       displayName,
-      imageDescriptions: [],
-      hasImage: false,
-      stickerEmoji: "",
-      mediaDescriptors: [],
+      mediaRefs,
       replyTo,
       isRepliedToBot,
       isMentioned,
-      urlContents,
+      urls,
     });
 
     await handleAiTurn({
@@ -993,6 +911,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       systemHint: null,
       isMentioned,
       isRepliedToBot,
+      mediaRefs,
+      urls,
       ...(from.username ? { senderUsername: from.username } : {}),
     });
   });

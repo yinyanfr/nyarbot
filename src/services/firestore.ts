@@ -1,6 +1,5 @@
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import type { User } from "../global.d.ts";
-import { logger } from "../libs/logger.js";
 import { todayDateStr } from "../libs/time.js";
 
 // Lazy accessor: getFirestore() requires initializeApp() to have run first.
@@ -13,8 +12,6 @@ function db(): Firestore {
 }
 
 // Tunables
-const IMAGE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-const IMAGE_CACHE_CLEANUP_BATCH = 400; // Firestore batch limit is 500
 const MEMORY_MAX_ENTRIES = 30;
 
 function isValidUser(data: unknown): data is User {
@@ -145,71 +142,6 @@ export async function removeUserMemory(uid: string, memory: string): Promise<voi
   invalidateUserCache(uid);
 }
 
-export interface CachedImage {
-  fileId: string;
-  description: string;
-  cachedAt: number;
-}
-
-export async function cacheImage(fileId: string, data: { description: string }): Promise<void> {
-  const payload: CachedImage = {
-    fileId,
-    description: data.description,
-    cachedAt: Date.now(),
-  };
-  await db().collection("images").doc(fileId).set(payload);
-}
-
-export async function getCachedImage(fileId: string): Promise<CachedImage | null> {
-  const doc = await db().collection("images").doc(fileId).get();
-  if (!doc.exists) return null;
-  const data = doc.data();
-  if (
-    data &&
-    typeof data.fileId === "string" &&
-    typeof data.description === "string" &&
-    typeof data.cachedAt === "number"
-  ) {
-    // TTL check — treat expired entries as cache misses and lazily delete.
-    if (Date.now() - data.cachedAt > IMAGE_CACHE_TTL_MS) {
-      db()
-        .collection("images")
-        .doc(fileId)
-        .delete()
-        .catch((err: unknown) => logger.warn({ err, fileId }, "lazy cache delete failed"));
-      return null;
-    }
-    return { fileId: data.fileId, description: data.description, cachedAt: data.cachedAt };
-  }
-  return null;
-}
-
-/**
- * Delete image cache entries older than the TTL.
- * Intended to run once at startup; paged to stay under Firestore's 500-doc
- * per-batch limit and avoid runaway memory on huge collections.
- */
-export async function cleanupExpiredImageCache(): Promise<number> {
-  const cutoff = Date.now() - IMAGE_CACHE_TTL_MS;
-  let total = 0;
-  // Keep fetching pages until no more expired docs remain.
-  for (;;) {
-    const snap = await db()
-      .collection("images")
-      .where("cachedAt", "<", cutoff)
-      .limit(IMAGE_CACHE_CLEANUP_BATCH)
-      .get();
-    if (snap.empty) break;
-    const batch = db().batch();
-    for (const doc of snap.docs) batch.delete(doc.ref);
-    await batch.commit();
-    total += snap.size;
-    if (snap.size < IMAGE_CACHE_CLEANUP_BATCH) break;
-  }
-  if (total > 0) logger.info({ total }, "image cache cleanup done");
-  return total;
-}
-
 /** Count users with at least one memory. Used by /status. */
 export async function countUsersWithMemories(): Promise<number> {
   const snap = await db().collection("users").get();
@@ -219,12 +151,6 @@ export async function countUsersWithMemories(): Promise<number> {
     if (Array.isArray(m) && m.length > 0) n++;
   }
   return n;
-}
-
-/** Count cached images. Used by /status. */
-export async function countCachedImages(): Promise<number> {
-  const snap = await db().collection("images").count().get();
-  return snap.data().count;
 }
 
 export async function setNightyTimestamp(uid: string, timestamp: number): Promise<void> {
