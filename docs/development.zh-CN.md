@@ -26,6 +26,10 @@ node dist/app.js    # 运行编译后的 bot
 
 Pre-commit 钩子（Husky + lint-staged）自动格式化和检查暂存的 `.ts` 文件。
 
+## Prompt 协议
+
+Prompt 与动态上下文的 XML 标签约定见 `docs/prompt-xml-schema.md`。
+
 ## CI
 
 GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` 时运行：
@@ -45,7 +49,7 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` �
 
 其他好处：
 
-- **贴纸分发**：`sendSticker` 工具让模型通过 emoji + 关键词选择贴纸（两阶段候选预选 + 语义匹配）。`adoptSticker` 工具让模型将群友发送的贴纸收入自己的贴纸库。
+- **贴纸分发**：`sendSticker` 工具让模型通过 emoji 选择硬编码贴纸；无效 emoji 会取消发送。
 - **记忆工具**：`saveMemory`、`setNickname`、`deleteMemory` 是带 uid 验证的一等操作。
 - **沉默重试**：当被触发但被 dismiss 时，handler 可以用递增的提示重试。
 

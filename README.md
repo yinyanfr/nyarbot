@@ -14,11 +14,11 @@
 - 🔗 **链接理解** — 推文链接自动通过 fxtwitter API 提取（含 Gemini 配图识别），其他链接先尝试直接抓取标题/描述，再回退到 Tavily；仅成功获取的链接内容写入上下文
 - 🖼️ **看图吐槽** — Gemini 识别图片内容（含回复消息中的图片），猫娘视角吐槽或夸夸，描述自动缓存并写入对话上下文供主动插话使用
 - 🌅 **早安问候** — `/nighty` 或说晚安后，8 小时后下次发言自动收到个性化早安
-- 💔 **好人卡** — `/love` 或告白时根据记忆傲娇地发好人卡
+- 💔 **好感度告白回应** — `/love` 或告白时根据记忆生成好感度条目并计算总分，再按人设做傲娇回应
 - 🏷️ **昵称 & 记忆** — 跟她说「叫我XX」设置昵称，「记住XXX」记录记忆
 - 📔 **日记系统** — bot 在群聊中自动记录观察笔记，每日午夜生成一篇猫娘日记，发布到 Hexo 博客
 - 🎯 **主动插话** — 两阶段探测：廉价模型判断话题相关性，通过后完整模型生成回复
-- 🎨 **贴纸回复** — 通过 emoji + 关键词选择贴纸（两阶段预选 + 语义匹配），可单独发或随文字发送
+- 🎨 **贴纸回复** — 通过 emoji 直接选择硬编码贴纸，可单独发或随文字发送
 - 🔄 **沉默重试** — 被触发但模型选择沉默时自动重试最多 3 次，附加强制回复提示；仍沉默则发送原始文本或贴纸兜底
 - ⌨️ **打字指示** — AI 生成时显示"正在输入…"
 - 📝 **Markdown→Telegram HTML** — 回复自动转换 Markdown 粗体/斜体/代码/链接等为 Telegram HTML
@@ -63,7 +63,7 @@ src/
 │   ├── conversation-buffer.ts  # 内存环形缓冲区（60 条/组）
 │   ├── system-prompt.ts        # 猫娘人设 system prompt、探测 prompt、
 │   │                           #   自然度 late-binding prompt
-│   ├── stickers.ts             # 贴纸 facade（关键词/描述选择 + emoji查找 + 随机兜底）
+│   ├── stickers.ts             # 贴纸 facade（emoji→file_id 查找 + 随机兜底）
 │   ├── format-telegram.ts      # Markdown→Telegram HTML 转换（LaTeX→Unicode）
 │   ├── proactive.ts            # 主动插话：ProactiveCallbacks 接口、
 │   │                           #   两阶段探测、冷却逻辑、贴纸/打字指示分发
@@ -110,14 +110,14 @@ node dist/app.js
 
 详见 [命令与交互文档](docs/commands-and-interactions.zh-CN.md)。
 
-| 命令      | 说明                               |
-| --------- | ---------------------------------- |
-| `/help`   | 显示帮助                           |
-| `/love`   | 向 bot 告白，收获好人卡一张        |
-| `/nighty` | 晚安，8 小时后下次发言自动早安问候 |
-| `/status` | bot 运行状态（仅管理员）           |
-| `/reset`  | 清除对话历史缓冲区（仅管理员）     |
-| `/diary`  | 生成今日日记预览（仅管理员，私聊） |
+| 命令      | 说明                                  |
+| --------- | ------------------------------------- |
+| `/help`   | 显示帮助                              |
+| `/love`   | 向 bot 告白，触发好感度评分与傲娇回应 |
+| `/nighty` | 晚安，8 小时后下次发言自动早安问候    |
+| `/status` | bot 运行状态（仅管理员）              |
+| `/reset`  | 清除对话历史缓冲区（仅管理员）        |
+| `/diary`  | 生成今日日记预览（仅管理员，私聊）    |
 
 | 场景        | 触发方式                                           |
 | ----------- | -------------------------------------------------- |
@@ -195,6 +195,7 @@ npm run build      # 编译 src/ → dist/
 ## 文档
 
 - [架构文档](docs/architecture.zh-CN.md) — 工具调用架构、主动插话两阶段探测、沉默重试、Markdown 渲染
+- [Prompt XML Schema](docs/prompt-xml-schema.md) — prompt 与上下文 XML 标签约定
 - [配置文档](docs/configuration.zh-CN.md) — 环境变量、Firebase、模型选择、AI Gateway
 - [命令与交互](docs/commands-and-interactions.zh-CN.md) — 命令、自然语言触发、LLM 工具、沉默重试
 - [开发文档](docs/development.zh-CN.md) — 设计决策、Firestore schema、常见问题

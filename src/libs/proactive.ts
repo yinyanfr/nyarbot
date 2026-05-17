@@ -3,7 +3,7 @@ import { getHistory, pushMessage, formatHistoryAsContext } from "./conversation-
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
 import { MAX_BUFFER_TEXT } from "../handlers/constants.js";
-import { getStickerByFileId } from "./sticker-store.js";
+import { getStickerEmojiByFileId } from "./stickers.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -39,7 +39,7 @@ const MAX_FAILURES = config.proactiveMaxFailures;
 export interface ProactiveCallbacks {
   /** Send a text message to the group (formatting applied by caller). */
   sendText: (text: string) => Promise<void>;
-  /** Send a sticker by its Telegram file_id (looked up via sticker-store by caller). */
+  /** Send a sticker by its Telegram file_id. */
   sendSticker: (stickerFileId: string) => Promise<void>;
   /** Send a chat action indicator (e.g. "typing"). */
   sendChatAction: (
@@ -190,8 +190,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     if (result.stickerFileId) {
       await callbacks.sendSticker(result.stickerFileId);
       if (result.messages.length === 0) {
-        const sticker = getStickerByFileId(result.stickerFileId);
-        const emoji = sticker?.emoji[0] ?? "🐱";
+        const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
         pushMessage(
           config.tgGroupId,
           "bot",

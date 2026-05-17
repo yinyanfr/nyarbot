@@ -58,7 +58,7 @@ Bot 使用两个模型，各有两种思考模式变体：
 
 | 模型                | 思考模式                               | 用途                                                         |
 | ------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、好人卡、探测门、URL/图片描述                 |
+| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、告白好感度评分回应、探测门、URL/图片描述     |
 | `deepseek-v4-flash` | 启用（`thinking: {type: "enabled"}`）  | 复杂对话（tier=`complex`），带 send_message/dismiss 工具调用 |
 | `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 技术问题（tier=`tech`），带 send_message/dismiss 工具调用    |
 | `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 日记生成（午夜汇总 / `/diary` 命令）                         |
@@ -82,7 +82,7 @@ Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 | `saveMemory`   | 记录关于群友的记忆（uid 已验证）                      |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 通过 emoji + 关键词选择贴纸（两阶段预选 + 语义匹配）  |
+| `sendSticker`  | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送    |
 | `writeDiary`   | 记录关于当前对话的观察笔记                            |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 

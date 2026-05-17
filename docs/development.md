@@ -26,6 +26,10 @@ node dist/app.js    # run the compiled bot
 
 Pre-commit hooks (Husky + lint-staged) auto-format and lint staged `.ts` files.
 
+## Prompt Contract
+
+Prompt and dynamic context XML tags are documented in `docs/prompt-xml-schema.md`.
+
 ## CI
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`/`master`:
@@ -45,7 +49,7 @@ The previous streaming architecture (`streamText` + `sendMessage` + `editMessage
 
 Additional benefits:
 
-- **Sticker dispatch**: The `sendSticker` tool lets the model choose stickers by emoji + keywords (two-stage shortlist + semantic match). The `adoptSticker` tool lets the model adopt user-sent stickers into its library.
+- **Sticker dispatch**: The `sendSticker` tool lets the model choose hardcoded stickers by emoji. Invalid emoji cancels sending.
 - **Memory tools**: `saveMemory`, `setNickname`, `deleteMemory` are first-class operations with uid validation.
 - **Dismiss retry**: When triggered but dismissed, the handler can retry with escalating hints.
 

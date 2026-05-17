@@ -14,11 +14,11 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 🔗 **URL Understanding** — Tweet links auto-fetched via fxtwitter API (with Gemini photo recognition); other links try direct HTML fetch for title/description, falling back to Tavily; only successful results enter context
 - 🖼️ **Image Roasting** — Gemini identifies image content (including images in replied-to messages), catgirl-style commentary, descriptions auto-cached and written to conversation context for proactive chatter
 - 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
-- 💔 **Love Rejection** — `/love` or confession keywords trigger personalized tsundere rejection based on stored memories
+- 💔 **Affection Scoring Reply** — `/love` or confession keywords trigger memory-based affection scoring, then a persona-consistent tsundere response
 - 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
 - 📔 **Diary System** — Bot auto-records observational notes during chat, generates a consolidated catgirl diary at midnight, publishes to Hexo blog
 - 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
-- 🎨 **Sticker Replies** — Select stickers by emoji + keywords (two-stage pre-filter + semantic match), standalone or alongside text
+- 🎨 **Sticker Replies** — Select stickers directly by emoji from the hardcoded pack, standalone or alongside text
 - 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
 - ⌨️ **Typing Indicator** — Shows "typing..." while AI generates
 - 📝 **Markdown→Telegram HTML** — Replies auto-convert Markdown bold/italic/code/links to Telegram HTML
@@ -64,7 +64,7 @@ src/
 │   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
 │   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
 │   │                           #   naturalness late-binding prompt
-│   ├── stickers.ts             # Sticker facade (keyword/description selection + emoji lookup + random fallback)
+│   ├── stickers.ts             # Sticker facade (emoji→file_id lookup + random fallback)
 │   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
 │   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
 │   │                           #   two-stage probe, cooldown, sticker/typing dispatch
@@ -114,7 +114,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | Command   | Description                                                 |
 | --------- | ----------------------------------------------------------- |
 | `/help`   | Show help text                                              |
-| `/love`   | Confess your love, receive a tsundere rejection             |
+| `/love`   | Confess your love, get affection scoring + tsundere reply   |
 | `/nighty` | Say goodnight; bot sends a morning greeting 8+ hours later  |
 | `/status` | Bot status — uptime, buffer size, memory count (admin only) |
 | `/reset`  | Clear conversation history buffer (admin only)              |
@@ -196,6 +196,7 @@ Husky + lint-staged automatically runs prettier and eslint on staged `.ts` files
 ## Documentation
 
 - [Architecture](docs/architecture.md) — Tool-call architecture, proactive two-stage probe, dismiss retry, Markdown rendering
+- [Prompt XML Schema](docs/prompt-xml-schema.md) — XML contract for prompts and dynamic context
 - [Configuration](docs/configuration.md) — Environment variables, Firebase, model selection, AI Gateway
 - [Commands & Interactions](docs/commands-and-interactions.md) — Commands, natural language triggers, LLM tools, dismiss retry
 - [Development](docs/development.md) — Design decisions, Firestore schema, troubleshooting

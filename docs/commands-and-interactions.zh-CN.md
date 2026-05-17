@@ -5,7 +5,7 @@
 | 命令      | 权限     | 说明                                             |
 | --------- | -------- | ------------------------------------------------ |
 | `/help`   | 所有人   | 显示帮助文本                                     |
-| `/love`   | 所有人   | 收到一张傲娇好人卡                               |
+| `/love`   | 所有人   | 触发好感度评分条目 + 傲娇回应                    |
 | `/nighty` | 所有人   | 说晚安；8 小时后 bot 发送早安问候                |
 | `/status` | 仅管理员 | 显示运行时间、缓冲区大小、记忆用户数、图片缓存数 |
 | `/reset`  | 仅管理员 | 清除对话历史缓冲区                               |
@@ -48,9 +48,7 @@
 
 ### 贴纸
 
-群友发送的贴纸会被下载、格式转换（动态贴纸 webm→webp via ffmpeg），并由 Gemini 进行中文描述和关键词提取。描述（≤30字）和关键词（3-5个）缓存到 `received_stickers`。只有生成有效 AI 描述的贴纸才会被缓存。
-
-LLM 可通过 `adoptSticker` 工具将 `received_stickers` 缓存中的贴纸收入 bot 自己的 `stickers` 贴纸库。收入时贴纸会发送到聊天，并提示模型调用 `send_message` 用傲娇猫娘口吻确认。
+贴纸不再下载、描述或缓存。bot 只读取贴纸的 emoji 做轻量上下文理解，并在回复时按 emoji 发送硬编码贴纸。
 
 回复时，LLM 可以：
 
@@ -58,7 +56,7 @@ LLM 可通过 `adoptSticker` 工具将 `received_stickers` 缓存中的贴纸收
 - **纯贴纸**：只调用 `sendSticker` 不调用 `send_message` — 贴纸带回复引用发送。
 - **无贴纸**：只调用 `send_message` — 纯文字回复。
 
-`sendSticker` 工具展示紧凑的 emoji→关键词索引（`😀 开心,庆祝 | 😭 大哭,崩溃 | ...`）。LLM 通过选择 emoji 和关键词来匹配贴纸。工具先按关键词重叠打分预选（最多5个候选），再由 Flash 在候选中语义匹配。回退到 emoji 精确匹配或随机贴纸。
+`sendSticker` 工具展示硬编码的 emoji 列表。LLM 只需要选择 emoji。无效 emoji 会取消贴纸发送。
 
 ### 视频、GIF动画、视频消息、文件与音频
 
@@ -77,7 +75,7 @@ Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描�
 - **已缓存**：缩略图描述缓存于 Firestore `images/{thumbnail_file_id}` — 与图片共享同一缓存（30 天 TTL）。
 - **纯文本回退**：若无缩略图（极少见），则注入 `[视频]` 或 `[文件: report.pdf]` 等文本标记，使 bot 至少获知有媒体发送。
 - **回复中的媒体**：回复消息中的视频/GIF/视频消息/文件/音频缩略图同样被处理，与现有的回复图片行为一致。
-- **无需 ffmpeg**：缩略图是 Telegram 预生成的 JPEG/WebP 图片，无需视频提取。
+- **贴纸不处理**：贴纸不再下载、描述、缓存或迁移。缩略图仍然是 Telegram 预生成的 JPEG/WebP 图片，无需视频提取。
 - **无条件缓存**：所有媒体缩略图在 Gemini 描述后立即缓存，无论 bot 是否被触发——确保主动插话上下文始终可用。
 
 ### 晚安 / 早安
@@ -89,7 +87,7 @@ Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描�
 
 ### 告白
 
-匹配 `LOVE_REGEX` 的文本（我爱你、喜欢你、嫁给我、love 等）触发 `generateLoveRejection()` — 一个专用提示词，使用用户的记忆生成个性化傲娇好人卡。
+匹配 `LOVE_REGEX` 的文本（我爱你、喜欢你、嫁给我、love 等）触发 `generateLoveResponse()` — 一个专用提示词，基于用户记忆自由生成好感度评分条目并计算总分，再按人设做傲娇回应。
 
 ## LLM 工具
 
@@ -102,8 +100,7 @@ Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描�
 | `saveMemory`   | 记录关于群友的记忆（uid 必须来自最近群友列表）        |
 | `setNickname`  | 设置/更新群友的昵称                                   |
 | `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 通过 emoji + 关键词选择贴纸；两阶段预选后语义匹配     |
-| `adoptSticker` | 将群友贴纸收入 bot 库，附带描述和关键词               |
+| `sendSticker`  | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送    |
 | `writeDiary`   | 记录关于当前对话的观察笔记                            |
 | `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
 
@@ -119,7 +116,7 @@ Bot 通过 `getFile(thumbnail_file_id)` 下载缩略图，由 Gemini 生成描�
                                         ├─ 模型调用 saveMemory → Firestore 写入
                                         ├─ 模型调用 setNickname → Firestore 写入
                                         ├─ 模型调用 deleteMemory → Firestore 删除
-                                         ├─ 模型调用 sendSticker → file_id 保存
+                                         ├─ 模型调用 sendSticker → 选择 file_id 分发
                                          ├─ 模型调用 writeDiary → Firestore 日记写入
                                          ├─ 模型调用 webSearch → Tavily 搜索执行
                                         │

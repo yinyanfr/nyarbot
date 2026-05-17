@@ -3,7 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { initFirebase } from "../services/index.js";
 import { logger } from "../libs/logger.js";
 
-const FALLBACK_COLLECTIONS = ["users", "images", "stickers", "received_stickers", "diary"];
+const FALLBACK_COLLECTIONS = ["users", "images", "diary"];
 
 const BATCH_LIMIT = 500;
 
