@@ -226,6 +226,11 @@ export type AiTurnResult =
   | { action: "send"; messages: string[]; stickerFileId: string | null }
   | { action: "dismiss"; rawText?: string };
 
+export interface ShockResponseOptions {
+  intensity?: number;
+  extraText?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Response generation (tool-call architecture)
 // ---------------------------------------------------------------------------
@@ -306,7 +311,14 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ? `${promptText}\n\n<mandatory_instruction><reason>消息涉及最新/实时信息</reason><rule>必须先调用 webSearch 再回答</rule><forbidden>不要凭记忆直接回答</forbidden></mandatory_instruction>`
     : promptText;
 
-  const messages = [{ role: "user" as const, content: finalPromptText }];
+  const linkGuard =
+    urls && urls.length > 0
+      ? "\n\n<link_guard><rule>当前轮里出现了 URL。只看到链接本身，不等于你已经知道链接内容。</rule><rule>如果你没有调用 fetchUrlContent，就不能声称自己看过、理解了、总结了该链接内容，也不能根据 URL 文本脑补页面内容。</rule><rule>如果链接内容对回答重要，先调用 fetchUrlContent；否则只能回应‘对方发了一个链接’这件事本身，或直接忽略链接内容。</rule><rule>若用户没有明确让你解读链接，而你也没抓取内容，就不要假装点评链接正文。</rule></link_guard>"
+      : "";
+
+  const finalPromptWithGuards = `${finalPromptText}${linkGuard}`;
+
+  const messages = [{ role: "user" as const, content: finalPromptWithGuards }];
 
   // Mutable state captured by tool closures
   const sentMessages: string[] = [];
@@ -727,13 +739,37 @@ export async function generateLoveResponse(userContext: User): Promise<string> {
   return sanitizeLoveResponse(text);
 }
 
-export async function generateShockResponse(userContext: User): Promise<string> {
+export async function generateShockResponse(
+  userContext: User,
+  opts: ShockResponseOptions = {},
+): Promise<string> {
   const name = userContext.nickname || "大哥哥";
+  const intensity = opts.intensity;
+
+  let intensityRule = "像突然被电了一下那样炸毛，反应明显但别太长";
+  if (typeof intensity === "number") {
+    if (intensity <= 0) {
+      intensityRule = "这次电击完全没效果。表现得像没感觉到，或者嫌弃对方装神弄鬼、设备没通电";
+    } else if (intensity <= 40) {
+      intensityRule = "这是很轻的一下。表现出微弱发麻、轻轻一抖、略带不满地抱怨";
+    } else if (intensity <= 120) {
+      intensityRule = "这是中等强度。要有明显炸毛、被电到后短促失控的感觉";
+    } else if (intensity <= 200) {
+      intensityRule = "这是很强的电击。要更狼狈、更语无伦次、更像当场尾巴炸开，但仍然是即时短反应";
+    } else {
+      intensityRule =
+        "强度已经超过正常范围。不要表现成真的被电到，而要像发现电击器坏了、没反应、离谱到只想吐槽设备";
+    }
+  }
+
+  const extraTextSection = opts.extraText
+    ? `<extra_text>${xmlEscape(opts.extraText)}</extra_text><extra_text_rule>把这句话理解为对方在使用 /shock 的同时说的话。你的反应可以顺手回怼、接话或对这句话做即时反应，但重点仍然是被电击当下的感觉。</extra_text_rule>`
+    : "";
 
   const { text } = await generateText({
     model: flashNoThinkModel,
     system: `<shock_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>表现出被电击后的即时反应</task><tone>像群聊里突然被电到的猫娘，短促、炸毛、轻微胡言乱语，但仍然可爱</tone><output_rule>只输出普通聊天文本，不要输出 XML/HTML/Markdown 标签</output_rule></shock_system>`,
-    prompt: `<shock_request><target name="${xmlEscape(name)}" /><constraints><rule>要有明显“被电了一下”的感觉</rule><rule>可以自由发挥，但要像即时反应，不是长篇表演</rule><rule>1 到 3 句</rule><rule>允许短暂语无伦次、炸毛、委屈、恼羞成怒或尾巴竖起来的感觉</rule><rule>不要重复固定模板</rule></constraints></shock_request>`,
+    prompt: `<shock_request><target name="${xmlEscape(name)}" />${typeof intensity === "number" ? `<intensity>${intensity}</intensity>` : ""}${extraTextSection}<constraints><rule>${xmlEscape(intensityRule)}</rule><rule>可以自由发挥，但要像即时反应，不是长篇表演</rule><rule>1 到 3 句</rule><rule>允许短暂语无伦次、炸毛、委屈、恼羞成怒或尾巴竖起来的感觉</rule><rule>不要重复固定模板</rule><rule>如果强度小于等于 0，就表现得几乎没感觉，甚至吐槽根本没电到</rule><rule>如果强度大于 200，就表现成电击器坏了、失灵了、根本没反应</rule></constraints></shock_request>`,
     temperature: 1,
     maxOutputTokens: 120,
   });

@@ -57,6 +57,46 @@ function pickResetReply(): string {
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
 }
 
+function findCommandEntity(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  command: string,
+  botUsername: string,
+): { offset: number; length: number } | null {
+  for (const entity of entities) {
+    if (entity.type !== "bot_command") continue;
+    const raw = text.slice(entity.offset, entity.offset + entity.length);
+    if (raw === command || raw === `${command}@${botUsername}`) {
+      return { offset: entity.offset, length: entity.length };
+    }
+  }
+  return null;
+}
+
+function parseShockCommand(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  botUsername: string,
+): { intensity?: number; extraText?: string } | null {
+  const commandEntity = findCommandEntity(entities, text, "/shock", botUsername);
+  if (!commandEntity) return null;
+
+  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
+  if (!remainder) return {};
+
+  const match = remainder.match(/^([+-]?\d+)(?:\s+(.*))?$/s);
+  if (match) {
+    const intensity = Number.parseInt(match[1] ?? "", 10);
+    const extraText = match[2]?.trim();
+    return {
+      intensity,
+      ...(extraText ? { extraText } : {}),
+    };
+  }
+
+  return { extraText: remainder };
+}
+
 function xmlEscape(text: string): string {
   return text
     .replaceAll("&", "&amp;")
@@ -707,7 +747,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
-• /shock — 电我一下，让我当场炸毛
+• /shock [0-200|想说的话] — 电我一下，也可以带强度或顺便说话
 • /nighty — 跟我说晚安，8小时后我会发早安问候
 • 发图片 — 我会看看是什么然后吐槽
 • 让我「叫我XX」— 我会记住你的昵称
@@ -725,8 +765,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    if (matchCommand(entities, rawText, "/shock", botUsername)) {
-      const shocked = await generateShockResponse(user);
+    const shockArgs = parseShockCommand(entities, rawText, botUsername);
+    if (shockArgs) {
+      const shocked = await generateShockResponse(user, shockArgs);
       await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
@@ -825,8 +866,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
   // ---------------------------------------------------------------------------
   // Edited messages — treat as corrections: only re-reply when the user is
-  // still @-mentioning or replying to the bot. Commands / goodnight / images
-  // are intentionally skipped.
+  // still @-mentioning or replying to the bot. Command edits can still be
+  // handled when they map to explicit handlers like /shock.
   // -------------------------------------------------------------------------
   bot.on("edited_message", async (ctx) => {
     if (isDuplicateUpdate(ctx.update.update_id)) return;
@@ -890,8 +931,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
-    if (matchCommand(entities, rawText, "/shock", botUsername)) {
-      const shocked = await generateShockResponse(user);
+    const shockArgs = parseShockCommand(entities, rawText, botUsername);
+    if (shockArgs) {
+      const shocked = await generateShockResponse(user, shockArgs);
       await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
