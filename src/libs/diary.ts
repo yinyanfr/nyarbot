@@ -22,6 +22,7 @@ import type { HistoryEntryKind } from "./conversation-buffer.js";
 
 export interface DiaryCallbacks {
   sendText: (text: string, kind?: HistoryEntryKind) => Promise<void>;
+  sendChannelText: (text: string) => Promise<void>;
 }
 
 let diaryCallbacks: DiaryCallbacks | null = null;
@@ -36,6 +37,10 @@ function buildDiaryUrl(date: string): string | null {
   const [owner, repoName] = repo.split("/");
   if (!owner || !repoName) return null;
   return `https://${owner}.github.io/${repoName}/${date}-diary/`;
+}
+
+function buildDiaryChannelPost(date: string, diary: string): string {
+  return `${date} 猫娘日记\n\n${diary}`;
 }
 
 async function generateDiaryNotification(
@@ -114,6 +119,13 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
 
     await writeGeneratedDiary(yesterdayDate, diary);
     logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
+
+    if (diaryCallbacks && config.tgDiaryChannelId) {
+      const channelText = buildDiaryChannelPost(yesterdayDate, diary);
+      diaryCallbacks.sendChannelText(channelText).catch((err: unknown) => {
+        logger.warn({ err, yesterdayDate }, "diary: channel publish failed");
+      });
+    }
 
     pushDiaryToGithub(yesterdayDate, diary).catch((err: unknown) => {
       logger.warn({ err, yesterdayDate }, "diary: GitHub push failed");

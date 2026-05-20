@@ -78,6 +78,15 @@ async function main(): Promise<void> {
       pushMessage(config.tgGroupId, "bot", config.botUsername, text, undefined, kind);
       touchBotActivity();
     },
+    sendChannelText: async (text) => {
+      if (!config.tgDiaryChannelId) return;
+      const formatted = formatForTelegramHtml(text);
+      try {
+        await bot.api.sendMessage(config.tgDiaryChannelId, formatted, { parse_mode: "HTML" });
+      } catch {
+        await bot.api.sendMessage(config.tgDiaryChannelId, text);
+      }
+    },
   });
 
   // Midnight diary generation: check interval configurable by env

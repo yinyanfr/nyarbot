@@ -50,6 +50,7 @@ const config = {
   botApiKey: process.env.BOT_API_KEY!,
   tgAdminUid: process.env.TG_ADMIN_UID!,
   tgGroupId: process.env.TG_GROUP_ID!,
+  tgDiaryChannelId: process.env.TG_DIARY_CHANNEL_ID ?? "",
   deepseekApiKey: process.env.DEEPSEEK_API_KEY!,
   deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
   tavilyApiKey: process.env.TAVILY_API_KEY!,
