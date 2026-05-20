@@ -1,6 +1,12 @@
 import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
 import type { User } from "../global.d.ts";
 import { todayDateStr } from "../libs/time.js";
+import {
+  normalizePromptData,
+  prepareDiaryNoteForStorage,
+  prepareMemoryForStorage,
+  prepareNicknameForStorage,
+} from "../libs/prompt-safety.js";
 
 // Lazy accessor: getFirestore() requires initializeApp() to have run first.
 // Resolving it at module-evaluation time breaks because ESM imports are hoisted
@@ -68,12 +74,14 @@ export async function getOrCreateUser(uid: string, firstName?: string): Promise<
 }
 
 export async function updateUserNickname(uid: string, nickname: string): Promise<void> {
-  await db().collection("users").doc(uid).update({ nickname });
+  const normalizedNickname = prepareNicknameForStorage(nickname);
+  if (!normalizedNickname) return;
+  await db().collection("users").doc(uid).update({ nickname: normalizedNickname });
   invalidateUserCache(uid);
 }
 
 export async function updateUserMemory(uid: string, memory: string): Promise<string[]> {
-  const trimmed = memory.trim();
+  const trimmed = prepareMemoryForStorage(memory);
   if (!trimmed) return [];
 
   // Use a transaction so the append-and-trim is atomic: without it, two
@@ -132,14 +140,28 @@ export async function overwriteUserMemories(
   invalidateUserCache(uid);
 }
 
-export async function removeUserMemory(uid: string, memory: string): Promise<void> {
-  await db()
-    .collection("users")
-    .doc(uid)
-    .update({
-      memories: FieldValue.arrayRemove(memory),
-    });
+export async function removeUserMemory(uid: string, memory: string): Promise<boolean> {
+  const normalizedTarget = prepareMemoryForStorage(memory);
+  if (!normalizedTarget) return false;
+
+  const removed = await db().runTransaction(async (tx) => {
+    const ref = db().collection("users").doc(uid);
+    const snap = await tx.get(ref);
+    if (!snap.exists) return false;
+
+    const existing: string[] = Array.isArray(snap.data()?.memories)
+      ? (snap.data()!.memories as string[])
+      : [];
+
+    const next = existing.filter((entry) => normalizePromptData(entry, 160) !== normalizedTarget);
+    if (next.length === existing.length) return false;
+
+    tx.update(ref, { memories: next });
+    return true;
+  });
+
   invalidateUserCache(uid);
+  return removed;
 }
 
 /** Count users with at least one memory. Used by /status. */
@@ -173,8 +195,10 @@ export async function setMorningGreeted(uid: string, timestamp: number): Promise
 import type { DiaryEntry } from "../global.d.js";
 
 export async function writeDiaryEntry(note: string): Promise<void> {
+  const normalizedNote = prepareDiaryNoteForStorage(note);
+  if (!normalizedNote) return;
   const date = todayDateStr();
-  const entry: DiaryEntry = { ts: Date.now(), content: note };
+  const entry: DiaryEntry = { ts: Date.now(), content: normalizedNote };
   await db()
     .collection("diary")
     .doc(date)

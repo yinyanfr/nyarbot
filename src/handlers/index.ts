@@ -882,7 +882,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     if (from.username?.toLowerCase() === botUsername.toLowerCase() || from.id === botId) return;
 
     const rawText = msg.text ?? msg.caption ?? "";
-    if (!rawText) return;
 
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
@@ -914,13 +913,15 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyName}: "${replyText.slice(0, 100)}"] ${rawText}`;
       }
     }
-    pushMessage(
-      config.tgGroupId,
-      from.id.toString(),
-      displayName,
-      editedBuffer.slice(0, MAX_BUFFER_TEXT),
-      from.username ?? undefined,
-    );
+    if (editedBuffer) {
+      pushMessage(
+        config.tgGroupId,
+        from.id.toString(),
+        displayName,
+        editedBuffer.slice(0, MAX_BUFFER_TEXT),
+        from.username ?? undefined,
+      );
+    }
 
     const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
 
@@ -937,6 +938,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
+
+    if (!rawText) return;
 
     const userMessage = buildUserMessage({
       rawText,
