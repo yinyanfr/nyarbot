@@ -60,7 +60,7 @@ src/
 │   ├── ai.ts                   # DeepSeek providers, classifyMessage(),
 │   │                           #   generateAiTurn() (tool-call architecture),
 │   │                           #   probeGate() (proactive probe),
-│   │                           #   describeImage(), fetchUrlContent(), etc.
+│   │                           #   describeImage(), on-demand media/URL tools, etc.
 │   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
 │   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
 │   │                           #   naturalness late-binding prompt
@@ -75,7 +75,7 @@ src/
 │   └── index.ts                # Barrel re-exports
 ├── services/
 │   ├── index.ts                # Firebase Admin SDK initialization
-│   ├── firestore.ts            # Firestore CRUD (users, image cache, diary, nighty/morning)
+│   ├── firestore.ts            # Firestore CRUD (users, diary, nighty/morning)
 │   ├── github.ts               # GitHub Content API: push diary to Hexo blog
 │   └── serviceAccountKey.json  # Firebase credentials (gitignored)
 └── global.d.ts                 # User, DiaryEntry type definitions
@@ -115,20 +115,21 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md) for detail
 | --------- | ----------------------------------------------------------- |
 | `/help`   | Show help text                                              |
 | `/love`   | Confess your love, get affection scoring + tsundere reply   |
+| `/shock`  | Zap the bot and trigger a visibly shocked / frazzled reply  |
 | `/nighty` | Say goodnight; bot sends a morning greeting 8+ hours later  |
 | `/status` | Bot status — uptime, buffer size, memory count (admin only) |
 | `/reset`  | Clear conversation history buffer (admin only)              |
 | `/diary`  | Generate today's diary preview (admin only, private chat)   |
 
-| Scenario           | Trigger                                                            |
-| ------------------ | ------------------------------------------------------------------ |
-| Chat               | @nyarbot or reply to her messages                                  |
-| Confession         | Say "I love you", "let's get married", etc. (requires @ or reply)  |
-| Set nickname       | Tell her "call me XX"                                              |
-| Save memory        | Tell her "remember XXX"                                            |
-| Share URL          | Send a link directly (@ her for a summary, otherwise context only) |
-| Send image/sticker | Send directly, Gemini identifies and catgirl comments              |
-| Diary observation  | Bot auto-records notes via writeDiary tool during conversation     |
+| Scenario           | Trigger                                                                          |
+| ------------------ | -------------------------------------------------------------------------------- |
+| Chat               | @nyarbot or reply to her messages                                                |
+| Confession         | Say "I love you", "let's get married", etc. (requires @ or reply)                |
+| Set nickname       | Tell her "call me XX"                                                            |
+| Save memory        | Tell her "remember XXX"                                                          |
+| Share URL          | Send a link directly (content can be fetched on demand when passively triggered) |
+| Send image/sticker | Send directly (media can be inspected on demand when passively triggered)        |
+| Diary observation  | Bot auto-records notes via writeDiary tool during conversation                   |
 
 ---
 

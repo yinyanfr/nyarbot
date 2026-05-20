@@ -4,12 +4,13 @@ import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
 import { initFirebase } from "./services/index.js";
-import { startProactiveChecker, stopProactiveChecker } from "./libs/proactive.js";
+import { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./libs/proactive.js";
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
+import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
@@ -67,13 +68,15 @@ async function main(): Promise<void> {
   startProactiveChecker(proactiveCallbacks);
 
   initDiaryCallbacks({
-    sendText: async (text) => {
+    sendText: async (text, kind: HistoryEntryKind = "normal") => {
       const formatted = formatForTelegramHtml(text);
       try {
         await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
       } catch {
         await bot.api.sendMessage(config.tgGroupId, text);
       }
+      pushMessage(config.tgGroupId, "bot", config.botUsername, text, undefined, kind);
+      touchBotActivity();
     },
   });
 

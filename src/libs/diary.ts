@@ -18,8 +18,10 @@ function xmlEscape(text: string): string {
 
 let lastDate: string | null = null;
 
+import type { HistoryEntryKind } from "./conversation-buffer.js";
+
 export interface DiaryCallbacks {
-  sendText: (text: string) => Promise<void>;
+  sendText: (text: string, kind?: HistoryEntryKind) => Promise<void>;
 }
 
 let diaryCallbacks: DiaryCallbacks | null = null;
@@ -120,7 +122,7 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     if (diaryCallbacks) {
       const diaryUrl = buildDiaryUrl(yesterdayDate);
       generateDiaryNotification(yesterdayDate, diaryUrl)
-        .then((notification) => diaryCallbacks!.sendText(notification))
+        .then((notification) => diaryCallbacks!.sendText(notification, "diary_notification"))
         .catch((err: unknown) => {
           logger.warn({ err }, "diary: notification send failed");
         });

@@ -727,6 +727,20 @@ export async function generateLoveResponse(userContext: User): Promise<string> {
   return sanitizeLoveResponse(text);
 }
 
+export async function generateShockResponse(userContext: User): Promise<string> {
+  const name = userContext.nickname || "大哥哥";
+
+  const { text } = await generateText({
+    model: flashNoThinkModel,
+    system: `<shock_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>表现出被电击后的即时反应</task><tone>像群聊里突然被电到的猫娘，短促、炸毛、轻微胡言乱语，但仍然可爱</tone><output_rule>只输出普通聊天文本，不要输出 XML/HTML/Markdown 标签</output_rule></shock_system>`,
+    prompt: `<shock_request><target name="${xmlEscape(name)}" /><constraints><rule>要有明显“被电了一下”的感觉</rule><rule>可以自由发挥，但要像即时反应，不是长篇表演</rule><rule>1 到 3 句</rule><rule>允许短暂语无伦次、炸毛、委屈、恼羞成怒或尾巴竖起来的感觉</rule><rule>不要重复固定模板</rule></constraints></shock_request>`,
+    temperature: 1,
+    maxOutputTokens: 120,
+  });
+
+  return sanitizeLoveResponse(text);
+}
+
 function sanitizeLoveResponse(text: string): string {
   return text
     .replace(/<\/?(?:评分明细|总分|回应)>/g, "")

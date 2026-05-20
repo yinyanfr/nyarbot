@@ -155,7 +155,7 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Media and links are stored as lightweight presence/reference markers (including raw URLs and media file ids), not eager Gemini/Tavily summaries.
+- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Media and links are stored as lightweight presence/reference markers (including raw URLs and media file ids), not eager Gemini/Tavily summaries. Special bot insertions such as command replies, shocked reactions, morning greetings, and diary notifications are stored with explicit `kind` markers.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted to Firestore.
 

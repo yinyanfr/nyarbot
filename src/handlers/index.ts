@@ -12,6 +12,7 @@ import {
   generateAiTurn,
   generateMorningGreeting,
   generateLoveResponse,
+  generateShockResponse,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
 import {
@@ -706,20 +707,27 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
+• /shock — 电我一下，让我当场炸毛
 • /nighty — 跟我说晚安，8小时后我会发早安问候
 • 发图片 — 我会看看是什么然后吐槽
 • 让我「叫我XX」— 我会记住你的昵称
 • 让我「记住XXX」— 我会记住关于你的事情
 
 遇到编程/技术问题也可以认真问我，我会收起步猫娘模式帮你喵~`;
-      await replyAndTrack(ctx, helpText, msg.message_id);
+      await replyAndTrack(ctx, helpText, msg.message_id, false, "command_help");
       return;
     }
 
     // 6. /love — public
     if (matchCommand(entities, rawText, "/love", botUsername)) {
       const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true);
+      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      return;
+    }
+
+    if (matchCommand(entities, rawText, "/shock", botUsername)) {
+      const shocked = await generateShockResponse(user);
+      await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
 
@@ -730,7 +738,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
       const statusText = await buildStatusText();
-      await replyAndTrack(ctx, statusText, msg.message_id);
+      await replyAndTrack(ctx, statusText, msg.message_id, false, "command_status");
       return;
     }
 
@@ -740,14 +748,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
       clearHistory(config.tgGroupId);
-      await replyAndTrack(ctx, pickResetReply(), msg.message_id);
+      await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
       return;
     }
 
     // 8. Goodnight — /nighty command only
     if (matchCommand(entities, rawText, "/nighty", botUsername)) {
       await setNightyTimestamp(user.uid, Date.now());
-      await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id);
+      await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id, false, "command_nighty");
       return;
     }
 
@@ -770,14 +778,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         try {
           const greeting = await generateMorningGreeting(user);
           await setMorningGreeted(user.uid, now);
-          await replyAndTrack(ctx, greeting, msg.message_id, true);
-          touchBotActivity();
-          pushMessage(
-            config.tgGroupId,
-            "bot",
-            config.botUsername,
-            greeting.slice(0, MAX_BUFFER_TEXT),
-          );
+          await replyAndTrack(ctx, greeting, msg.message_id, true, "morning_greeting");
         } catch (err) {
           logger.error({ err, uid: user.uid }, "failed to send morning greeting");
         }
@@ -793,9 +794,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // 12. Love confession → memory-based affection scoring
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true);
-      touchBotActivity();
-      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
+      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
       return;
     }
 
@@ -887,9 +886,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
       const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true);
-      touchBotActivity();
-      pushMessage(config.tgGroupId, "bot", config.botUsername, rejection.slice(0, MAX_BUFFER_TEXT));
+      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      return;
+    }
+
+    if (matchCommand(entities, rawText, "/shock", botUsername)) {
+      const shocked = await generateShockResponse(user);
+      await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
 

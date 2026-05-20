@@ -8,6 +8,12 @@
 - **Session-only rich content cache** (`src/libs/ai.ts`): media descriptions and URL summaries are cached in-process for the current session only, instead of being written to Firestore.
 - **Twitter/X integration upgraded to FxEmbed v2** (`src/libs/ai.ts`): tweet fetching now uses `https://api.fxtwitter.com/2/status/{id}` and the new v2 response shape.
 - **Conversation buffer URL markers restored** (`src/handlers/index.ts`): lightweight `[链接: ...]` markers are preserved in the in-memory history so passive/proactive context still retains link presence even without eager fetches.
+- **Special bot context records** (`src/libs/conversation-buffer.ts`, `src/handlers/reply-and-track.ts`, `src/handlers/index.ts`, `src/libs/diary.ts`, `src/app.ts`): command replies and other non-`send_message` bot outputs can now be written to history with explicit `kind` markers (e.g. love/shock/reset/morning_greeting/diary_notification), so the LLM can reliably treat them as real prior events.
+- **Prompt behavior tuning** (`src/libs/system-prompt.ts`): removed the explicit suggestion to overuse “草”, and adjusted group-chat rules so adult-topic banter between adults is handled naturally instead of being mechanically refused by the base model.
+
+### Added
+
+- **`/shock` command** (`src/handlers/index.ts`, `src/libs/ai.ts`, `README.md`, docs): lets users “electrocute” the bot when it hallucinates or says something annoying. The LLM generates a short, visibly shocked /炸毛-style reply.
 
 ### Removed
 

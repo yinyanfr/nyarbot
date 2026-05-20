@@ -6,6 +6,7 @@
 | --------- | ---------- | ---------------------------------------------------------- |
 | `/help`   | Anyone     | Show help text                                             |
 | `/love`   | Anyone     | Get affection scoring breakdown + tsundere response        |
+| `/shock`  | Anyone     | Zap the bot and trigger a shocked / frazzled reaction      |
 | `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
 | `/status` | Admin only | Show uptime, buffer size, memory user count                |
 | `/reset`  | Admin only | Clear the conversation buffer                              |
@@ -24,6 +25,11 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
+
+### Special Context Records
+
+- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/reset`, standalone morning greetings, and daily diary notifications.
+- In XML history, these entries carry a `kind="..."` attribute so the model can treat them as real prior events rather than ordinary user chat lines.
 
 ### Images & Media
 
