@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.0] — 2026-05-21
+
+### Added
+
+- **Telegram channel diary publishing** (`src/libs/diary.ts`, `src/app.ts`, `src/configs/env.ts`, `.env.example`): midnight-generated diaries can now be pushed as full-text posts to a Telegram channel via `TG_DIARY_CHANNEL_ID`.
+- **Prompt-safety layer** (`src/libs/prompt-safety.ts`): introduced centralized normalization, suspicious-pattern filtering, and untrusted-data helpers for prompt assembly, memory storage, and diary notes.
+
+### Changed
+
+- **`/shock` expanded and hardened** (`src/handlers/index.ts`, `src/libs/ai.ts`): command now supports intensity and optional extra text, with injection-resistant handling of user-supplied text.
+- **Prompt trust-boundary refactor** (`src/libs/system-prompt.ts`, `src/libs/ai.ts`, `src/libs/proactive.ts`): recent history, memories, nicknames, and other user-controlled content are no longer treated like trusted system instructions. They are passed as explicit untrusted context blocks instead.
+- **Diary publishing diagnostics** (`src/libs/diary.ts`, `src/app.ts`): channel publish attempts, HTML fallback, success, skip reasons, and failures now emit clearer logs. Final failures are raised as `error` so admin DM notification is triggered.
+
+### Fixed
+
+- **Edited-message `/shock` handling** (`src/handlers/index.ts`): removed an early return that could suppress `/shock` command handling in edited-message flows.
+- **Prompt injection exposure** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/diary.ts`, `src/services/firestore.ts`): tightened direct and second-order injection paths involving shock text, memories, nicknames, external summaries, and diary observations.
+- **Memory deletion correctness** (`src/services/firestore.ts`, `src/libs/ai.ts`): deletion now normalizes input the same way storage does, checks whether an entry was truly removed, and avoids false-success responses.
+
+### Docs
+
+- **Release docs polish** (`README.md`, `README.en.md`, `CHANGELOG.md`): added bilingual README cross-links, badges, a cleaner project overview, and release-ready 1.0 presentation.
+
 ## [0.8.3] — 2026-05-17
 
 ### Changed

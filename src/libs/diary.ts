@@ -125,9 +125,21 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
 
     if (diaryCallbacks && config.tgDiaryChannelId) {
       const channelText = buildDiaryChannelPost(yesterdayDate, diary);
+      logger.info(
+        { yesterdayDate, chatId: config.tgDiaryChannelId, len: channelText.length },
+        "diary: publishing full diary to telegram channel",
+      );
       diaryCallbacks.sendChannelText(channelText).catch((err: unknown) => {
-        logger.warn({ err, yesterdayDate }, "diary: channel publish failed");
+        logger.error(
+          { err, yesterdayDate, chatId: config.tgDiaryChannelId },
+          "diary: channel publish failed",
+        );
       });
+    } else if (!config.tgDiaryChannelId) {
+      logger.info(
+        { yesterdayDate },
+        "diary: channel publish skipped (TG_DIARY_CHANNEL_ID not configured)",
+      );
     }
 
     pushDiaryToGithub(yesterdayDate, diary).catch((err: unknown) => {

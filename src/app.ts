@@ -83,8 +83,28 @@ async function main(): Promise<void> {
       const formatted = formatForTelegramHtml(text);
       try {
         await bot.api.sendMessage(config.tgDiaryChannelId, formatted, { parse_mode: "HTML" });
-      } catch {
-        await bot.api.sendMessage(config.tgDiaryChannelId, text);
+        logger.info(
+          { chatId: config.tgDiaryChannelId },
+          "diary: channel publish succeeded via HTML",
+        );
+      } catch (htmlErr) {
+        logger.warn(
+          { err: htmlErr, chatId: config.tgDiaryChannelId },
+          "diary: channel HTML publish failed, retrying with plain text",
+        );
+        try {
+          await bot.api.sendMessage(config.tgDiaryChannelId, text);
+          logger.info(
+            { chatId: config.tgDiaryChannelId },
+            "diary: channel publish succeeded via plain text",
+          );
+        } catch (textErr) {
+          logger.error(
+            { err: textErr, chatId: config.tgDiaryChannelId },
+            "diary: channel plain-text publish failed",
+          );
+          throw textErr;
+        }
       }
     },
   });
