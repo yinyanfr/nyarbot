@@ -164,6 +164,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
         wasMentioned: false,
         wasRepliedTo: false,
         recentBotMessages,
+        allowRichContentTools: false,
       });
     } finally {
       clearInterval(typingTimer);

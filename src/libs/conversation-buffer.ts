@@ -3,12 +3,24 @@ import * as path from "node:path";
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
 
+export type HistoryEntryKind =
+  | "normal"
+  | "command_help"
+  | "command_love"
+  | "command_shock"
+  | "command_reset"
+  | "command_status"
+  | "command_nighty"
+  | "morning_greeting"
+  | "diary_notification";
+
 interface HistoryEntry {
   uid: string;
   name: string;
   username?: string;
   text: string;
   timestamp: number;
+  kind?: HistoryEntryKind;
 }
 
 const SAVE_PATH = path.resolve(config.conversationBufferPath);
@@ -33,6 +45,7 @@ export function pushMessage(
   name: string,
   text: string,
   username?: string,
+  kind: HistoryEntryKind = "normal",
 ): void {
   if (!buffers.has(groupId)) {
     buffers.set(groupId, []);
@@ -44,6 +57,7 @@ export function pushMessage(
     ...(username ? { username } : {}),
     text: text.slice(0, MAX_TEXT_LEN),
     timestamp: Date.now(),
+    ...(kind !== "normal" ? { kind } : {}),
   });
   while (buffer.length > MAX_HISTORY) {
     buffer.shift();
@@ -59,7 +73,7 @@ export function formatHistoryAsContext(history: HistoryEntry[]): string {
   const lines: string[] = ['<recent_history order="oldest_to_newest">'];
   for (const entry of history) {
     lines.push(
-      `  <message uid="${xmlEscape(entry.uid)}" name="${xmlEscape(entry.name)}" username="${xmlEscape(entry.username ?? "")}" ts="${entry.timestamp}">${xmlEscape(entry.text)}</message>`,
+      `  <message uid="${xmlEscape(entry.uid)}" name="${xmlEscape(entry.name)}" username="${xmlEscape(entry.username ?? "")}" ts="${entry.timestamp}" kind="${xmlEscape(entry.kind ?? "normal")}">${xmlEscape(entry.text)}</message>`,
     );
   }
   lines.push("</recent_history>");
@@ -93,6 +107,7 @@ export async function loadConversationBuffer(): Promise<void> {
           typeof e.name === "string" &&
           typeof e.text === "string" &&
           typeof e.timestamp === "number" &&
+          (e.kind === undefined || typeof e.kind === "string") &&
           now - e.timestamp < STALE_MS,
       );
       if (fresh.length > 0) {

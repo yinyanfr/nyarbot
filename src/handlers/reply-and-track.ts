@@ -1,6 +1,6 @@
 import type { BotContext } from "./context.js";
 import config from "../configs/env.js";
-import { pushMessage } from "../libs/conversation-buffer.js";
+import { pushMessage, type HistoryEntryKind } from "../libs/conversation-buffer.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
 import { MAX_BUFFER_TEXT } from "./constants.js";
@@ -21,9 +21,17 @@ export async function replyAndTrack(
   text: string,
   replyToMessageId?: number,
   formatMarkdown = false,
+  kind: HistoryEntryKind = "normal",
 ): Promise<void> {
   const push = () => {
-    pushMessage(config.tgGroupId, "bot", config.botUsername, text.slice(0, MAX_BUFFER_TEXT));
+    pushMessage(
+      config.tgGroupId,
+      "bot",
+      config.botUsername,
+      text.slice(0, MAX_BUFFER_TEXT),
+      undefined,
+      kind,
+    );
     touchBotActivity();
   };
 

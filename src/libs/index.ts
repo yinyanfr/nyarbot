@@ -5,6 +5,7 @@ export {
   generateMorningGreeting,
   describeImage,
   generateLoveResponse,
+  generateShockResponse,
   fetchUrlContent,
 } from "./ai.js";
 export type { AiTurnResult, GenerateOptions, ProbeGateOptions } from "./ai.js";

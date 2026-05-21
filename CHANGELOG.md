@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.0.0] — 2026-05-21
+
+### Added
+
+- **Telegram channel diary publishing** (`src/libs/diary.ts`, `src/app.ts`, `src/configs/env.ts`, `.env.example`): midnight-generated diaries can now be pushed as full-text posts to a Telegram channel via `TG_DIARY_CHANNEL_ID`.
+- **Prompt-safety layer** (`src/libs/prompt-safety.ts`): introduced centralized normalization, suspicious-pattern filtering, and untrusted-data helpers for prompt assembly, memory storage, and diary notes.
+
+### Changed
+
+- **`/shock` expanded and hardened** (`src/handlers/index.ts`, `src/libs/ai.ts`): command now supports intensity and optional extra text, with injection-resistant handling of user-supplied text.
+- **Prompt trust-boundary refactor** (`src/libs/system-prompt.ts`, `src/libs/ai.ts`, `src/libs/proactive.ts`): recent history, memories, nicknames, and other user-controlled content are no longer treated like trusted system instructions. They are passed as explicit untrusted context blocks instead.
+- **Diary publishing diagnostics** (`src/libs/diary.ts`, `src/app.ts`): channel publish attempts, HTML fallback, success, skip reasons, and failures now emit clearer logs. Final failures are raised as `error` so admin DM notification is triggered.
+
+### Fixed
+
+- **Edited-message `/shock` handling** (`src/handlers/index.ts`): removed an early return that could suppress `/shock` command handling in edited-message flows.
+- **Prompt injection exposure** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/diary.ts`, `src/services/firestore.ts`): tightened direct and second-order injection paths involving shock text, memories, nicknames, external summaries, and diary observations.
+- **Memory deletion correctness** (`src/services/firestore.ts`, `src/libs/ai.ts`): deletion now normalizes input the same way storage does, checks whether an entry was truly removed, and avoids false-success responses.
+
+### Docs
+
+- **Release docs polish** (`README.md`, `README.en.md`, `CHANGELOG.md`): added bilingual README cross-links, badges, a cleaner project overview, and release-ready 1.0 presentation.
+
+## [0.8.3] — 2026-05-17
+
+### Changed
+
+- **On-demand rich content tools** (`src/handlers/extract-content.ts`, `src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/proactive.ts`, `src/libs/system-prompt.ts`): media and link preprocessing was removed from handlers. The bot now keeps raw `file_id` / `thumbnail_file_id` / URL references in context and lets the LLM call `describeTelegramMedia` / `fetchUrlContent` only when needed. Proactive replies cannot use these tools.
+- **Session-only rich content cache** (`src/libs/ai.ts`): media descriptions and URL summaries are cached in-process for the current session only, instead of being written to Firestore.
+- **Twitter/X integration upgraded to FxEmbed v2** (`src/libs/ai.ts`): tweet fetching now uses `https://api.fxtwitter.com/2/status/{id}` and the new v2 response shape.
+- **Conversation buffer URL markers restored** (`src/handlers/index.ts`): lightweight `[链接: ...]` markers are preserved in the in-memory history so passive/proactive context still retains link presence even without eager fetches.
+- **Special bot context records** (`src/libs/conversation-buffer.ts`, `src/handlers/reply-and-track.ts`, `src/handlers/index.ts`, `src/libs/diary.ts`, `src/app.ts`): command replies and other non-`send_message` bot outputs can now be written to history with explicit `kind` markers (e.g. love/shock/reset/morning_greeting/diary_notification), so the LLM can reliably treat them as real prior events.
+- **Prompt behavior tuning** (`src/libs/system-prompt.ts`): removed the explicit suggestion to overuse “草”, and adjusted group-chat rules so adult-topic banter between adults is handled naturally instead of being mechanically refused by the base model.
+
+### Added
+
+- **`/shock` command** (`src/handlers/index.ts`, `src/libs/ai.ts`, `README.md`, docs): lets users “electrocute” the bot when it hallucinates or says something annoying. The LLM generates a short, visibly shocked /炸毛-style reply.
+
+### Removed
+
+- **Firestore image cache path** (`src/services/firestore.ts`, `src/app.ts`): removed image cache CRUD, startup cleanup, and `/status` image-cache reporting because rich content is no longer persisted there.
+
+### Docs
+
+- **Prompt/context schema and interaction docs** (`docs/prompt-xml-schema.md`, `docs/architecture.md`, `docs/architecture.zh-CN.md`, `docs/commands-and-interactions.md`, `docs/commands-and-interactions.zh-CN.md`, `README.md`, `AGENTS.md`): updated to describe raw-reference context, passive-only rich-content tools, and the new on-demand fetch flow.
+
 ## [0.8.2] — 2026-05-16
 
 ### Changed

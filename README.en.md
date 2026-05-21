@@ -1,89 +1,100 @@
 # nyarbot
 
-A tsundere high-school catgirl AI living in your Telegram group chat.
+> [中文 README](README.md)
 
-Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai), powered by DeepSeek for LLM, Gemini for vision (via Cloudflare AI Gateway), and Firestore for persistence.
+A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 
----
+[![Release](https://img.shields.io/badge/release-1.0.0-8b5cf6?style=flat-square)](CHANGELOG.md)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-3c873a?style=flat-square&logo=nodedotjs&logoColor=white)](package.json)
+[![TypeScript](https://img.shields.io/badge/typescript-ESM-3178c6?style=flat-square&logo=typescript&logoColor=white)](tsconfig.json)
+[![Telegram](https://img.shields.io/badge/telegram-bot-26a5e4?style=flat-square&logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
+[![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
+[![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
+
+Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai), backed by DeepSeek for language, Gemini for vision (via Cloudflare AI Gateway), and Firestore for persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
+
+## Overview
+
+- **Feels like a group member**: conversation-first behavior instead of command-only automation
+- **Tool-call architecture**: speaking, dismissing, stickers, search, media inspection, and diary writing are all explicit tools
+- **Long-lived context**: nicknames, memories, rolling chat history, proactive replies, and daily diary generation
+- **Publishing pipeline**: midnight diary generation can publish to Hexo/GitHub and Telegram channels
+- **Security-conscious prompt design**: dedicated guardrails for prompt injection, memory poisoning, and external-content replay
+
+## Highlights
+
+| Capability         | Description                                                                                        |
+| ------------------ | -------------------------------------------------------------------------------------------------- |
+| Natural group chat | Triggered by mention/reply, optimized for short-form chat rhythm rather than essay-style responses |
+| Serious mode       | Programming, math, and technical questions automatically suppress the stronger persona layer       |
+| On-demand tools    | Media and URL tools are only used when actually needed, not eagerly preprocessed                   |
+| Proactive chatter  | Cheap probe first, full generation only when the topic is worth joining                            |
+| Memory system      | Nicknames, user memories, affection scoring, and morning/night routines                            |
+| Diary system       | Observations become a daily catgirl diary, ready for blog/channel distribution                     |
 
 ## Features
 
-- 💬 **Natural Chat** — @mention or reply to trigger a conversation with tsundere catgirl quirks (喵, 哼!, 笨蛋!), intentional mispronunciations (机器人→姬器人, AI→猫工智能)
-- 🧠 **Serious Mode** — Automatically drops the catgirl persona for programming, math, and technical questions
-- 🔍 **Web Search** — Auto-searches for current events and real-time information when needed (forced search mechanism ensures the model doesn't skip it)
-- 🔗 **URL Understanding** — Tweet links auto-fetched via fxtwitter API (with Gemini photo recognition); other links try direct HTML fetch for title/description, falling back to Tavily; only successful results enter context
-- 🖼️ **Image Roasting** — Gemini identifies image content (including images in replied-to messages), catgirl-style commentary, descriptions auto-cached and written to conversation context for proactive chatter
-- 🌅 **Morning Greeting** — Say goodnight with `/nighty`, receive a personalized greeting 8+ hours later
-- 💔 **Affection Scoring Reply** — `/love` or confession keywords trigger memory-based affection scoring, then a persona-consistent tsundere response
-- 🏷️ **Nickname & Memory** — Tell her "call me XX" or "remember XXX" and she'll remember
-- 📔 **Diary System** — Bot auto-records observational notes during chat, generates a consolidated catgirl diary at midnight, publishes to Hexo blog
-- 🎯 **Proactive Chatter** — Two-stage probe: cheap model checks topic relevance, full model generates reply only when activated
-- 🎨 **Sticker Replies** — Select stickers directly by emoji from the hardcoded pack, standalone or alongside text
-- 🔄 **Dismiss Retry** — When triggered but model chooses silence, retries up to 3 times with escalating reply hints; falls back to raw text or sticker if still silent
-- ⌨️ **Typing Indicator** — Shows "typing..." while AI generates
-- 📝 **Markdown→Telegram HTML** — Replies auto-convert Markdown bold/italic/code/links to Telegram HTML
-
----
+- 💬 **Natural Chat**: mention or reply to the bot to start a conversation; default tone is tsundere catgirl, but it can dial that down when needed
+- 🧠 **Serious Mode**: handles programming, math, academic, and technical topics in a more direct, less roleplay-heavy style
+- 🔍 **Web Search**: forces `webSearch` for current events, real-time facts, and fast-moving APIs
+- 🔗 **URL Understanding (On Demand)**: fetches link content only when needed; tweet links include optional image-aware context
+- 🖼️ **Media Understanding (On Demand)**: images, GIFs, video covers, stickers, and file thumbnails can be inspected when relevant
+- 🌅 **Morning Greetings**: `/nighty` schedules a personalized morning greeting on the next message after 8+ hours
+- 💔 **Affection Scoring**: `/love` and confession-style messages trigger memory-based scoring and a persona-consistent response
+- ⚡ **Shock Reactions**: `/shock` supports intensity and optional extra text for different frazzled reactions
+- 🏷️ **Nicknames & Memory**: users can naturally teach the bot how to address them or what to remember
+- 📔 **Diary System**: observations are recorded during chat and turned into a daily diary entry
+- 🎨 **Sticker Replies**: emoji-routed hardcoded sticker responses, optionally alongside text
+- 🔄 **Dismiss Retry**: if the model chooses silence after an explicit trigger, the bot retries with stronger reply hints
 
 ## Tech Stack
 
-| Layer                  | Library                                               |
-| ---------------------- | ----------------------------------------------------- |
-| Telegram Bot Framework | `grammy` v1                                           |
-| AI / LLM               | `ai` (Vercel AI SDK v6) + DeepSeek v4                 |
-| Vision                 | Gemini 2.5 Flash (via Cloudflare AI Gateway)          |
-| Web Search             | `@tavily/ai-sdk`                                      |
-| Database               | `firebase-admin` (Firestore)                          |
-| Date/Time              | `dayjs` (UTC+8, Asia/Shanghai)                        |
-| Runtime                | Node.js, TypeScript (ESM, moduleResolution: nodenext) |
+| Layer               | Library                                    |
+| ------------------- | ------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4      |
+| Vision              | Gemini 2.5 Flash via Cloudflare AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                           |
+| Database            | `firebase-admin` (Firestore)               |
+| Runtime             | Node.js + TypeScript ESM                   |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                  |
 
----
+## Project Layout
 
-## Architecture
-
-```
+```text
 src/
-├── app.ts                      # Entry: load dotenv, init Firebase, register handlers,
-│                               #   create ProactiveCallbacks, start proactive checker
+├── app.ts                      # Bootstraps bot, Firebase, diary, proactive loop, logging
 ├── configs/
-│   └── env.ts                  # Environment variable reading and validation
+│   └── env.ts                  # Environment loading and validation
 ├── handlers/
-│   ├── index.ts                # Message handler: classify→AI turn→send (with dismiss
-│   │                           #   retry, typing indicator, sticker dispatch)
-│   ├── context.ts              # BotContext and RequestState types
-│   ├── constants.ts            # Constants (MAX_BUFFER_TEXT, LOVE_REGEX, etc.)
-│   ├── match-command.ts        # Command matching utility
-│   ├── extract-content.ts      # URL/image/sticker extraction
-│   ├── reply-and-track.ts      # Reply + buffer push
-│   └── update-dedup.ts         # LRU dedup
+│   ├── index.ts                # Main message handler
+│   ├── context.ts              # BotContext / RequestState
+│   ├── constants.ts            # Shared constants
+│   ├── match-command.ts        # Command matching
+│   ├── extract-content.ts      # URL / media extraction
+│   ├── reply-and-track.ts      # Reply + context writeback
+│   └── update-dedup.ts         # Update deduplication
 ├── libs/
-│   ├── ai.ts                   # DeepSeek providers, classifyMessage(),
-│   │                           #   generateAiTurn() (tool-call architecture),
-│   │                           #   probeGate() (proactive probe),
-│   │                           #   describeImage(), fetchUrlContent(), etc.
-│   ├── conversation-buffer.ts  # In-memory ring buffer (60 msgs/group)
-│   ├── system-prompt.ts        # Catgirl persona system prompt, probe prompt,
-│   │                           #   naturalness late-binding prompt
-│   ├── stickers.ts             # Sticker facade (emoji→file_id lookup + random fallback)
-│   ├── format-telegram.ts      # Markdown→Telegram HTML (LaTeX→Unicode)
-│   ├── proactive.ts            # Proactive: ProactiveCallbacks interface,
-│   │                           #   two-stage probe, cooldown, sticker/typing dispatch
-│   ├── diary.ts                # Diary: midnight timer, per-date diary generation
-│   ├── time.ts                 # dayjs timezone utils (UTC+8)
-│   ├── telegram-image.ts       # Telegram file download → base64 data URL
-│   ├── logger.ts                # Pino logger
-│   └── index.ts                # Barrel re-exports
+│   ├── ai.ts                   # Classification, generation, tools, media/link readers
+│   ├── system-prompt.ts        # System prompt, probe prompt, session context blocks
+│   ├── prompt-safety.ts        # Prompt injection hardening and untrusted-data normalization
+│   ├── conversation-buffer.ts  # Rolling chat history buffer
+│   ├── proactive.ts            # Proactive scheduling and dispatch
+│   ├── diary.ts                # Diary generation and publishing
+│   ├── format-telegram.ts      # Markdown → Telegram HTML
+│   ├── stickers.ts             # emoji → file_id sticker routing
+│   ├── telegram-image.ts       # Telegram file download helpers
+│   ├── logger.ts               # pino + admin DM notifications
+│   └── time.ts                 # Timezone utilities
 ├── services/
-│   ├── index.ts                # Firebase Admin SDK initialization
-│   ├── firestore.ts            # Firestore CRUD (users, image cache, diary, nighty/morning)
-│   ├── github.ts               # GitHub Content API: push diary to Hexo blog
+│   ├── firestore.ts            # Firestore CRUD
+│   ├── github.ts               # Hexo diary publishing
+│   ├── index.ts                # Firebase Admin initialization
 │   └── serviceAccountKey.json  # Firebase credentials (gitignored)
-└── global.d.ts                 # User, DiaryEntry type definitions
+└── global.d.ts                 # Shared types
 ```
 
-See [Architecture Docs](docs/architecture.md) for details.
-
----
+See [Architecture Docs](docs/architecture.md) for the full breakdown.
 
 ## Quick Start
 
@@ -93,9 +104,8 @@ npm ci
 
 # 2. Configure environment variables
 cp .env.example .env
-# Edit .env with your Bot Token, DeepSeek API Key, Tavily API Key, CF AI Gateway Token, etc.
 
-# 3. Place Firebase service account key
+# 3. Place the Firebase service account key
 # Save serviceAccountKey.json to src/services/
 
 # 4. Build
@@ -105,101 +115,71 @@ npm run build
 node dist/app.js
 ```
 
----
-
 ## Commands & Interactions
 
-See [Commands & Interactions Docs](docs/commands-and-interactions.md) for details.
+See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 
-| Command   | Description                                                 |
-| --------- | ----------------------------------------------------------- |
-| `/help`   | Show help text                                              |
-| `/love`   | Confess your love, get affection scoring + tsundere reply   |
-| `/nighty` | Say goodnight; bot sends a morning greeting 8+ hours later  |
-| `/status` | Bot status — uptime, buffer size, memory count (admin only) |
-| `/reset`  | Clear conversation history buffer (admin only)              |
-| `/diary`  | Generate today's diary preview (admin only, private chat)   |
+| Command   | Description                                          |
+| --------- | ---------------------------------------------------- |
+| `/help`   | Show help text                                       |
+| `/love`   | Trigger affection scoring + tsundere reply           |
+| `/shock`  | Zap the bot; supports intensity and extra text       |
+| `/nighty` | Schedule a morning greeting 8+ hours later           |
+| `/status` | Show bot runtime status (admin only)                 |
+| `/reset`  | Clear conversation buffer (admin only)               |
+| `/diary`  | Generate today's diary preview (admin only, DM only) |
 
-| Scenario           | Trigger                                                            |
-| ------------------ | ------------------------------------------------------------------ |
-| Chat               | @nyarbot or reply to her messages                                  |
-| Confession         | Say "I love you", "let's get married", etc. (requires @ or reply)  |
-| Set nickname       | Tell her "call me XX"                                              |
-| Save memory        | Tell her "remember XXX"                                            |
-| Share URL          | Send a link directly (@ her for a summary, otherwise context only) |
-| Send image/sticker | Send directly, Gemini identifies and catgirl comments              |
-| Diary observation  | Bot auto-records notes via writeDiary tool during conversation     |
-
----
+| Scenario     | Trigger                                                            |
+| ------------ | ------------------------------------------------------------------ |
+| Chat         | Mention `@nyarbot` or reply to one of her messages                 |
+| Confession   | “I love you”, “let’s get married”, etc. (with mention/reply)       |
+| Nickname     | Tell the bot “call me XX”                                          |
+| Memory       | Tell the bot “remember XXX”                                        |
+| Shared links | Send a link directly; content may be fetched on demand             |
+| Media        | Send images / stickers / media; content may be inspected on demand |
+| Diary note   | The bot can record observations through the `writeDiary` tool      |
 
 ## Configuration
 
-See [Configuration Docs](docs/configuration.md) for details.
+See [Configuration Docs](docs/configuration.md).
 
-| Variable                | Required | Description                                      |
-| ----------------------- | -------- | ------------------------------------------------ |
-| `BOT_API_KEY`           | ✅       | Telegram Bot Token                               |
-| `BOT_PERSONA_NAME`      | ❌       | Bot persona display name, default `にゃる`       |
-| `BOT_PERSONA_FULL_NAME` | ❌       | Bot persona full name, default `晴海猫月`        |
-| `BOT_PERSONA_READING`   | ❌       | Persona reading, default `はるみ にゃる`         |
-| `TG_GROUP_ID`           | ✅       | Target group ID (bot only works in this group)   |
-| `TG_ADMIN_UID`          | ✅       | Admin Telegram user ID                           |
-| `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API Key                                 |
-| `TAVILY_API_KEY`        | ✅       | Tavily Search API Key                            |
-| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway Token (for Gemini vision)  |
-| `CF_ACCOUNT_ID`         | ✅       | Cloudflare Account ID (for Gemini vision)        |
-| `BOT_USERNAME`          | ✅       | Bot username (must match actual Telegram handle) |
-| `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog      |
-| `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format               |
-| `LOG_LEVEL`             | ❌       | Log level, default `info`                        |
-
-### Optional Advanced Configuration (with defaults)
-
-| Variable                       | Default                         | Description                                           |
-| ------------------------------ | ------------------------------- | ----------------------------------------------------- |
-| `DEEPSEEK_BASE_URL`            | `https://api.deepseek.com`      | DeepSeek API base URL (proxy/gateway friendly)        |
-| `CF_AIG_GATEWAY`               | `gem`                           | Cloudflare AI Gateway name                            |
-| `GITHUB_API_BASE`              | `https://api.github.com`        | GitHub API base URL (customize for GHES)              |
-| `GITHUB_API_VERSION`           | `2022-11-28`                    | GitHub API version header                             |
-| `APP_TIMEZONE`                 | `Asia/Shanghai`                 | App timezone (IANA name; invalid value fails startup) |
-| `LOG_APP_NAME`                 | `nyarbot`                       | Logger service name                                   |
-| `ADMIN_DM_MIN_INTERVAL_MS`     | `5000`                          | Min admin DM log interval in ms                       |
-| `CONVERSATION_BUFFER_PATH`     | `data/conversation-buffer.json` | Conversation buffer persistence path                  |
-| `BOT_MESSAGE_DELAY_MS`         | `400`                           | Delay between passive multi-message replies (ms)      |
-| `PROACTIVE_CHECK_INTERVAL_MS`  | `15000`                         | Proactive checker polling interval (ms)               |
-| `PROACTIVE_WINDOW_MS`          | `180000`                        | Proactive lookback window (ms)                        |
-| `PROACTIVE_MESSAGE_DELAY_MS`   | `400`                           | Delay between proactive multi-message sends (ms)      |
-| `PROACTIVE_MAX_FAILURES`       | `5`                             | Consecutive failures before proactive loop stops      |
-| `PROACTIVE_COOLDOWN_HIGH_MS`   | `90000`                         | Cooldown for high activity (ms)                       |
-| `PROACTIVE_COOLDOWN_MEDIUM_MS` | `180000`                        | Cooldown for medium activity (ms)                     |
-| `PROACTIVE_COOLDOWN_LOW_MS`    | `360000`                        | Cooldown for low activity (ms)                        |
-| `DIARY_CHECK_INTERVAL_MS`      | `60000`                         | Cross-day diary check interval (ms)                   |
-| `BUFFER_SAVE_INTERVAL_MS`      | `300000`                        | Conversation buffer auto-save interval (ms)           |
-
----
+| Variable                | Required | Description                                   |
+| ----------------------- | -------- | --------------------------------------------- |
+| `BOT_API_KEY`           | ✅       | Telegram bot token                            |
+| `BOT_USERNAME`          | ✅       | Bot username (must match Telegram)            |
+| `TG_GROUP_ID`           | ✅       | Target group ID                               |
+| `TG_ADMIN_UID`          | ✅       | Admin Telegram user ID                        |
+| `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API key                              |
+| `TAVILY_API_KEY`        | ✅       | Tavily API key                                |
+| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway token                   |
+| `CF_ACCOUNT_ID`         | ✅       | Cloudflare account ID                         |
+| `BOT_PERSONA_NAME`      | ❌       | Persona display name                          |
+| `BOT_PERSONA_FULL_NAME` | ❌       | Persona full name                             |
+| `BOT_PERSONA_READING`   | ❌       | Persona reading                               |
+| `GITHUB_TOKEN`          | ❌       | GitHub PAT for Hexo diary publishing          |
+| `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` form              |
+| `TG_DIARY_CHANNEL_ID`   | ❌       | Telegram channel ID for full diary publishing |
 
 ## Development
 
-See [Development Docs](docs/development.md) for design decisions, Firestore schema, and troubleshooting.
+See [Development Docs](docs/development.md).
 
 ```bash
-npm run typecheck  # TypeScript type checking (tsc --noEmit)
-npm run lint       # ESLint check
-npm run format     # Prettier formatting
+npm run typecheck  # TypeScript validation
+npm run lint       # ESLint
+npm run format     # Prettier
 npm run build      # Compile src/ → dist/
 ```
 
-Husky + lint-staged automatically runs prettier and eslint on staged `.ts` files.
-
----
+Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — Tool-call architecture, proactive two-stage probe, dismiss retry, Markdown rendering
-- [Prompt XML Schema](docs/prompt-xml-schema.md) — XML contract for prompts and dynamic context
-- [Configuration](docs/configuration.md) — Environment variables, Firebase, model selection, AI Gateway
-- [Commands & Interactions](docs/commands-and-interactions.md) — Commands, natural language triggers, LLM tools, dismiss retry
-- [Development](docs/development.md) — Design decisions, Firestore schema, troubleshooting
+- [Architecture](docs/architecture.md)
+- [Prompt XML Schema](docs/prompt-xml-schema.md)
+- [Configuration](docs/configuration.md)
+- [Commands & Interactions](docs/commands-and-interactions.md)
+- [Development](docs/development.md)
 
 中文文档：
 
@@ -208,8 +188,11 @@ Husky + lint-staged automatically runs prettier and eslint on staged `.ts` files
 - [命令与交互](docs/commands-and-interactions.zh-CN.md)
 - [开发](docs/development.zh-CN.md)
 
----
+## Release Notes
+
+- Current release: [`1.0.0`](CHANGELOG.md)
+- Release focus: `/shock`, special context `kind`, on-demand rich-content tools, diary publishing flow, prompt-injection hardening, stronger channel-send diagnostics
 
 ## Disclaimer
 
-This is a personal project. The bot's behavior and persona are customized by the owner. Use at your own discretion.
+This is a personal project. The bot’s behavior, tone, boundaries, and group-fit are intentionally customized. Run it with your own judgment.

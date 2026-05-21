@@ -6,8 +6,9 @@
 | --------- | ---------- | ---------------------------------------------------------- |
 | `/help`   | Anyone     | Show help text                                             |
 | `/love`   | Anyone     | Get affection scoring breakdown + tsundere response        |
+| `/shock`  | Anyone     | Zap the bot and trigger a shocked / frazzled reaction      |
 | `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
-| `/status` | Admin only | Show uptime, buffer size, memory count, image cache count  |
+| `/status` | Admin only | Show uptime, buffer size, memory user count                |
 | `/reset`  | Admin only | Clear the conversation buffer                              |
 | `/diary`  | Admin only | Generate today's diary preview (private chat only)         |
 
@@ -25,26 +26,28 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
 
-### Images
+### Special Context Records
 
-- **Direct & reply-to**: Images from the user's own message (`msg.photo`) and from the replied-to message (`msg.reply_to_message.photo`) are both processed.
-- **Cached**: If the Telegram `file_id` was seen before and a Firestore description exists, the description is injected as `[图片: description]` text.
-- **Fresh**: The image is downloaded as a data URL, sent to **Gemini 3 Flash Preview** for description, and the description is injected into DeepSeek's prompt as text. The description is then cached in Firestore (30-day TTL).
-- **Buffer enrichment**: Image descriptions are included inline in the conversation buffer (`[图片: desc]` instead of bare `[图片]`), giving the proactive checker and subsequent triggered turns full image context.
-- **Caching is unconditional**: All images are described and cached immediately, regardless of whether the bot was triggered — this ensures proactive context is always available.
+- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/reset`, standalone morning greetings, and daily diary notifications.
+- In XML history, these entries carry a `kind="..."` attribute so the model can treat them as real prior events rather than ordinary user chat lines.
+
+### Images & Media
+
+- The handler no longer pre-downloads or pre-describes media.
+- Context now includes raw Telegram references only (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media.
+- During **passive replies** (@mention/reply), the model can call `describeTelegramMedia` on demand when media content is actually needed.
+- During **proactive replies**, media/link tools are disabled to avoid unconditional fetches.
 
 ### URLs
 
-- URLs are extracted from both Telegram entities and a regex fallback.
-- `fetchUrlContent()` uses a three-tier strategy:
-  1. **Twitter/X status links** (`twitter.com`/`x.com`/`*/status/*`) → **fxtwitter API** (free, no auth). Extracts author, text, and up to 4 photos. Photos are sent to **Gemini 3 Flash Preview** in a single batch for ≤150-char Chinese descriptions. Quoted tweets are also extracted.
-  2. **Other links** → direct `fetch()` with 8s timeout, extracting `<title>` and `<meta name="description">` from HTML.
-  3. **Fallback** → Tavily Extract (AI-powered summarization).
-- **Success**: Content is pushed to the conversation buffer:
-  - Tweets → `[推文]: [Tweet url | @handle (Name): text | 配图: desc1; desc2]`
-  - Normal links → `[链接]: [链接内容: title — desc]`
-- **Failure**: Nothing is pushed to the buffer. In proactive mode, the bot stays silent. In triggered (passive) mode, the LLM sees `[链接 url: 无法获取内容]` and can ask the user to describe the link.
-- **No persistent storage**: Link descriptions live only in the in-memory conversation buffer (max 30 entries).
+- URLs are extracted from Telegram entities + regex fallback.
+- No eager fetch is performed in handlers.
+- During **passive replies**, the model can call `fetchUrlContent` on demand.
+- `fetchUrlContent` uses a three-tier strategy:
+  1. **Twitter/X status links** → FxEmbed API v2 (`/2/status/{id}`)
+  2. **Other links** → direct `fetch()` + HTML title/meta description extraction
+  3. **Fallback** → Tavily Extract summarization
+- URL content cache is in-memory (session-scoped), not persisted to Firestore.
 
 ### Stickers
 
@@ -60,23 +63,9 @@ The `sendSticker` tool exposes the hardcoded emoji list. The LLM selects by prov
 
 ### Videos, GIFs, Video Messages, Documents, and Audio
 
-Telegram provides a free `thumbnail` field (a tiny JPEG, typically ≤320×320 and under 200 KB) on `Video`, `Animation` (GIF), `VideoNote`, `Document`, and `Audio` messages. This thumbnail is a separate file from the full media — no bytes from the actual video/document need to be downloaded.
-
-The bot downloads thumbnails via `getFile(thumbnail_file_id)`, describes them through Gemini, and injects type-tagged descriptions into the AI prompt and conversation buffer:
-
-| Media type      | Format                          | Thumbnail source                     |
-| --------------- | ------------------------------- | ------------------------------------ |
-| Video           | `[视频: description]`           | `cover` (largest size) → `thumbnail` |
-| Animation (GIF) | `[GIF动画: description]`        | `thumbnail`                          |
-| Video note      | `[视频消息: description]`       | `thumbnail`                          |
-| Document        | `[文件: filename: description]` | `thumbnail`                          |
-| Audio           | `[音频: title: description]`    | `thumbnail` (album cover)            |
-
-- **Cached**: Thumbnail descriptions are cached in Firestore `images/{thumbnail_file_id}` — the same cache used for photos (shared 30-day TTL).
-- **Text-only fallback**: If no thumbnail is available (rare), text markers like `[视频]` or `[文件: report.pdf]` are injected instead, so the bot at least knows media was sent.
-- **Reply-to media**: Thumbnails from replied-to video/animation/video_note/document/audio messages are also processed, matching the existing reply-to photo behavior.
-- **Zero sticker processing**: Stickers are not downloaded, described, cached, or migrated. Thumbnails are still pre-generated JPEG/WebP images by Telegram, so no video extraction is needed.
-- **Unconditional caching**: All media thumbnails are described and cached regardless of trigger state — proactive context is always available.
+- The context preserves `file_id` and `thumbnail_file_id` references for these media types.
+- The model can decide whether to call `describeTelegramMedia` and which file id to inspect.
+- No eager thumbnail download/description is done in the message handler.
 
 ### Goodnight / Good Morning
 
@@ -93,16 +82,18 @@ Text matching `LOVE_REGEX` (我爱你, 喜欢你, 嫁给我, love, etc.) trigger
 
 The `generateAiTurn()` function exposes these tools to the model:
 
-| Tool           | Description                                                                       |
-| -------------- | --------------------------------------------------------------------------------- |
-| `send_message` | Send a message to the group — the only way to speak; can be called multiple times |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                                 |
-| `saveMemory`   | Record a memory about a group member (uid must be from the recent members list)   |
-| `setNickname`  | Set/update a group member's preferred nickname                                    |
-| `deleteMemory` | Remove a specific memory about a group member                                     |
-| `sendSticker`  | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending  |
-| `writeDiary`   | Record a diary observation about the current conversation                         |
-| `webSearch`    | Tavily search (only attached when `needsSearch=true` from classification)         |
+| Tool                    | Description                                                                       |
+| ----------------------- | --------------------------------------------------------------------------------- |
+| `send_message`          | Send a message to the group — the only way to speak; can be called multiple times |
+| `dismiss`               | Choose not to reply (binary speak/silence choice)                                 |
+| `saveMemory`            | Record a memory about a group member (uid must be from the recent members list)   |
+| `setNickname`           | Set/update a group member's preferred nickname                                    |
+| `deleteMemory`          | Remove a specific memory about a group member                                     |
+| `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending  |
+| `describeTelegramMedia` | On-demand media description by `file_id` / `thumbnail_file_id` (passive only)     |
+| `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)   |
+| `writeDiary`            | Record a diary observation about the current conversation                         |
+| `webSearch`             | Tavily search (only attached when `needsSearch=true` from classification)         |
 
 All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
 
