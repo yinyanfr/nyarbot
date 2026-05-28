@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { geminiDiaryModel, flashNoThinkModel } from "./ai.js";
+import { proThinkModel, flashNoThinkModel } from "./ai.js";
 import { getDiaryEntries, writeGeneratedDiary } from "../services/firestore.js";
 import { todayDateStr, formatTimestamp } from "./time.js";
 import { logger } from "./logger.js";
@@ -40,7 +40,7 @@ function buildDiaryUrl(date: string): string | null {
   return `https://${owner}.github.io/${repoName}/${date}-diary/`;
 }
 
-function buildDiaryChannelPost(date: string, diary: string): string {
+function buildDiaryChannelPost(diary: string): string {
   return diary;
 }
 
@@ -97,7 +97,7 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
   logger.info({ date, count: sorted.length }, "diary: generating diary from entries");
 
   const { text } = await generateText({
-    model: geminiDiaryModel,
+    model: proThinkModel,
     system: buildDiarySystemPrompt(date),
     messages: [
       {
@@ -127,7 +127,7 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
 
     if (diaryCallbacks && config.tgDiaryChannelId) {
-      const channelText = buildDiaryChannelPost(yesterdayDate, diary);
+      const channelText = buildDiaryChannelPost(diary);
       logger.info(
         { yesterdayDate, chatId: config.tgDiaryChannelId, len: channelText.length },
         "diary: publishing full diary to telegram channel",
