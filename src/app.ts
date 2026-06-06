@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
@@ -68,12 +68,21 @@ async function main(): Promise<void> {
   startProactiveChecker(proactiveCallbacks);
 
   initDiaryCallbacks({
-    sendText: async (text, kind: HistoryEntryKind = "normal") => {
+    sendText: async (text, kind: HistoryEntryKind = "normal", options) => {
       const formatted = formatForTelegramHtml(text);
+      const reply_markup =
+        options?.inlineKeyboardText && options.inlineKeyboardUrl
+          ? new InlineKeyboard().url(options.inlineKeyboardText, options.inlineKeyboardUrl)
+          : undefined;
       try {
-        await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
+        await bot.api.sendMessage(config.tgGroupId, formatted, {
+          parse_mode: "HTML",
+          ...(reply_markup ? { reply_markup } : {}),
+        });
       } catch {
-        await bot.api.sendMessage(config.tgGroupId, text);
+        await bot.api.sendMessage(config.tgGroupId, text, {
+          ...(reply_markup ? { reply_markup } : {}),
+        });
       }
       pushMessage(config.tgGroupId, "bot", config.botUsername, text, undefined, kind);
       touchBotActivity();

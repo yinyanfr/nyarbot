@@ -1,7 +1,7 @@
 import { generateText } from "ai";
 import { proThinkModel, flashNoThinkModel } from "./ai.js";
 import { getDiaryEntries, writeGeneratedDiary } from "../services/firestore.js";
-import { todayDateStr, formatTimestamp } from "./time.js";
+import { now, todayDateStr, formatTimestamp } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub } from "../services/github.js";
 import config from "../configs/env.js";
@@ -22,7 +22,11 @@ let lastDate: string | null = null;
 import type { HistoryEntryKind } from "./conversation-buffer.js";
 
 export interface DiaryCallbacks {
-  sendText: (text: string, kind?: HistoryEntryKind) => Promise<void>;
+  sendText: (
+    text: string,
+    kind?: HistoryEntryKind,
+    options?: { inlineKeyboardUrl?: string; inlineKeyboardText?: string },
+  ) => Promise<void>;
   sendChannelText: (text: string) => Promise<void>;
 }
 
@@ -56,7 +60,12 @@ async function generateDiaryNotification(
     temperature: 0.8,
     maxOutputTokens: 200,
   });
-  return text.trim();
+  return `${text.trim()}\n\n日语姬本日题库以更新，欢迎打卡`;
+}
+
+function hasReachedDiaryPublishTime(): boolean {
+  const current = now();
+  return current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2);
 }
 
 function buildDiarySystemPrompt(date: string): string {
@@ -152,7 +161,12 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     if (diaryCallbacks) {
       const diaryUrl = buildDiaryUrl(yesterdayDate);
       generateDiaryNotification(yesterdayDate, diaryUrl)
-        .then((notification) => diaryCallbacks!.sendText(notification, "diary_notification"))
+        .then((notification) =>
+          diaryCallbacks!.sendText(notification, "diary_notification", {
+            inlineKeyboardText: "加入今天的挑战",
+            inlineKeyboardUrl: "https://t.me/japqbot/app",
+          }),
+        )
         .catch((err: unknown) => {
           logger.warn({ err }, "diary: notification send failed");
         });
@@ -169,6 +183,7 @@ export function checkAndGenerateDiary(): void {
     return;
   }
   if (lastDate === today) return;
+  if (!hasReachedDiaryPublishTime()) return;
 
   const yesterdayDate = lastDate;
   lastDate = today;
