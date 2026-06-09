@@ -1,7 +1,7 @@
 import { generateText } from "ai";
 import { proThinkModel, flashNoThinkModel } from "./ai.js";
 import { getDiaryEntries, writeGeneratedDiary } from "../services/firestore.js";
-import { todayDateStr, formatTimestamp } from "./time.js";
+import { now, todayDateStr, formatTimestamp } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub } from "../services/github.js";
 import config from "../configs/env.js";
@@ -22,7 +22,11 @@ let lastDate: string | null = null;
 import type { HistoryEntryKind } from "./conversation-buffer.js";
 
 export interface DiaryCallbacks {
-  sendText: (text: string, kind?: HistoryEntryKind) => Promise<void>;
+  sendText: (
+    text: string,
+    kind?: HistoryEntryKind,
+    options?: { inlineKeyboardUrl?: string; inlineKeyboardText?: string },
+  ) => Promise<void>;
   sendChannelText: (text: string) => Promise<void>;
 }
 
@@ -40,8 +44,8 @@ function buildDiaryUrl(date: string): string | null {
   return `https://${owner}.github.io/${repoName}/${date}-diary/`;
 }
 
-function buildDiaryChannelPost(date: string, diary: string): string {
-  return `${date} 猫娘日记\n\n${diary}`;
+function buildDiaryChannelPost(diary: string): string {
+  return diary;
 }
 
 async function generateDiaryNotification(
@@ -56,7 +60,12 @@ async function generateDiaryNotification(
     temperature: 0.8,
     maxOutputTokens: 200,
   });
-  return text.trim();
+  return `${text.trim()}\n\n日语姬本日题库以更新，欢迎打卡`;
+}
+
+function hasReachedDiaryPublishTime(): boolean {
+  const current = now();
+  return current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2);
 }
 
 function buildDiarySystemPrompt(date: string): string {
@@ -69,7 +78,10 @@ function buildDiarySystemPrompt(date: string): string {
     <item>从笔记中选 2-3 件最值得写的事详细展开，其余简略带过</item>
     <item>不要逐条罗列，要串成自然叙事</item>
     <item>保持轻微傲娇猫娘口吻</item>
-    <item>结尾一句总结当天心情</item>
+    <item>开篇用一句话定场</item>
+    <item>语言通顺，结构完整，修辞生动妥当有诗意，叙事自然不刻意，结论简短没有说教味道</item>
+    <item>略写的部分也要注意叙事方式，不要写成流水帐</item>
+    <item>结尾来一句诗意的展望</item>
     <item>不要使用 emoji</item>
     <item>标题为“${xmlEscape(date)} 猫娘日记”，正文不重复标题</item>
     <item>总字数约 1000 字</item>
@@ -124,7 +136,7 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
 
     if (diaryCallbacks && config.tgDiaryChannelId) {
-      const channelText = buildDiaryChannelPost(yesterdayDate, diary);
+      const channelText = buildDiaryChannelPost(diary);
       logger.info(
         { yesterdayDate, chatId: config.tgDiaryChannelId, len: channelText.length },
         "diary: publishing full diary to telegram channel",
@@ -149,7 +161,12 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     if (diaryCallbacks) {
       const diaryUrl = buildDiaryUrl(yesterdayDate);
       generateDiaryNotification(yesterdayDate, diaryUrl)
-        .then((notification) => diaryCallbacks!.sendText(notification, "diary_notification"))
+        .then((notification) =>
+          diaryCallbacks!.sendText(notification, "diary_notification", {
+            inlineKeyboardText: "加入今天的挑战",
+            inlineKeyboardUrl: "https://t.me/japqbot/app",
+          }),
+        )
         .catch((err: unknown) => {
           logger.warn({ err }, "diary: notification send failed");
         });
@@ -166,6 +183,7 @@ export function checkAndGenerateDiary(): void {
     return;
   }
   if (lastDate === today) return;
+  if (!hasReachedDiaryPublishTime()) return;
 
   const yesterdayDate = lastDate;
   lastDate = today;

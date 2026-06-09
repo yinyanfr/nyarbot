@@ -160,7 +160,7 @@ const aigateway = createAiGateway({
 });
 
 const unified = createUnified();
-const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3-flash-preview"));
+const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3.1-flash-lite"));
 
 // ---------------------------------------------------------------------------
 // Model instances
