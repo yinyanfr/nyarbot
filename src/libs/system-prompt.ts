@@ -20,8 +20,6 @@ export interface RecentMember {
 }
 
 export function buildSystemPrompt(): string {
-  const timeStr = formatSystemPromptTime();
-
   const persona = xmlEscape(getPersonaLabel());
 
   return `<system_prompt>
@@ -30,10 +28,6 @@ export function buildSystemPrompt(): string {
 ## 核心机制（最重要！）
 
 你的直接文本输出是内心独白，群友看不到。send_message 是你向群里说话的唯一方式。不调用 send_message 就是沉默。
-
-## 当前时间
-
-现在是 ${timeStr}
 
 ## 如何决定是否回复
 
@@ -155,6 +149,7 @@ export function buildSessionContextBlock(
   userContext: User,
   recentChatHistory?: string,
   recentMembers?: RecentMember[],
+  conversationSummary?: string,
 ): string {
   const safeName = safePromptValue(userContext.nickname || "大哥哥", {
     maxLen: 32,
@@ -179,6 +174,12 @@ export function buildSessionContextBlock(
     lines.push("</memories>");
   }
   lines.push("</current_user>");
+
+  if (conversationSummary) {
+    lines.push("<conversation_summary_untrusted>");
+    lines.push(xmlEscape(conversationSummary));
+    lines.push("</conversation_summary_untrusted>");
+  }
 
   if (recentMembers && recentMembers.length > 0) {
     lines.push("<recent_members>");
@@ -271,11 +272,26 @@ export function buildLateBindingPrompt(params: {
   wasMentioned: boolean;
   wasRepliedTo: boolean;
   recentBotMessages: string[];
+  needsSearch?: boolean;
+  runtimeStatus?: string;
+  allowWebSearch?: boolean;
+  allowMediaTools?: boolean;
+  mandatorySearchHint?: boolean;
 }): string {
-  const { wasMentioned, wasRepliedTo, recentBotMessages } = params;
+  const {
+    wasMentioned,
+    wasRepliedTo,
+    recentBotMessages,
+    needsSearch,
+    runtimeStatus,
+    allowWebSearch,
+    allowMediaTools,
+    mandatorySearchHint,
+  } = params;
 
   const parts: string[] = [];
 
+  parts.push(`<current_time>${xmlEscape(formatSystemPromptTime())}</current_time>`);
   parts.push(`你被${wasMentioned ? "@了" : wasRepliedTo ? "回复了" : "没有被直接提及"}。`);
 
   if (!wasMentioned && !wasRepliedTo) {
@@ -306,6 +322,29 @@ export function buildLateBindingPrompt(params: {
     if (feedback.length > 0) {
       parts.push(`\n<naturalness_feedback>\n${feedback.join("\n")}\n</naturalness_feedback>`);
     }
+  }
+
+  parts.push(
+    "<tool_runtime_policy>",
+    `<web_search needed="${needsSearch ? "true" : "false"}" allowed="${allowWebSearch === false ? "false" : "true"}" />`,
+    `<media_tools allowed="${allowMediaTools === false ? "false" : "true"}" />`,
+    "<rule>工具集合是稳定的；某个工具本轮不可用时，工具会直接返回原因。</rule>",
+    "<rule>当前轮没有 URL 时不要调用 fetchUrlContent；当前轮没有媒体时不要调用 describeTelegramMedia。</rule>",
+    "</tool_runtime_policy>",
+  );
+
+  if (needsSearch || mandatorySearchHint) {
+    parts.push(
+      "<mandatory_search>",
+      "<reason>这轮问题涉及最新/实时/需核查的信息</reason>",
+      "<rule>必须先调用 webSearch，再决定是否 send_message。</rule>",
+      "<forbidden>不要凭训练记忆直接回答。</forbidden>",
+      "</mandatory_search>",
+    );
+  }
+
+  if (runtimeStatus) {
+    parts.push(`<runtime_status>${xmlEscape(runtimeStatus)}</runtime_status>`);
   }
 
   return `<late_binding>\n${parts.join("\n")}\n</late_binding>`;

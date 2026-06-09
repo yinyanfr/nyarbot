@@ -32,6 +32,22 @@
 - `LOG_APP_NAME`、`ADMIN_DM_MIN_INTERVAL_MS`
 - `CONVERSATION_BUFFER_PATH`、`BUFFER_SAVE_INTERVAL_MS`
 - `BOT_MESSAGE_DELAY_MS`
+- Runtime/debounce/abuse/compaction：
+  `RUNTIME_INITIAL_DELAY_MS`（默认 5000）、
+  `RUNTIME_TYPING_EXTEND_MS`（5000）、
+  `RUNTIME_MAX_DELAY_MS`（30000）、
+  `RUNTIME_QUIET_WINDOW_MS`（30000）、
+  `RUNTIME_HOT_CHAT_THRESHOLD`（10）、
+  `RUNTIME_QUIET_DURATION_MS`（180000）、
+  `RUNTIME_USER_BURST_THRESHOLD`（8）、
+  `RUNTIME_USER_COOLDOWN_MS`（60000）、
+  `RUNTIME_URL_FLOOD_THRESHOLD`（3）、
+  `RUNTIME_MEDIA_FLOOD_THRESHOLD`（5）、
+  `RUNTIME_MEDIA_FLOOD_COOLDOWN_MS`（300000）、
+  `RUNTIME_MAX_CONTEXT_EST_TOKENS`（12000）、
+  `RUNTIME_WORKING_WINDOW_EST_TOKENS`（4000）、
+  `RUNTIME_MAX_RECENT_EVENTS`（120）、
+  `RUNTIME_RETAIN_RECENT_EVENTS`（40）
 - `PROACTIVE_CHECK_INTERVAL_MS`、`PROACTIVE_WINDOW_MS`、`PROACTIVE_MESSAGE_DELAY_MS`、
   `PROACTIVE_MAX_FAILURES`、`PROACTIVE_COOLDOWN_HIGH_MS`、
   `PROACTIVE_COOLDOWN_MEDIUM_MS`、`PROACTIVE_COOLDOWN_LOW_MS`
@@ -46,11 +62,15 @@
 
 使用的 Firestore 集合：
 
-| 集合              | 文档 ID          | 字段                                                                     |
-| ----------------- | ---------------- | ------------------------------------------------------------------------ |
-| `users/{uid}`     | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?` |
-| `images/{fileId}` | Telegram file_id | `fileId`、`description`、`cachedAt`                                      |
-| `diary/{date}`    | 日期 YYYY-MM-DD  | `date`、`entries[]`、`diary?`、`generatedAt?`                            |
+| 集合                   | 文档 ID          | 字段                                                                        |
+| ---------------------- | ---------------- | --------------------------------------------------------------------------- |
+| `users/{uid}`          | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?`    |
+| `images/{fileId}`      | Telegram file_id | `fileId`、`description`、`cachedAt`                                         |
+| `diary/{date}`         | 日期 YYYY-MM-DD  | `date`、`entries[]`、`diary?`、`generatedAt?`                               |
+| `runtime/group`        | 固定文档         | `summary`、`summaryCursorTs`、`lastProcessedMessageId?`、`lastCompactedAt?` |
+| `events/{autoId}`      | 自动 ID          | append-only 群聊事件、bot 输出、忽略原因、URL/媒体引用                      |
+| `turns/{autoId}`       | 自动 ID          | AI turn 的模型、工具调用、action、token/cache usage、latency、错误          |
+| `compactions/{autoId}` | 自动 ID          | 工作记忆摘要快照与 cursor/token usage                                       |
 
 ## DeepSeek 模型
 
@@ -75,17 +95,20 @@ Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存�
 
 Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 
-| 工具           | 用途                                                  |
-| -------------- | ----------------------------------------------------- |
-| `send_message` | 向群聊发送消息——说话的唯一方式                        |
-| `dismiss`      | 选择不回复（二选一：说话/沉默）                       |
-| `saveMemory`   | 记录关于群友的记忆（uid 已验证）                      |
-| `setNickname`  | 设置/更新群友的昵称                                   |
-| `deleteMemory` | 删除关于群友的指定记忆                                |
-| `sendSticker`  | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送    |
-| `writeDiary`   | 记录关于当前对话的观察笔记                            |
-| `webSearch`    | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带） |
+| 工具                    | 用途                                                      |
+| ----------------------- | --------------------------------------------------------- |
+| `send_message`          | 向群聊发送消息——说话的唯一方式                            |
+| `dismiss`               | 选择不回复（二选一：说话/沉默）                           |
+| `saveMemory`            | 记录关于群友的记忆（uid 已验证）                          |
+| `setNickname`           | 设置/更新群友的昵称                                       |
+| `deleteMemory`          | 删除关于群友的指定记忆                                    |
+| `sendSticker`           | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送        |
+| `writeDiary`            | 记录关于当前对话的观察笔记                                |
+| `webSearch`             | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）     |
+| `describeTelegramMedia` | 按需查看当前轮 Telegram 媒体；主动/限流场景会返回禁用原因 |
+| `fetchUrlContent`       | 按需抓取当前轮 URL；无 URL 或限流时返回原因               |
+| `startSubagent`         | 一次性 helper，用于 URL/媒体/技术检索，不能直接发群消息   |
 
-当 `needsSearch=true` 时，追加一条强制指令确保模型在回答前调用 `webSearch`。
+工具 schema 尽量保持稳定以利于 KV cache。当 `needsSearch=true` 时，late-binding 会追加 mandatory search；如果模型未搜索却准备发送，会自动重试一次。
 
 多步工具调用使用 `stopWhen: stepCountIs(5)` 允许最多 5 步（初始调用 + 4 轮工具调用）。

@@ -60,7 +60,7 @@ async function generateDiaryNotification(
     temperature: 0.8,
     maxOutputTokens: 200,
   });
-  return `${text.trim()}\n\n日语姬本日题库以更新，欢迎打卡`;
+  return `${text.trim()}\n\n日语姬本日题库已更新，欢迎打卡`;
 }
 
 function hasReachedDiaryPublishTime(): boolean {

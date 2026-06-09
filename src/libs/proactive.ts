@@ -4,6 +4,7 @@ import { logger } from "./logger.js";
 import config from "../configs/env.js";
 import { MAX_BUFFER_TEXT } from "../handlers/constants.js";
 import { getStickerEmojiByFileId } from "./stickers.js";
+import { groupRuntime } from "./group-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -84,125 +85,182 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     ).length;
 
     if (recentCount === 0) return;
+    if (!groupRuntime.canRunProactive()) return;
 
     const cooldown = getCooldownMs(recentCount);
     if (now - lastBotMessageTime < cooldown) return;
 
     const recentHistory = history.filter((e) => e.timestamp > now - WINDOW_MS);
-
-    // Collect recent members for the probe gate context
-    const memberMap = new Map<string, { name: string; username?: string }>();
-    for (const entry of recentHistory) {
-      if (entry.uid !== "bot" && entry.uid !== "system" && !memberMap.has(entry.uid)) {
-        memberMap.set(entry.uid, {
-          name: entry.name,
-          ...(entry.username ? { username: entry.username } : {}),
-        });
+    const ran = await groupRuntime.runProactiveTurn(async () => {
+      // Collect recent members for the probe gate context
+      const memberMap = new Map<string, { name: string; username?: string }>();
+      for (const entry of recentHistory) {
+        if (entry.uid !== "bot" && entry.uid !== "system" && !memberMap.has(entry.uid)) {
+          memberMap.set(entry.uid, {
+            name: entry.name,
+            ...(entry.username ? { username: entry.username } : {}),
+          });
+        }
       }
-    }
-    const recentMembers = Array.from(memberMap.entries()).map(([uid, info]) => ({
-      uid,
-      name: info.name,
-      ...(info.username ? { username: info.username } : {}),
-    }));
-    const allowedUids = new Set(memberMap.keys());
+      const recentMembers = Array.from(memberMap.entries()).map(([uid, info]) => ({
+        uid,
+        name: info.name,
+        ...(info.username ? { username: info.username } : {}),
+      }));
+      const allowedUids = new Set(memberMap.keys());
 
-    const shouldProceed = await probeGate({
-      recentConversation: recentHistory
-        .map((entry) => {
-          const label = entry.username ? `[${entry.name} (@${entry.username})]` : `[${entry.name}]`;
-          return `${label}: ${entry.text}`;
-        })
-        .join("\n"),
-      recentMembers,
-    });
-
-    if (!shouldProceed) {
-      // Probe decided to stay silent — skip the full model run entirely.
-      return;
-    }
-
-    // Re-check cooldown: a passive handler may have replied while probeGate was running.
-    const elapsed = Date.now() - lastBotMessageTime;
-    if (elapsed < cooldown) {
-      logger.info(`proactive: passive reply ${elapsed}ms ago, skipping (cooldown ${cooldown}ms)`);
-      return;
-    }
-
-    // Lock the cooldown slot *before* calling generateAiTurn
-    // This prevents a race condition where users chat during the proactive generation
-    // window and end up triggering a double bot response.
-    touchBotActivity();
-
-    // Signal "typing..." to the group while the full model runs
-    // Use an interval to keep it alive during long DeepSeek thinking phases
-    const typingTimer = setInterval(() => {
-      callbacks.sendChatAction("typing").catch(() => void 0);
-    }, 4500);
-    await callbacks.sendChatAction("typing").catch(() => void 0);
-
-    const formattedHistory = formatHistoryAsContext(recentHistory);
-
-    // Collect recent bot messages for human-likeness feedback
-    const recentBotMessages = recentHistory
-      .filter((e) => e.uid === "bot")
-      .map((e) => e.text)
-      .slice(-5);
-
-    // Use the current conversation context for the proactive response
-    let result;
-    try {
-      result = await generateAiTurn({
-        userContext: { uid: "proactive", nickname: "", memories: [] },
-        userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
-        recentConversation: formattedHistory,
+      const shouldProceed = await probeGate({
+        recentConversation: recentHistory
+          .map((entry) => {
+            const label = entry.username
+              ? `[${entry.name} (@${entry.username})]`
+              : `[${entry.name}]`;
+            return `${label}: ${entry.text}`;
+          })
+          .join("\n"),
         recentMembers,
-        allowedUids,
-        tier: "simple", // proactive messages should always be short
-        needsSearch: false,
-        systemHint: null,
-        wasMentioned: false,
-        wasRepliedTo: false,
-        recentBotMessages,
-        allowRichContentTools: false,
       });
-    } finally {
-      clearInterval(typingTimer);
-    }
 
-    if (result.action === "dismiss") {
-      logger.info("proactive: full model chose to dismiss after probe activation");
-      return;
-    }
-
-    // Send all text messages from the result, formatted for Telegram HTML
-    for (let i = 0; i < result.messages.length; i++) {
-      const msg = result.messages[i]!;
-      await callbacks.sendText(msg);
-      pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
-
-      // Stagger messages to mimic human typing rhythm, but not after the last one
-      if (i < result.messages.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, MESSAGE_DELAY_MS));
+      if (!shouldProceed) {
+        // Probe decided to stay silent — skip the full model run entirely.
+        return;
       }
-    }
 
-    // Dispatch sticker — either after text messages, or sticker-only (no text)
-    if (result.stickerFileId) {
-      await callbacks.sendSticker(result.stickerFileId);
-      if (result.messages.length === 0) {
-        const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
-        pushMessage(
-          config.tgGroupId,
-          "bot",
-          config.botUsername,
-          `[贴纸 ${emoji}: ${result.stickerFileId}]`,
-        );
+      // Re-check cooldown: a passive handler may have replied while probeGate was running.
+      const elapsed = Date.now() - lastBotMessageTime;
+      if (elapsed < cooldown) {
+        logger.info(`proactive: passive reply ${elapsed}ms ago, skipping (cooldown ${cooldown}ms)`);
+        return;
       }
-    }
 
-    lastBotMessageTime = Date.now();
-    consecutiveFailures = 0;
+      // Lock the cooldown slot *before* calling generateAiTurn
+      // This prevents a race condition where users chat during the proactive generation
+      // window and end up triggering a double bot response.
+      touchBotActivity();
+
+      // Signal "typing..." to the group while the full model runs
+      // Use an interval to keep it alive during long DeepSeek thinking phases
+      const typingTimer = setInterval(() => {
+        callbacks.sendChatAction("typing").catch(() => void 0);
+      }, 4500);
+      await callbacks.sendChatAction("typing").catch(() => void 0);
+
+      const formattedHistory = formatHistoryAsContext(recentHistory);
+
+      // Collect recent bot messages for human-likeness feedback
+      const recentBotMessages = recentHistory
+        .filter((e) => e.uid === "bot")
+        .map((e) => e.text)
+        .slice(-5);
+
+      // Use the current conversation context for the proactive response
+      let result;
+      try {
+        const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
+          logger.warn({ err }, "proactive: load runtime context failed");
+          return null;
+        });
+        result = await generateAiTurn({
+          userContext: { uid: "proactive", nickname: "", memories: [] },
+          userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
+          recentConversation: runtimeContext?.recentEventsText || formattedHistory,
+          recentMembers,
+          allowedUids,
+          tier: "simple", // proactive messages should always be short
+          needsSearch: false,
+          systemHint: null,
+          wasMentioned: false,
+          wasRepliedTo: false,
+          recentBotMessages,
+          allowRichContentTools: false,
+          ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+        });
+      } finally {
+        clearInterval(typingTimer);
+      }
+
+      if (result.action === "dismiss") {
+        logger.info("proactive: full model chose to dismiss after probe activation");
+        await groupRuntime.recordTurn({
+          kind: "proactive",
+          startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+          completedAt: Date.now(),
+          model: result.metrics?.model ?? "unknown",
+          tier: "simple",
+          needsSearch: false,
+          toolCalls: result.metrics?.toolCalls ?? [],
+          action: "dismiss",
+          messages: [],
+          ...(result.metrics?.inputTokens != null
+            ? { inputTokens: result.metrics.inputTokens }
+            : {}),
+          ...(result.metrics?.outputTokens != null
+            ? { outputTokens: result.metrics.outputTokens }
+            : {}),
+          ...(result.metrics?.cachedInputTokens != null
+            ? { cachedInputTokens: result.metrics.cachedInputTokens }
+            : {}),
+          ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+        });
+        return;
+      }
+
+      // Send all text messages from the result, formatted for Telegram HTML
+      for (let i = 0; i < result.messages.length; i++) {
+        const msg = result.messages[i]!;
+        await callbacks.sendText(msg);
+        pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
+        await groupRuntime.recordBotMessages({ messages: [msg] });
+
+        // Stagger messages to mimic human typing rhythm, but not after the last one
+        if (i < result.messages.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, MESSAGE_DELAY_MS));
+        }
+      }
+
+      // Dispatch sticker — either after text messages, or sticker-only (no text)
+      if (result.stickerFileId) {
+        await callbacks.sendSticker(result.stickerFileId);
+        if (result.messages.length === 0) {
+          const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
+          pushMessage(
+            config.tgGroupId,
+            "bot",
+            config.botUsername,
+            `[贴纸 ${emoji}: ${result.stickerFileId}]`,
+          );
+          await groupRuntime.recordBotMessages({
+            messages: [],
+            stickerFileId: result.stickerFileId,
+          });
+        }
+      }
+
+      await groupRuntime.recordTurn({
+        kind: "proactive",
+        startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+        completedAt: Date.now(),
+        model: result.metrics?.model ?? "unknown",
+        tier: "simple",
+        needsSearch: false,
+        toolCalls: result.metrics?.toolCalls ?? [],
+        action: result.action === "send" ? "send" : "dismiss",
+        messages: result.action === "send" ? result.messages : [],
+        stickerFileId: result.action === "send" ? result.stickerFileId : null,
+        ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
+        ...(result.metrics?.outputTokens != null
+          ? { outputTokens: result.metrics.outputTokens }
+          : {}),
+        ...(result.metrics?.cachedInputTokens != null
+          ? { cachedInputTokens: result.metrics.cachedInputTokens }
+          : {}),
+        ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+      });
+
+      lastBotMessageTime = Date.now();
+      consecutiveFailures = 0;
+    });
+    if (!ran) return;
   } catch (err) {
     consecutiveFailures++;
     logger.error(err, `proactive check failed (${consecutiveFailures}/${MAX_FAILURES})`);

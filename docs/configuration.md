@@ -32,6 +32,22 @@ Additional optional envs with defaults:
 - `LOG_APP_NAME`, `ADMIN_DM_MIN_INTERVAL_MS`
 - `CONVERSATION_BUFFER_PATH`, `BUFFER_SAVE_INTERVAL_MS`
 - `BOT_MESSAGE_DELAY_MS`
+- Runtime/debounce/abuse/compaction:
+  `RUNTIME_INITIAL_DELAY_MS` (default 5000),
+  `RUNTIME_TYPING_EXTEND_MS` (5000),
+  `RUNTIME_MAX_DELAY_MS` (30000),
+  `RUNTIME_QUIET_WINDOW_MS` (30000),
+  `RUNTIME_HOT_CHAT_THRESHOLD` (10),
+  `RUNTIME_QUIET_DURATION_MS` (180000),
+  `RUNTIME_USER_BURST_THRESHOLD` (8),
+  `RUNTIME_USER_COOLDOWN_MS` (60000),
+  `RUNTIME_URL_FLOOD_THRESHOLD` (3),
+  `RUNTIME_MEDIA_FLOOD_THRESHOLD` (5),
+  `RUNTIME_MEDIA_FLOOD_COOLDOWN_MS` (300000),
+  `RUNTIME_MAX_CONTEXT_EST_TOKENS` (12000),
+  `RUNTIME_WORKING_WINDOW_EST_TOKENS` (4000),
+  `RUNTIME_MAX_RECENT_EVENTS` (120),
+  `RUNTIME_RETAIN_RECENT_EVENTS` (40)
 - `PROACTIVE_CHECK_INTERVAL_MS`, `PROACTIVE_WINDOW_MS`, `PROACTIVE_MESSAGE_DELAY_MS`,
   `PROACTIVE_MAX_FAILURES`, `PROACTIVE_COOLDOWN_HIGH_MS`,
   `PROACTIVE_COOLDOWN_MEDIUM_MS`, `PROACTIVE_COOLDOWN_LOW_MS`
@@ -46,11 +62,15 @@ Additional optional envs with defaults:
 
 Firestore collections used:
 
-| Collection        | Document ID      | Fields                                                                   |
-| ----------------- | ---------------- | ------------------------------------------------------------------------ |
-| `users/{uid}`     | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?` |
-| `images/{fileId}` | Telegram file_id | `fileId`, `description`, `cachedAt`                                      |
-| `diary/{date}`    | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                            |
+| Collection             | Document ID      | Fields                                                                      |
+| ---------------------- | ---------------- | --------------------------------------------------------------------------- |
+| `users/{uid}`          | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`    |
+| `images/{fileId}`      | Telegram file_id | `fileId`, `description`, `cachedAt`                                         |
+| `diary/{date}`         | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                               |
+| `runtime/group`        | Fixed document   | `summary`, `summaryCursorTs`, `lastProcessedMessageId?`, `lastCompactedAt?` |
+| `events/{autoId}`      | Auto ID          | Append-only chat events, bot outputs, ignored reasons, URL/media refs       |
+| `turns/{autoId}`       | Auto ID          | AI turn model, tool calls, action, token/cache usage, latency, errors       |
+| `compactions/{autoId}` | Auto ID          | Working-memory summary snapshots with cursor/token usage                    |
 
 ## DeepSeek Models
 
@@ -75,17 +95,20 @@ Model used: `google-ai-studio/gemini-3-flash-preview` — fast, cheap, and suppo
 
 The bot uses `generateText()` (not streaming) with the following tools exposed to the model:
 
-| Tool           | Purpose                                                                          |
-| -------------- | -------------------------------------------------------------------------------- |
-| `send_message` | Send a message to the group — the only way to speak                              |
-| `dismiss`      | Choose not to reply (binary speak/silence choice)                                |
-| `saveMemory`   | Record a memory about a group member (uid validated)                             |
-| `setNickname`  | Set/update a group member's preferred nickname                                   |
-| `deleteMemory` | Remove a specific memory about a group member                                    |
-| `sendSticker`  | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending |
-| `writeDiary`   | Record an observational note about the conversation                              |
-| `webSearch`    | Tavily search (only when `needsSearch=true` from classification)                 |
+| Tool                    | Purpose                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `send_message`          | Send a message to the group — the only way to speak                              |
+| `dismiss`               | Choose not to reply (binary speak/silence choice)                                |
+| `saveMemory`            | Record a memory about a group member (uid validated)                             |
+| `setNickname`           | Set/update a group member's preferred nickname                                   |
+| `deleteMemory`          | Remove a specific memory about a group member                                    |
+| `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending |
+| `writeDiary`            | Record an observational note about the conversation                              |
+| `webSearch`             | Tavily search; disabled by runtime flood protection by returning a reason        |
+| `describeTelegramMedia` | Inspect current-turn Telegram media on demand                                    |
+| `fetchUrlContent`       | Fetch current-turn URLs on demand                                                |
+| `startSubagent`         | One-shot helper for URL/media/technical research; cannot send group messages     |
 
-When `needsSearch=true`, a mandatory instruction is appended to ensure the model calls `webSearch` before answering.
+Tool schema is kept stable for KV-cache friendliness. When `needsSearch=true`, late binding adds a mandatory search hint; if the model sends without `webSearch`, the turn retries once.
 
 Multi-step tool calling uses `stopWhen: stepCountIs(5)` to allow up to 5 steps (initial call + 4 tool-call rounds).

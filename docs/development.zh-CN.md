@@ -73,6 +73,45 @@ DeepSeek 输出 Markdown（粗体、斜体、代码、链接、LaTeX 数学）�
 
 当用户 @提及或回复 bot 时，沉默几乎总是错误的——用户期望得到回复。用递增提示重试确保模型最终会说话。对于主动插话，沉默是合理的预期选择，不需要重试。
 
+当前实现的重试次数是：simple/complex 最多 1 次，tech 0 次。技术问题如果模型选择沉默，直接走兜底，避免昂贵模型重复消耗。
+
+### 为什么有单群 Runtime？
+
+handler 仍负责 Telegram 细节，但 AI 调度统一交给 `groupRuntime`。这样可以保证 passive/proactive 不并发、群聊白热化时不抢话、刷屏用户不会触发大量模型调用，并且每轮模型输入/输出、工具调用、token usage 都能写入 Firestore 供调试。
+
+Runtime 的默认阈值：
+
+- debounce：首次 5 秒，新触发延长 5 秒，30 秒硬上限
+- hot chat：30 秒内 10 条真实用户消息
+- quiet mode：触发后 180 秒
+- 单用户限流：30 秒内超过 8 条非命令消息，冷却 60 秒
+- URL flood：60 秒内超过 3 个 URL，禁用搜索/抓链接触发
+- 媒体 flood：60 秒内超过 5 个媒体，禁用媒体描述 5 分钟
+
+### 为什么静态 system prompt？
+
+主模型调用采用 KV cache 友好布局：
+
+```text
+system:
+  static persona + static behavior rules + static XML/tool guidance
+
+user:
+  <conversation_summary_untrusted>
+  <recent_history_untrusted>
+  <retrieved_or_selected_memories>
+  <current_turn>
+  <late_binding>
+```
+
+`buildSystemPrompt()` 不应包含当前时间、用户记忆、最近历史、runtime 状态或自然度反馈。这些动态内容放在 user message 尾部，尤其是 `buildLateBindingPrompt()`。工具 schema 也尽量稳定；工具不可用时返回禁用原因，而不是从 schema 中消失。
+
+### 为什么 compaction 不是 diary？
+
+Compaction 是机器人工作记忆：保留活跃话题、长期事实、待跟进事项和机器人已经做过的搜索/解释，写入 `compactions` 和 `runtime/group.summary`。它会作为不可信摘要进入 prompt。
+
+Diary 是文学化归档：由 `writeDiary` 和午夜日记流程生成，面向阅读，不参与 runtime cursor，也不替代工作记忆。
+
 ### 为什么有日记系统？
 
 Bot 通过 `writeDiary` AI 工具记录对话观察笔记，而非事后提取。模型根据对话上下文判断什么值得记录——无规则触发、无频率限制。午夜（基于 `APP_TIMEZONE`）使用 DeepSeek v4 Pro 带思考模式将观察汇总为自然的猫娘第一人称日记。生成的日记通过 GitHub Content API 推送到 Hexo 博客供公开阅读。
@@ -88,7 +127,7 @@ Bot 通过 `writeDiary` AI 工具记录对话观察笔记，而非事后提取�
 
 ### 进程内状态
 
-对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态全部在进程内存中。重启会丢失所有对话上下文，主动插话检查器也会停止。对于单群组个人 bot 来说这是可接受的。
+对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态仍在进程内存中，但对话恢复和调试不再只依赖缓冲区。Firestore `events` 是 append-only 事实记录，`runtime/group.summary` + recent events 是长期上下文来源；内存 buffer 是热缓存和快速扫描窗口。
 
 ### 日志架构
 
@@ -150,4 +189,38 @@ interface DiaryEntry {
 // entries: DiaryEntry[]（via arrayUnion）
 // diary?: string（生成的日记文本）
 // generatedAt?: number（毫秒时间戳）
+```
+
+### Runtime collections
+
+```typescript
+// runtime/group
+interface RuntimeGroupStateDoc {
+  summary: string;
+  summaryCursorTs: number;
+  lastProcessedMessageId?: number;
+  lastCompactedAt?: number;
+  updatedAt: number;
+}
+
+// events/{autoId}
+interface RuntimeEventRecord {
+  chatId: string;
+  messageId?: number;
+  updateId?: number;
+  kind: "user_message" | "edited_message" | "bot_message" | "command" | "system";
+  uid: string;
+  name: string;
+  text: string;
+  mediaRefs: unknown[];
+  urls: string[];
+  ts: number;
+  ignoredReason?: string;
+}
+
+// turns/{autoId}
+// stores model, tier, needsSearch, tool calls, action, messages, token/cache usage, latency, error.
+
+// compactions/{autoId}
+// append-only compaction snapshots with oldCursorTs/newCursorTs and token usage.
 ```

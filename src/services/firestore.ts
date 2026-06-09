@@ -1,4 +1,4 @@
-import { getFirestore, FieldValue, type Firestore } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, type Firestore, type Query } from "firebase-admin/firestore";
 import type { User } from "../global.d.ts";
 import { todayDateStr } from "../libs/time.js";
 import {
@@ -221,4 +221,171 @@ export async function getDiaryEntries(date: string): Promise<DiaryEntry[]> {
 
 export async function writeGeneratedDiary(date: string, diary: string): Promise<void> {
   await db().collection("diary").doc(date).set({ diary, generatedAt: Date.now() }, { merge: true });
+}
+
+// ---------------------------------------------------------------------------
+// Single-group agent runtime persistence
+// ---------------------------------------------------------------------------
+
+export interface RuntimeGroupStateDoc {
+  summary: string;
+  summaryCursorTs: number;
+  lastProcessedMessageId?: number;
+  lastCompactedAt?: number;
+  updatedAt: number;
+}
+
+export interface RuntimeMediaRef {
+  type: string;
+  source?: string;
+  fileId?: string;
+  thumbnailFileId?: string;
+  emoji?: string;
+  filename?: string;
+  title?: string;
+}
+
+export interface RuntimeReplyRef {
+  uid: string;
+  name: string;
+  username?: string;
+  text?: string;
+  messageId?: number;
+}
+
+export interface RuntimeEventRecord {
+  chatId: string;
+  messageId?: number;
+  updateId?: number;
+  kind: "user_message" | "edited_message" | "bot_message" | "command" | "system";
+  uid: string;
+  name: string;
+  username?: string;
+  text: string;
+  mediaRefs: RuntimeMediaRef[];
+  urls: string[];
+  replyTo?: RuntimeReplyRef;
+  ts: number;
+  ignoredReason?: string;
+}
+
+export interface RuntimeTurnToolCall {
+  name: string;
+  argsPreview?: string;
+  resultPreview?: string;
+}
+
+export interface RuntimeTurnRecord {
+  kind: "passive" | "proactive" | "retry" | "subagent" | "compaction";
+  startedAt: number;
+  completedAt: number;
+  model: string;
+  tier?: "simple" | "complex" | "tech";
+  needsSearch: boolean;
+  toolCalls: RuntimeTurnToolCall[];
+  action: "send" | "dismiss" | "error";
+  messages: string[];
+  stickerFileId?: string | null;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface RuntimeCompactionRecord {
+  oldCursorTs: number;
+  newCursorTs: number;
+  summary: string;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: number;
+}
+
+function stripUndefined<T extends Record<string, unknown>>(obj: T): T {
+  for (const key of Object.keys(obj)) {
+    if (obj[key] === undefined) {
+      delete obj[key];
+    }
+  }
+  return obj;
+}
+
+export async function loadRuntimeGroupState(): Promise<RuntimeGroupStateDoc> {
+  const snap = await db().collection("runtime").doc("group").get();
+  if (!snap.exists) {
+    return { summary: "", summaryCursorTs: 0, updatedAt: Date.now() };
+  }
+  const data = snap.data() ?? {};
+  return {
+    summary: typeof data.summary === "string" ? data.summary : "",
+    summaryCursorTs: typeof data.summaryCursorTs === "number" ? data.summaryCursorTs : 0,
+    ...(typeof data.lastProcessedMessageId === "number"
+      ? { lastProcessedMessageId: data.lastProcessedMessageId }
+      : {}),
+    ...(typeof data.lastCompactedAt === "number" ? { lastCompactedAt: data.lastCompactedAt } : {}),
+    updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : Date.now(),
+  };
+}
+
+export async function writeRuntimeGroupState(patch: Partial<RuntimeGroupStateDoc>): Promise<void> {
+  await db()
+    .collection("runtime")
+    .doc("group")
+    .set(stripUndefined({ ...patch, updatedAt: Date.now() }), { merge: true });
+}
+
+export async function appendRuntimeEvent(record: RuntimeEventRecord): Promise<void> {
+  await db()
+    .collection("events")
+    .add(stripUndefined({ ...record }) as Record<string, unknown>);
+}
+
+export async function loadRecentRuntimeEvents(
+  params: {
+    afterTs?: number;
+    limit?: number;
+    newestFirst?: boolean;
+  } = {},
+): Promise<RuntimeEventRecord[]> {
+  let query: Query = db().collection("events");
+  if (params.afterTs != null) {
+    query = query.where("ts", ">", params.afterTs);
+  }
+  const newestFirst = params.newestFirst ?? false;
+  const snap = await query
+    .orderBy("ts", newestFirst ? "desc" : "asc")
+    .limit(params.limit ?? 240)
+    .get();
+  const records = snap.docs.map((doc) => doc.data() as RuntimeEventRecord);
+  return newestFirst ? records.reverse() : records;
+}
+
+export async function appendTurnRecord(record: RuntimeTurnRecord): Promise<void> {
+  await db()
+    .collection("turns")
+    .add(stripUndefined({ ...record }) as Record<string, unknown>);
+}
+
+export async function loadRecentTurnRecords(
+  params: {
+    afterTs?: number;
+    limit?: number;
+  } = {},
+): Promise<RuntimeTurnRecord[]> {
+  let query: Query = db().collection("turns");
+  if (params.afterTs != null) {
+    query = query.where("startedAt", ">", params.afterTs);
+  }
+  const snap = await query
+    .orderBy("startedAt", "asc")
+    .limit(params.limit ?? 120)
+    .get();
+  return snap.docs.map((doc) => doc.data() as RuntimeTurnRecord);
+}
+
+export async function appendCompactionRecord(record: RuntimeCompactionRecord): Promise<void> {
+  await db()
+    .collection("compactions")
+    .add(stripUndefined({ ...record }) as Record<string, unknown>);
 }
