@@ -2,7 +2,8 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAiGateway } from "ai-gateway-provider";
 import { createUnified } from "ai-gateway-provider/providers/unified";
 import { generateText, tool, type LanguageModel, stepCountIs } from "ai";
-import { tavilySearch, tavilyExtract } from "@tavily/ai-sdk";
+import { tavilyExtract } from "@tavily/ai-sdk";
+import { tavily, type TavilySearchOptions, type TavilySearchResponse } from "@tavily/core";
 import { z } from "zod/v4";
 import config from "../configs/env.js";
 import {
@@ -60,6 +61,7 @@ function xmlEscape(text: string): string {
 const SESSION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SESSION_MEDIA_CACHE_MAX = 1000;
 const SESSION_URL_CACHE_MAX = 1000;
+const WEB_SEARCH_STEP_TOOL_NAME = "webSearch";
 
 const mediaDescriptionCache = new Map<string, { value: string | null; ts: number }>();
 const urlContentCache = new Map<string, { value: string | null; ts: number }>();
@@ -148,6 +150,59 @@ function extractUsage(result: unknown): {
         : {}),
     ...(typeof cachedInputTokens === "number" ? { cachedInputTokens } : {}),
   };
+}
+
+function buildWebSearchTool(options: TavilySearchOptions) {
+  const client = tavily({ apiKey: config.tavilyApiKey, clientSource: "ai-sdk" });
+
+  return tool({
+    description:
+      "联网搜索实时信息。适用于新闻、时效性事实、最新版本/API 变更、当前数据和需要核查的内容。",
+    inputSchema: z.object({
+      query: z.string().describe("要搜索的关键词或问题"),
+      searchDepth: z
+        .enum(["basic", "advanced", "fast", "ultra-fast"])
+        .optional()
+        .describe("搜索深度，可选"),
+      timeRange: z
+        .enum(["year", "month", "week", "day", "y", "m", "w", "d"])
+        .optional()
+        .describe("时间范围，可选"),
+      exactMatch: z.boolean().optional().describe("是否要求短语精确匹配"),
+    }),
+    execute: async ({ query, searchDepth, timeRange, exactMatch }) => {
+      try {
+        const result = await client.search(query, {
+          ...options,
+          ...(searchDepth ? { searchDepth } : {}),
+          ...(timeRange ? { timeRange } : {}),
+          ...(exactMatch != null ? { exactMatch } : {}),
+        });
+        logger.info(
+          {
+            query,
+            results: result.results.length,
+            hasAnswer: Boolean(result.answer),
+            requestId: result.requestId,
+          },
+          "webSearch tool succeeded",
+        );
+        return {
+          ok: true,
+          ...result,
+        } satisfies TavilySearchResponse & { ok: true };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        logger.warn({ err, query }, "webSearch tool failed");
+        return {
+          ok: false,
+          query,
+          error: `联网搜索失败：${error}`,
+          results: [],
+        };
+      }
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +724,14 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     },
   });
 
+  const webSearchTool =
+    allowWebSearch === false
+      ? disabledWebSearchTool
+      : buildWebSearchTool({
+          apiKey: config.tavilyApiKey,
+          maxResults: 3,
+        });
+
   const startSubagentTool = tool({
     description:
       "启动一次性 helper agent 来处理长链接、媒体描述或技术检索。helper 不能发群消息，只返回短摘要，避免长工具结果污染主上下文。",
@@ -721,10 +784,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
             "<subagent_system><role>你是一次性研究 helper，不是群聊人格。</role><rules><rule>不要发 Telegram 消息。</rule><rule>不要保存记忆、写日记或设置昵称。</rule><rule>只用工具收集信息，然后输出简洁中文摘要。</rule><rule>输出必须短，保留关键证据和不确定性。</rule></rules></subagent_system>",
           prompt: `<subagent_task type="${xmlEscape(task_type)}"><question>${xmlEscape(question)}</question><refs>${xmlEscape((refs ?? []).join("\n"))}</refs><current_urls>${xmlEscape([...allowedUrlSet].join("\n"))}</current_urls><current_media>${xmlEscape([...allowedMediaMap.keys()].join("\n"))}</current_media></subagent_task>`,
           tools: {
-            webSearch:
-              allowWebSearch === false
-                ? disabledWebSearchTool
-                : tavilySearch({ apiKey: config.tavilyApiKey, maxResults: 3 }),
+            webSearch: webSearchTool,
             fetchUrlContent: subagentFetchUrlTool,
             describeTelegramMedia: subagentDescribeMediaTool,
           },
@@ -763,16 +823,23 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       sendSticker: sendStickerTool,
       describeTelegramMedia: describeTelegramMediaTool,
       fetchUrlContent: fetchUrlContentTool,
-      webSearch:
-        allowWebSearch === false
-          ? disabledWebSearchTool
-          : tavilySearch({
-              apiKey: config.tavilyApiKey,
-              maxResults: 3,
-            }),
+      webSearch: webSearchTool,
       startSubagent: startSubagentTool,
     },
     stopWhen: stepCountIs(5),
+    prepareStep: async ({ stepNumber }) => {
+      if (stepNumber === 0 && needsSearch && allowWebSearch !== false) {
+        logger.info(
+          { tier, needsSearch, stepNumber },
+          "generateAiTurn: forcing webSearch first step",
+        );
+        return {
+          toolChoice: { type: "tool" as const, toolName: WEB_SEARCH_STEP_TOOL_NAME },
+          activeTools: [WEB_SEARCH_STEP_TOOL_NAME],
+        };
+      }
+      return undefined;
+    },
   };
   if (maxTokens != null) {
     generateParams.maxOutputTokens = maxTokens;
@@ -816,15 +883,6 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     );
     if (sentMessages.length > 0 && allowWebSearch !== false && !mandatorySearchHint) {
       return generateAiTurn({ ...opts, mandatorySearchHint: true });
-    }
-    if (sentMessages.length > 0 && mandatorySearchHint) {
-      return {
-        action: "send" as const,
-        messages: ["这个需要先查一下实时信息，但本喵这次搜索没稳定跑起来，先不乱说喵"],
-        stickerFileId: null,
-        metrics,
-        toolCallNames,
-      };
     }
   }
 
