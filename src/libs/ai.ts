@@ -50,12 +50,20 @@ export interface RichMediaRef {
 }
 
 function xmlEscape(text: string): string {
-  return text
+  return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function sanitizePromptText(text: string): string {
+  return text
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
+    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    .replace(/\r\n?/g, "\n");
 }
 
 const SESSION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
