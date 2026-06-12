@@ -1,4 +1,5 @@
 import config from "../configs/env.js";
+import { APICallError } from "ai";
 import {
   appendCompactionRecord,
   appendRuntimeEvent,
@@ -393,14 +394,42 @@ class SingleGroupRuntime {
         afterTs: runtime.summaryCursorTs,
         limit: 120,
       });
-      const result = await generateConversationCompaction({
-        previousSummary: runtime.summary,
-        eventText: eventsToCompact.map(formatRuntimeEvent).join("\n"),
-        turnText: turns
-          .filter((turn) => turn.startedAt <= newCursorTs)
-          .map(formatTurnRecord)
-          .join("\n"),
-      });
+      const eventText = eventsToCompact.map(formatRuntimeEvent).join("\n");
+      const turnText = turns
+        .filter((turn) => turn.startedAt <= newCursorTs)
+        .map(formatTurnRecord)
+        .join("\n");
+
+      let result: Awaited<ReturnType<typeof generateConversationCompaction>>;
+      try {
+        result = await generateConversationCompaction({
+          previousSummary: runtime.summary,
+          eventText,
+          turnText,
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            oldCursorTs: runtime.summaryCursorTs,
+            newCursorTs,
+            compactedEvents: eventsToCompact.length,
+            previousSummaryLength: runtime.summary.length,
+            eventTextLength: eventText.length,
+            turnTextLength: turnText.length,
+            ...(APICallError.isInstance(err)
+              ? {
+                  statusCode: err.statusCode,
+                  url: err.url,
+                  responseBody: err.responseBody,
+                  requestBodyValues: err.requestBodyValues,
+                }
+              : {}),
+            err,
+          },
+          "runtime compaction failed",
+        );
+        throw err;
+      }
 
       await appendCompactionRecord({
         oldCursorTs: runtime.summaryCursorTs,
