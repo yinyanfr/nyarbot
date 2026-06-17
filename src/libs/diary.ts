@@ -109,7 +109,7 @@ function hasReachedDiaryPublishTime(): boolean {
   return current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2);
 }
 
-function buildDiarySystemPrompt(): string {
+function buildDiarySystemPrompt(date: string): string {
   return `<diary_generation_system>
   <persona>${xmlEscape(getPersonaLabel())}</persona>
   <task>
@@ -154,7 +154,7 @@ function buildDiarySystemPrompt(): string {
     <item>禁止诗意展望、格言、祝愿和主题总结。</item>
   </ending>
   <output>
-    <item>标题固定为“{date} 猫娘日记”。</item>
+    <item>标题固定为“${xmlEscape(date)} 猫娘日记”。</item>
     <item>只输出标题和正文。</item>
     <item>默认 600 至 1000 字。</item>
     <item>素材少时允许短至 100 至 300 字，不得注水。</item>
@@ -179,6 +179,10 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
   const activeObservations = await listActiveDiaryObservationsByDate(date);
   const selected = selectObservationsForDiary(activeObservations);
   const legacyEntries = activeObservations.length === 0 ? await getDiaryEntries(date) : [];
+  if (selected.length === 0 && legacyEntries.length === 0) {
+    logger.info({ date }, "diary: no observations or legacy entries for date, returning null");
+    return null;
+  }
   const observationIds = selected.map((observation) => observation.id);
   const requestPayload = buildDiaryRequest(
     date,
@@ -197,7 +201,7 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
   try {
     const result = await generateText({
       model: geminiDiaryModel,
-      system: buildDiarySystemPrompt(),
+      system: buildDiarySystemPrompt(date),
       messages: [{ role: "user", content: requestPayload }],
     });
 
