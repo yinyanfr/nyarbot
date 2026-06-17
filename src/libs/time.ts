@@ -25,6 +25,24 @@ function formatPromptTimeForTimezone(timeZone: string): string {
   return `${t.format("YYYY年MM月DD日")} 周${WEEKDAYS[t.day()]} ${t.format("HH:mm")} (${timeZone}, UTC${tzOffset})`;
 }
 
+export function dateStrForTimezone(tsMs: number, timeZone: string): string {
+  return dayjs(tsMs).tz(timeZone).format("YYYY-MM-DD");
+}
+
+export function parseTimestampInputForTimezone(value: string, timeZone: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  // If the input already carries an explicit offset/Z, trust that absolute time.
+  if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(trimmed)) {
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  const zoned = dayjs.tz(trimmed, timeZone);
+  return zoned.isValid() ? zoned.valueOf() : null;
+}
+
 export function now(): dayjs.Dayjs {
   return dayjs().tz(TZ);
 }

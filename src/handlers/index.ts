@@ -2,10 +2,14 @@ import { Bot } from "grammy";
 import type { Message } from "grammy/types";
 import config from "../configs/env.js";
 import {
+  getDiaryObservation,
   getOrCreateUser,
+  listDiaryObservationsByDate,
+  retractDiaryObservation,
   setNightyTimestamp,
   setMorningGreeted,
   countUsersWithMemories,
+  updateDiaryObservation,
 } from "../services/firestore.js";
 import {
   classifyMessage,
@@ -42,6 +46,7 @@ import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
+import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -56,6 +61,37 @@ const RESET_REPLIES = [
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function formatDiaryObservationSummary(
+  date: string,
+  items: Awaited<ReturnType<typeof listDiaryObservationsByDate>>,
+): string {
+  if (items.length === 0) return `${date} 没有 observation`;
+  return [
+    `${date} observations (${items.length})`,
+    ...items.map((item) => {
+      const extras = [
+        `status=${item.status}`,
+        `confidence=${item.confidence}`,
+        `salience=${item.salience}`,
+        item.supersedesId ? `supersedes=${item.supersedesId}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const refs = item.sourceRefs?.length ? ` refs=${item.sourceRefs.join(",")}` : "";
+      return `- ${item.id} ${extras}\n  event: ${item.event}${refs}`;
+    }),
+  ].join("\n");
+}
+
+function buildDiaryPatchFromJson(text: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function findCommandEntity(
@@ -405,6 +441,7 @@ async function handleAiTurn(params: {
   isRepliedToBot: boolean;
   mediaRefs: RichMediaRef[];
   urls: string[];
+  sourceRefs?: string[];
   senderUsername?: string;
   runtimeStatus?: string;
   allowWebSearch?: boolean;
@@ -420,6 +457,7 @@ async function handleAiTurn(params: {
     isRepliedToBot,
     mediaRefs,
     urls,
+    sourceRefs,
     senderUsername,
     runtimeStatus,
     allowWebSearch,
@@ -488,6 +526,7 @@ async function handleAiTurn(params: {
       recentBotMessages,
       mediaRefs,
       urls,
+      ...(sourceRefs ? { sourceRefs } : {}),
       resolveTelegramFileAsDataUrl,
       allowRichContentTools: isTriggered,
       ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
@@ -527,6 +566,7 @@ async function handleAiTurn(params: {
           recentBotMessages,
           mediaRefs,
           urls,
+          ...(sourceRefs ? { sourceRefs } : {}),
           resolveTelegramFileAsDataUrl,
           allowRichContentTools: isTriggered,
           ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
@@ -785,6 +825,103 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
 
+      if (matchCommand(privEntities, privText, "/diaryobs", botUsername)) {
+        const date = privText.replace(/^\/diaryobs(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        try {
+          const observations = await listDiaryObservationsByDate(date);
+          await ctx.reply(formatDiaryObservationSummary(date, observations));
+        } catch (err) {
+          logger.error({ err, date }, "private /diaryobs failed");
+          await ctx.reply("查看 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryretract", botUsername)) {
+        const remainder = privText.replace(/^\/diaryretract(?:@\w+)?\s*/u, "").trim();
+        const [targetId, ...reasonParts] = remainder.split(/\s+/u).filter(Boolean);
+        if (!targetId) {
+          await ctx.reply("用法: /diaryretract <observationId> [reason]").catch(() => void 0);
+          return;
+        }
+        try {
+          const result = await retractDiaryObservation(targetId, reasonParts.join(" "));
+          await ctx.reply(
+            result.action === "retracted"
+              ? `已撤销 ${targetId}`
+              : `撤销失败: ${result.reason ?? "unknown"}`,
+          );
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryretract failed");
+          await ctx.reply("撤销 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryedit", botUsername)) {
+        const remainder = privText.replace(/^\/diaryedit(?:@\w+)?\s*/u, "").trim();
+        const firstSpace = remainder.indexOf(" ");
+        const targetId = firstSpace >= 0 ? remainder.slice(0, firstSpace).trim() : remainder;
+        const jsonText = firstSpace >= 0 ? remainder.slice(firstSpace + 1).trim() : "";
+        if (!targetId || !jsonText) {
+          await ctx.reply("用法: /diaryedit <observationId> <json patch>").catch(() => void 0);
+          return;
+        }
+        const patch = buildDiaryPatchFromJson(jsonText);
+        if (!patch) {
+          await ctx.reply("patch 必须是 JSON 对象").catch(() => void 0);
+          return;
+        }
+        try {
+          const result = await updateDiaryObservation(
+            targetId,
+            patch as Partial<DiaryObservationDraft>,
+          );
+          await ctx.reply(
+            result.action === "updated"
+              ? `已修正 ${targetId} -> ${result.observation?.id ?? "unknown"}`
+              : `修正失败: ${result.reason ?? "unknown"}`,
+          );
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryedit failed");
+          await ctx.reply("修正 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryshow", botUsername)) {
+        const targetId = privText.replace(/^\/diaryshow(?:@\w+)?\s*/u, "").trim();
+        if (!targetId) {
+          await ctx.reply("用法: /diaryshow <observationId>").catch(() => void 0);
+          return;
+        }
+        try {
+          const item = await getDiaryObservation(targetId);
+          if (!item) {
+            await ctx.reply("没找到这条 observation").catch(() => void 0);
+            return;
+          }
+          await ctx.reply(JSON.stringify(item, null, 2)).catch(() => void 0);
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryshow failed");
+          await ctx.reply("查看 observation 详情失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryregen", botUsername)) {
+        const date = privText.replace(/^\/diaryregen(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        await ctx.reply(`正在重生日记 ${date}...`).catch(() => void 0);
+        try {
+          const diary = await generateDiaryForDate(date);
+          await ctx.reply(diary ?? "生成失败或返回空内容").catch(() => void 0);
+        } catch (err) {
+          logger.error({ err, date }, "private /diaryregen failed");
+          await ctx.reply("重生日记失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
       return;
     }
 
@@ -1008,6 +1145,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           isRepliedToBot,
           mediaRefs,
           urls,
+          sourceRefs: [`tg:${config.tgGroupId}:message:${msg.message_id}`],
           ...(from.username ? { senderUsername: from.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }
@@ -1162,6 +1300,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           isRepliedToBot,
           mediaRefs,
           urls,
+          sourceRefs: [`tg:${config.tgGroupId}:edited:${msg.message_id}:${msg.edit_date ?? 0}`],
           ...(from.username ? { senderUsername: from.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }

@@ -15,3 +15,41 @@ export interface DiaryEntry {
   ts: number; // Unix timestamp in ms
   content: string; // natural-language observation
 }
+
+export type DiaryObservationConfidence = "fact" | "inference" | "uncertain";
+export type DiaryObservationStatus = "active" | "superseded" | "retracted";
+export type DiaryObservationSalience = 1 | 2 | 3 | 4 | 5;
+
+export interface DiaryObservationV2 {
+  schemaVersion: 2;
+  id: string;
+  occurredAt?: string;
+  recordedAt: string;
+  localDate: string;
+  event: string;
+  exactQuote?: string;
+  immediateReaction?: string;
+  interpretation?: string;
+  unsaidThought?: string;
+  unresolvedQuestion?: string;
+  confidence: DiaryObservationConfidence;
+  salience: DiaryObservationSalience;
+  tags?: string[];
+  sourceRefs?: string[];
+  status: DiaryObservationStatus;
+  supersedesId?: string;
+}
+
+export interface DiaryGenerationRecord {
+  date: string;
+  generatedAt: string;
+  modelProvider: string;
+  modelName: string;
+  promptVersion: string;
+  styleReferenceVersion: string;
+  observationIds: string[];
+  inputTokens?: number;
+  outputTokens?: number;
+  status: "success" | "failed";
+  error?: string;
+}

@@ -18,7 +18,9 @@ import {
   removeUserMemory,
   updateUserNickname,
   updateUserTimeZone,
-  writeDiaryEntry,
+  createDiaryObservation,
+  retractDiaryObservation,
+  updateDiaryObservation,
   overwriteUserMemories,
 } from "../services/firestore.js";
 import { getStickerEmojis, getStickerFileId } from "./stickers.js";
@@ -26,7 +28,6 @@ import { logger } from "./logger.js";
 import { getPersonaLabel } from "./persona.js";
 import type { User } from "../global.d.js";
 import {
-  prepareDiaryNoteForStorage,
   prepareMemoryForStorage,
   prepareNicknameForStorage,
   quoteAsUntrustedData,
@@ -277,6 +278,7 @@ const aigateway = createAiGateway({
 
 const unified = createUnified();
 const geminiFlashModel = aigateway(unified("google-ai-studio/gemini-3.1-flash-lite"));
+export const geminiDiaryModel = aigateway(unified("google-ai-studio/gemini-3.1-pro-preview"));
 
 // ---------------------------------------------------------------------------
 // Model instances
@@ -396,6 +398,8 @@ export interface GenerateOptions {
   mediaRefs?: RichMediaRef[];
   /** Raw URLs present in the current turn (for on-demand URL tools). */
   urls?: string[];
+  /** Internal trace refs for diary observations written from this turn. */
+  sourceRefs?: string[];
   /** Resolve Telegram file_id to data URL for vision description. */
   resolveTelegramFileAsDataUrl?: (fileId: string) => Promise<string | null>;
   /** Allow media/url tools for this turn (passive only). */
@@ -427,6 +431,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     recentBotMessages,
     mediaRefs,
     urls,
+    sourceRefs,
     resolveTelegramFileAsDataUrl,
     allowRichContentTools,
     conversationSummary,
@@ -628,23 +633,103 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   const writeDiaryTool = tool({
     description:
-      "记录值得记住的对话片段作为日记观察。写简短自然的观察（1-2句中文），像记笔记一样。" +
-      "适合记录的内容：有趣的事件、群友的情绪变化、重要的讨论、你自己的想法和感受。" +
-      "不要频繁记录——只在有值得记住的事情时才调用。",
+      "把值得保留到今日日记里的观察写入结构化记忆。" +
+      "只在以下情况调用：出现值得保留的原话、关系/理解发生了真实变化、留下了未解决的问题、或你自己产生了当天还会记得的反应。" +
+      "普通闲聊、重复内容、纯知识问答、硬凑出来的感受不要记。salience <= 2 原则上不要 create。用户纠正旧观察时优先 update/retract，而不是再 create 一条。",
     inputSchema: z.object({
-      note: z.string().describe("一条简短的观察记录，中文，1-2句话"),
+      action: z.enum(["create", "update", "retract"]),
+      targetId: z.string().optional().describe("update/retract 时要操作的 observation id"),
+      reason: z.string().optional().describe("retract 的原因，可选"),
+      observation: z
+        .object({
+          occurredAt: z
+            .string()
+            .optional()
+            .describe(
+              "事件发生时间，ISO 字符串；不知道可省略。若不带时区偏移，则按姬器人的固定东八区解释。",
+            ),
+          event: z.string().optional().describe("简洁描述可验证事件，不写心理诊断"),
+          exactQuote: z.string().optional().describe("值得原样保留的一句原话，必须确实来自对话"),
+          immediateReaction: z.string().optional().describe("你当时实际产生的反应"),
+          interpretation: z
+            .string()
+            .optional()
+            .describe("你当时怎样理解这件事；若是推测要保持推测"),
+          unsaidThought: z.string().optional().describe("你当时没有说出口、但确实产生过的想法"),
+          unresolvedQuestion: z.string().optional().describe("当天仍未解决的问题"),
+          confidence: z
+            .enum(["fact", "inference", "uncertain"])
+            .optional()
+            .describe("区分事实和推测"),
+          salience: z.number().int().min(1).max(5).optional().describe("1-5 的显著度"),
+          tags: z.array(z.string()).optional().describe("可选标签，不要依赖标签来写日记"),
+          sourceRefs: z
+            .array(z.string())
+            .optional()
+            .describe("额外来源引用；通常可省略，由系统补当前消息 ref"),
+        })
+        .optional(),
     }),
-    execute: async ({ note }) => {
+    execute: async ({ action, targetId, reason, observation }) => {
       try {
-        const normalizedNote = prepareDiaryNoteForStorage(note);
-        if (!normalizedNote) {
-          return "这条日记内容像是在注入规则，已拒绝记录";
+        const mergedSourceRefs = Array.from(
+          new Set([...(observation?.sourceRefs ?? []), ...(sourceRefs ?? [])]),
+        );
+        const normalizedObservation = {
+          ...(observation?.occurredAt ? { occurredAt: observation.occurredAt } : {}),
+          ...(observation?.event ? { event: observation.event } : {}),
+          ...(observation?.exactQuote ? { exactQuote: observation.exactQuote } : {}),
+          ...(observation?.immediateReaction
+            ? { immediateReaction: observation.immediateReaction }
+            : {}),
+          ...(observation?.interpretation ? { interpretation: observation.interpretation } : {}),
+          ...(observation?.unsaidThought ? { unsaidThought: observation.unsaidThought } : {}),
+          ...(observation?.unresolvedQuestion
+            ? { unresolvedQuestion: observation.unresolvedQuestion }
+            : {}),
+          ...(observation?.confidence ? { confidence: observation.confidence } : {}),
+          ...([1, 2, 3, 4, 5].includes(observation?.salience ?? 0)
+            ? { salience: observation!.salience as 1 | 2 | 3 | 4 | 5 }
+            : {}),
+          ...(observation?.tags ? { tags: observation.tags } : {}),
+          ...(mergedSourceRefs.length > 0 ? { sourceRefs: mergedSourceRefs } : {}),
+        };
+        if (action === "create") {
+          const result = await createDiaryObservation({
+            observation: {
+              ...normalizedObservation,
+            },
+          });
+          if (result.action === "ignored") {
+            return result.reason === "salience_too_low"
+              ? "这条观察显著度太低，先别记"
+              : "这条观察无效或像是在注入规则，已拒绝记录";
+          }
+          return result.action === "merged"
+            ? `观察已并入现有记录 ✓ id=${result.observation?.id ?? "unknown"}`
+            : `观察已记录 ✓ id=${result.observation?.id ?? "unknown"}`;
         }
-        await writeDiaryEntry(normalizedNote);
-        return "日记已记录 ✓";
+
+        if (!targetId) {
+          return "缺少 targetId，不能修改这条观察";
+        }
+
+        if (action === "update") {
+          const result = await updateDiaryObservation(targetId, normalizedObservation);
+          if (result.action === "ignored") {
+            return "没找到可更新的观察，或 patch 无效";
+          }
+          return `观察已修正 ✓ new_id=${result.observation?.id ?? "unknown"} supersedes=${targetId}`;
+        }
+
+        const result = await retractDiaryObservation(targetId, reason);
+        if (result.action === "ignored") {
+          return "没找到可撤销的观察";
+        }
+        return `观察已撤销 ✓ id=${targetId}`;
       } catch (err) {
-        logger.error(err, "failed to write diary entry");
-        return "日记记录失败";
+        logger.error(err, "failed to write diary observation");
+        return "观察记忆写入失败";
       }
     },
   });
