@@ -17,6 +17,7 @@ import {
   updateUserMemory,
   removeUserMemory,
   updateUserNickname,
+  updateUserTimeZone,
   writeDiaryEntry,
   overwriteUserMemories,
 } from "../services/firestore.js";
@@ -32,6 +33,7 @@ import {
   safePromptList,
   safePromptValue,
 } from "./prompt-safety.js";
+import { isValidTimezone } from "./time.js";
 
 export type RichMediaType =
   | "image"
@@ -459,6 +461,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     wasMentioned: wasMentioned ?? false,
     wasRepliedTo: wasRepliedTo ?? false,
     recentBotMessages: recentBotMessages ?? [],
+    ...(userContext.timeZone ? { userTimeZone: userContext.timeZone } : {}),
     needsSearch,
     allowMediaTools: (allowRichContentTools ?? false) && (allowMediaTools ?? true),
     ...(runtimeStatus ? { runtimeStatus } : {}),
@@ -569,6 +572,34 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       } catch (err) {
         logger.error(err, "failed to set nickname");
         return "昵称设置失败";
+      }
+    },
+  });
+
+  const setTimezoneTool = tool({
+    description:
+      "当群友明确提到自己的时区，或明确说自己在某个足以稳定推断 IANA 时区的地区，并希望你记住时调用。" +
+      "uid 只能从 system prompt 中最近出现过的群友列表选取。只保存标准 IANA 时区，例如 Asia/Tokyo。",
+    inputSchema: z.object({
+      uid: z.string().describe("该群友的 Telegram 用户 ID"),
+      timeZone: z
+        .string()
+        .describe("该群友的 IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/Los_Angeles"),
+    }),
+    execute: async ({ uid, timeZone }) => {
+      if (!allowedUids.has(uid)) {
+        return "未找到该群友喵？uid 对不上";
+      }
+      const normalizedTimeZone = timeZone.trim();
+      if (!isValidTimezone(normalizedTimeZone)) {
+        return "这个时区不是有效的 IANA 时区，已拒绝保存";
+      }
+      try {
+        await updateUserTimeZone(uid, normalizedTimeZone);
+        return "时区已保存 ✓";
+      } catch (err) {
+        logger.error(err, "failed to set timezone");
+        return "时区保存失败";
       }
     },
   });
@@ -826,6 +857,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       dismiss: dismissTool,
       saveMemory: saveMemoryTool,
       setNickname: setNicknameTool,
+      setTimezone: setTimezoneTool,
       deleteMemory: deleteMemoryTool,
       writeDiary: writeDiaryTool,
       sendSticker: sendStickerTool,

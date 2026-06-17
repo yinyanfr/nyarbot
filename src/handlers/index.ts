@@ -1056,18 +1056,24 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    // Push the edited text into the buffer so the AI sees the correction
-    let editedBuffer = rawText;
+    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
     if (replyTo && !isRepliedToBot) {
-      const replyText = replyTo.text ?? replyTo.caption ?? "";
-      const replyFirstName = replyTo.from?.first_name ?? "某人";
-      const replyUsername = replyTo.from?.username;
-      const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
-      if (replyText) {
-        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyName}: "${replyText.slice(0, 100)}"] ${rawText}`;
+      replyToInfo = {
+        uid: replyTo.from?.id?.toString() ?? "",
+        name: replyTo.from?.first_name ?? "某人",
+        text: replyTo.text ?? replyTo.caption ?? "",
+      };
+      if (replyTo.from?.username) {
+        replyToInfo.username = replyTo.from.username;
       }
     }
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    const editedBuffer = buildBufferLine({
+      rawText,
+      mediaRefs,
+      urls,
+      ...(replyToInfo ? { replyToInfo } : {}),
+    });
     const runtimeDecision = await groupRuntime.ingestUserMessage({
       chatId: config.tgGroupId,
       messageId: msg.message_id,
@@ -1080,9 +1086,22 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       text: editedBuffer || rawText,
       mediaRefs,
       urls,
+      ...(replyToInfo
+        ? {
+            replyTo: {
+              uid: replyToInfo.uid,
+              name: replyToInfo.name,
+              ...(replyToInfo.username ? { username: replyToInfo.username } : {}),
+              text: replyToInfo.text,
+              ...(replyTo?.message_id != null ? { messageId: replyTo.message_id } : {}),
+            },
+          }
+        : {}),
       ts: Date.now(),
       triggered: isMentioned || isRepliedToBot,
     });
+    if (runtimeDecision.ignoredReason === "non_content_edit") return;
+
     if (editedBuffer && runtimeDecision.accepted) {
       pushMessage(
         config.tgGroupId,

@@ -17,6 +17,7 @@ import { generateConversationCompaction } from "./ai.js";
 import { logger } from "./logger.js";
 
 type Timer = ReturnType<typeof setTimeout>;
+const MESSAGE_CONTENT_SIGNATURE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface GroupRuntimeState {
   running: boolean;
@@ -108,6 +109,26 @@ function formatTurnRecord(turn: RuntimeTurnRecord): string {
   return `[${date}] ${turn.kind} ${turn.action} model=${turn.model} tier=${turn.tier ?? "n/a"} tools=${tools} messages=${messages}`;
 }
 
+function buildMessageContentSignature(input: IngestMessageInput): string {
+  const media = input.mediaRefs
+    .map((mediaRef) =>
+      [mediaRef.source, mediaRef.type, mediaRef.fileId ?? "", mediaRef.thumbnailFileId ?? ""].join(
+        ":",
+      ),
+    )
+    .join("|");
+  const urls = [...input.urls].sort().join("|");
+  const replyTo = input.replyTo
+    ? [input.replyTo.uid, input.replyTo.messageId ?? "", input.replyTo.text].join(":")
+    : "";
+  return JSON.stringify({
+    text: input.text.trim(),
+    media,
+    urls,
+    replyTo,
+  });
+}
+
 class SingleGroupRuntime {
   readonly state: GroupRuntimeState = {
     running: false,
@@ -121,6 +142,7 @@ class SingleGroupRuntime {
   };
 
   private readonly seenMessageKeys = new Map<string, number>();
+  private readonly messageContentSignatures = new Map<string, { signature: string; ts: number }>();
   private readonly userStats = new Map<string, UserRuntimeStats>();
   private readonly recentRealUserEvents: number[] = [];
   private pendingTurn: ScheduledTurn | null = null;
@@ -178,16 +200,31 @@ class SingleGroupRuntime {
     await this.init();
     const now = input.ts ?? Date.now();
     const messageKey = `${input.chatId}:${input.messageId ?? "none"}:${input.editDate ?? "none"}`;
+    const contentKey = input.messageId != null ? `${input.chatId}:${input.messageId}` : null;
     const oldSeenCutoff = now - 10 * 60 * 1000;
     for (const [key, ts] of this.seenMessageKeys) {
       if (ts < oldSeenCutoff) this.seenMessageKeys.delete(key);
+    }
+    const oldContentCutoff = now - MESSAGE_CONTENT_SIGNATURE_TTL_MS;
+    for (const [key, entry] of this.messageContentSignatures) {
+      if (entry.ts < oldContentCutoff) this.messageContentSignatures.delete(key);
     }
 
     let ignoredReason: string | undefined;
     if (input.messageId != null && this.seenMessageKeys.has(messageKey)) {
       ignoredReason = "duplicate_message";
     }
+    const contentSignature = buildMessageContentSignature(input);
+    if (!ignoredReason && input.kind === "edited_message" && contentKey) {
+      const lastContent = this.messageContentSignatures.get(contentKey);
+      if (lastContent?.signature === contentSignature) {
+        ignoredReason = "non_content_edit";
+      }
+    }
     this.seenMessageKeys.set(messageKey, now);
+    if (contentKey) {
+      this.messageContentSignatures.set(contentKey, { signature: contentSignature, ts: now });
+    }
 
     const stats = this.getUserStats(input.uid);
     stats.recentMessageTs = pruneOlderThan(

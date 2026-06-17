@@ -23,7 +23,10 @@ const MEMORY_MAX_ENTRIES = 30;
 function isValidUser(data: unknown): data is User {
   const d = data as Record<string, unknown>;
   return (
-    typeof d?.uid === "string" && typeof d?.nickname === "string" && Array.isArray(d?.memories)
+    typeof d?.uid === "string" &&
+    typeof d?.nickname === "string" &&
+    Array.isArray(d?.memories) &&
+    (d?.timeZone === undefined || typeof d.timeZone === "string")
   );
 }
 
@@ -77,6 +80,11 @@ export async function updateUserNickname(uid: string, nickname: string): Promise
   const normalizedNickname = prepareNicknameForStorage(nickname);
   if (!normalizedNickname) return;
   await db().collection("users").doc(uid).update({ nickname: normalizedNickname });
+  invalidateUserCache(uid);
+}
+
+export async function updateUserTimeZone(uid: string, timeZone: string): Promise<void> {
+  await db().collection("users").doc(uid).update({ timeZone });
   invalidateUserCache(uid);
 }
 
