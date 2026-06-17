@@ -73,6 +73,45 @@ DeepSeek outputs Markdown (bold, italic, code, links, LaTeX math). Telegram's Bo
 
 When the user @mentions or replies to the bot, silence is almost always wrong — the user expects a response. Retrying with escalating hints ensures the model eventually speaks. For proactive messages, silence is a valid and expected choice, so no retry is needed.
 
+Current retry policy: simple/complex turns retry once; tech turns do not retry to avoid repeating expensive model calls.
+
+### Why a single-group runtime?
+
+The handler still owns Telegram details, but AI scheduling goes through `groupRuntime`. That gives the bot one place for passive/proactive locking, debounce, hot-chat quiet mode, abuse gates, and Firestore turn/event records.
+
+Runtime defaults:
+
+- debounce: 5s initial wait, 5s extension, 30s hard cap
+- hot chat: 10 real user messages in 30s
+- quiet mode: 180s
+- per-user burst limit: more than 8 messages in 30s, then 60s cooldown
+- URL flood: more than 3 URLs in 60s disables search/fetch triggering
+- media flood: more than 5 media items in 60s disables media description for 5 minutes
+
+### Why static system prompt?
+
+Main model calls are arranged for KV-cache friendliness:
+
+```text
+system:
+  static persona + static behavior rules + static XML/tool guidance
+
+user:
+  <conversation_summary_untrusted>
+  <recent_history_untrusted>
+  <retrieved_or_selected_memories>
+  <current_turn>
+  <late_binding>
+```
+
+`buildSystemPrompt()` should not include current time, user memories, recent history, runtime state, or naturalness feedback. Dynamic content belongs in the user-message tail, especially `buildLateBindingPrompt()`. The tool schema is also kept stable; disabled tools return a reason instead of disappearing.
+
+### Why compaction is not diary?
+
+Compaction is working memory: active topics, long-lived facts, unresolved follow-ups, and what the bot already searched/explained. It is stored in `compactions` and `runtime/group.summary`, then injected as untrusted context.
+
+Diary is literary archive written by `writeDiary` and the midnight diary flow. It is not a runtime cursor and should not replace working memory.
+
 ### Why a diary system?
 
 The bot records conversational observations via the `writeDiary` AI tool rather than post-hoc extraction. The model decides what's worth recording based on the conversation context — no rule-based triggers or frequency limits. At midnight (based on `APP_TIMEZONE`), observations are consolidated into a natural first-person catgirl diary using DeepSeek v4 Pro with thinking. The generated diary is pushed to a Hexo blog via GitHub Content API for public reading.
@@ -88,7 +127,7 @@ The bot records conversational observations via the `writeDiary` AI tool rather 
 
 ### In-memory state
 
-The conversation buffer, user cache, update dedup set, and proactive timer state are all in-process memory. A restart loses all conversation context and the proactive checker stops. This is acceptable for a single-group personal bot.
+The conversation buffer, user cache, update dedup set, and proactive timer state are still in-process memory, but conversation recovery no longer depends only on the buffer. Firestore `events` are the append-only fact log, and `runtime/group.summary` plus recent events are the long-context source; the buffer is a hot cache and fast scan window.
 
 ### Logger architecture
 
@@ -150,4 +189,26 @@ interface DiaryEntry {
 // entries: DiaryEntry[] (via arrayUnion)
 // diary?: string (generated diary text)
 // generatedAt?: number (ms since epoch)
+```
+
+### Runtime collections
+
+```typescript
+// runtime/group
+interface RuntimeGroupStateDoc {
+  summary: string;
+  summaryCursorTs: number;
+  lastProcessedMessageId?: number;
+  lastCompactedAt?: number;
+  updatedAt: number;
+}
+
+// events/{autoId}
+// append-only user/edit/command/bot events with URL/media refs and ignoredReason.
+
+// turns/{autoId}
+// model, tier, needsSearch, tool calls, action, messages, token/cache usage, latency, error.
+
+// compactions/{autoId}
+// append-only compaction snapshots with old/new cursors and token usage.
 ```

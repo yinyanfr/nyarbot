@@ -2,6 +2,17 @@
 
 nyarbot 是一个用 TypeScript (ESM) 编写的单群组 Telegram 机器人，拥有可配置的猫娘人设。
 
+## 单群 Runtime
+
+nyarbot 现在仍然只服务 `TG_GROUP_ID` 一个群，但 AI 调度不再由 handler 直接启动。`src/libs/group-runtime.ts` 是全局单群 runtime，负责：
+
+- message-level dedup：按 `chatId + messageId + editDate` 去重，补足 Telegram `update_id` 去重之外的语义。
+- abuse gates：重复文本、单用户突发刷屏、URL flood、媒体 flood 会被记录为 `ignoredReason`，被限流的消息不会触发模型。
+- debounce：被 @ 或回复触发后先等群聊安静，默认 5 秒；新触发会延长，30 秒硬上限。
+- `running` / `dirty` lock：同一时间最多一个 passive/proactive AI turn；运行中有新触发时只标脏，结束后再排队判断。
+- quiet mode：30 秒内真实用户消息达到阈值后进入 3 分钟安静模式；主动插话暂停，普通非 @ / 非回复不触发。
+- Firestore append-only 记录：`events`、`turns`、`compactions` 和 `runtime/group` 是恢复、调试与 compaction 的来源。
+
 ## 数据流
 
 ```
@@ -49,13 +60,17 @@ handlers/index.ts（setupHandlers）
     │     └─ simple → flashNoThinkModel
     │     └─ complex → flashThinkModel
     │     └─ tech → proThinkModel
+    ├─ Runtime 调度（group-runtime.ts）
+    │     ├─ 事件持久化、去重、限流、debounce、running lock
+    │     └─ 构造 summary + recent events 上下文
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
-    │     ├─ 系统提示词（buildSystemPrompt + buildLateBindingPrompt）
+    │     ├─ 静态系统提示词（buildSystemPrompt）
+    │     ├─ 用户消息尾部 late-binding（当前时间、触发态、工具可用性、runtime 状态）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
-│     │           deleteMemory、sendSticker
-│     ├─ 条件：webSearch（tavilySearch，当 needsSearch=true 时）
-│     ├─ 可选：writeDiary → firestore.ts（diary/{date}）
-    │     ├─ 沉默重试（最多 3 次，逐级加强回复提示）
+│     │           deleteMemory、sendSticker、writeDiary、webSearch、
+│     │           describeTelegramMedia、fetchUrlContent、startSubagent
+    │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
+    │     ├─ 沉默重试（simple/complex 1 次；tech 0 次）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
     │     └─ 通过 sendAiMessages 发送（打字指示、消息间隔、贴纸分发）
     └─ 主动插话检查器（proactive.ts，间隔可由环境变量配置）
@@ -81,7 +96,8 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 | `describeTelegramMedia` | 按需通过 `file_id` / `thumbnail_file_id` 获取媒体描述（仅被动触发轮次可用）。     |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                               |
 | `writeDiary`            | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。 |
-| `webSearch`             | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）                             |
+| `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。           |
+| `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。          |
 
 ### AiTurnResult
 
@@ -96,7 +112,7 @@ type AiTurnResult =
 
 ### 沉默重试
 
-当 bot 被触发（@提及或回复）但模型选择 `dismiss` 时，handler 最多重试 3 次。每次重试追加递增的提示：
+当 bot 被触发（@提及或回复）但模型选择 `dismiss` 时，handler 对 simple/complex 最多重试 1 次，tech 不重试。重试追加提示：
 
 > `[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]`
 
@@ -147,7 +163,7 @@ type AiTurnResult =
 
 ### 强制联网搜索
 
-当 `classifyMessage()` 返回 `needsSearch=true` 时，`webSearch` 工具（Tavily）会被包含在工具集中。此外，用户提示词会追加一条强制指令：
+当 `classifyMessage()` 返回 `needsSearch=true` 时，late-binding 会追加强制搜索要求。若模型在没有调用 `webSearch` 的情况下调用了 `send_message`，本轮视为策略违规：自动重试一次并追加更硬的搜索提示；若仍失败，发送保守失败文案，避免凭记忆乱答。
 
 > `<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
 
@@ -155,26 +171,31 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **对话缓冲区**：内存环形缓冲区（每组最多 30 条，每条最多 500 字）。每条用户消息和 bot 回复都会推送。用于 `buildSystemPrompt` 和 `probeGate` 主动插话检查。进程重启后丢失。缓冲区只保留媒体/链接的轻量存在性与引用（包含原始 URL、媒体 file_id），不再预注入 Gemini/Tavily 摘要。命令回复、被电击反应、早安问候、日记通知等特殊 bot 插入消息会带 `kind` 标记写入历史。
+- **Runtime events**：Firestore `events` 是恢复、调试和 compaction 的主要来源，append-only 保存用户消息、编辑、命令、bot 输出和忽略原因。
+- **对话缓冲区**：内存环形缓冲区仍保留为热缓存和 proactive 快速扫描窗口；它不是唯一上下文来源，重启恢复依赖 Firestore runtime events 与 `runtime/group.summary`。
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
+- **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
 
 ## 提示词架构
 
 ### 系统提示词（`buildSystemPrompt`）
 
-每轮构建，包含：
+完全静态，适合 KV cache，包含：
 
 - 人设（名字/读音/身份来自环境变量）与自然度指南（基于真人 vs AI 群聊对比分析）
-- 当前用户上下文（昵称、uid、记忆）
-- 最近群友列表（用于记忆/昵称工具的 uid 验证）
-- 最近聊天历史
+- 工具调用规则、群聊行为规则、安全边界
+- 不包含当前时间、当前用户、记忆、历史、runtime 状态
 
 ### 晚绑定提示词（`buildLateBindingPrompt`）
 
 每轮追加动态反馈：
 
 - bot 是否被 @或回复
+- 当前时间
+- 搜索/媒体工具是否被 runtime 允许
+- hot chat / quiet mode / flood protection 状态
+- 当 `needsSearch=true` 时的 mandatory search 提示
 - 自然度反馈：如果最近的 bot 消息过多以 `。` 结尾，或平均长度 > 40 字，则注入提醒
 
 ### 探测提示词（`buildProbeSystemPrompt`）

@@ -11,6 +11,7 @@ import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
+import { groupRuntime } from "./libs/group-runtime.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
@@ -85,6 +86,9 @@ async function main(): Promise<void> {
         });
       }
       pushMessage(config.tgGroupId, "bot", config.botUsername, text, undefined, kind);
+      groupRuntime.recordBotMessages({ messages: [text] }).catch((err: unknown) => {
+        logger.warn({ err }, "diary: runtime bot event persist failed");
+      });
       touchBotActivity();
     },
     sendChannelText: async (text) => {

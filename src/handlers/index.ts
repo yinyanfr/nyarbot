@@ -41,6 +41,7 @@ import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
+import { groupRuntime } from "../libs/group-runtime.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -405,6 +406,9 @@ async function handleAiTurn(params: {
   mediaRefs: RichMediaRef[];
   urls: string[];
   senderUsername?: string;
+  runtimeStatus?: string;
+  allowWebSearch?: boolean;
+  allowMediaTools?: boolean;
 }): Promise<void> {
   const {
     ctx,
@@ -417,6 +421,9 @@ async function handleAiTurn(params: {
     mediaRefs,
     urls,
     senderUsername,
+    runtimeStatus,
+    allowWebSearch,
+    allowMediaTools,
   } = params;
 
   const chatId = ctx.chatId;
@@ -430,7 +437,11 @@ async function handleAiTurn(params: {
   await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
 
   const history = getHistory(config.tgGroupId);
-  const recentConversation = formatHistoryAsContext(history);
+  const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
+    logger.warn({ err }, "load runtime context failed, falling back to buffer");
+    return null;
+  });
+  const recentConversation = runtimeContext?.recentEventsText || formatHistoryAsContext(history);
   const { recentMembers, allowedUids } = collectRecentMembers(config.tgGroupId);
   // The current speaker's uid should always be allowed even if they haven't
   // accumulated buffer entries yet (e.g. first message after /reset).
@@ -479,6 +490,10 @@ async function handleAiTurn(params: {
       urls,
       resolveTelegramFileAsDataUrl,
       allowRichContentTools: isTriggered,
+      ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+      ...(runtimeStatus ? { runtimeStatus } : {}),
+      ...(allowWebSearch != null ? { allowWebSearch } : {}),
+      ...(allowMediaTools != null ? { allowMediaTools } : {}),
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -514,6 +529,10 @@ async function handleAiTurn(params: {
           urls,
           resolveTelegramFileAsDataUrl,
           allowRichContentTools: isTriggered,
+          ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+          ...(runtimeStatus ? { runtimeStatus } : {}),
+          ...(allowWebSearch != null ? { allowWebSearch } : {}),
+          ...(allowMediaTools != null ? { allowMediaTools } : {}),
         });
 
         if (result.action === "send") break;
@@ -532,6 +551,7 @@ async function handleAiTurn(params: {
             config.botUsername,
             result.rawText.slice(0, MAX_BUFFER_TEXT),
           );
+          await groupRuntime.recordBotMessages({ messages: [result.rawText] });
           await sendAiMessages({
             ctx,
             chatId,
@@ -548,6 +568,10 @@ async function handleAiTurn(params: {
             config.botUsername,
             `[贴纸 ${fallbackEmoji}: ${stickerFileId || "unknown"}]`,
           );
+          await groupRuntime.recordBotMessages({
+            messages: [],
+            stickerFileId,
+          });
           if (stickerFileId) {
             try {
               await ctx.api.sendSticker(chatId, stickerFileId, {
@@ -559,6 +583,27 @@ async function handleAiTurn(params: {
           }
         }
 
+        await groupRuntime.recordTurn({
+          kind: "passive",
+          startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+          completedAt: Date.now(),
+          model: result.metrics?.model ?? "unknown",
+          tier,
+          needsSearch,
+          toolCalls: result.metrics?.toolCalls ?? [],
+          action: result.rawText ? "send" : "dismiss",
+          messages: result.rawText ? [result.rawText] : [],
+          ...(result.metrics?.inputTokens != null
+            ? { inputTokens: result.metrics.inputTokens }
+            : {}),
+          ...(result.metrics?.outputTokens != null
+            ? { outputTokens: result.metrics.outputTokens }
+            : {}),
+          ...(result.metrics?.cachedInputTokens != null
+            ? { cachedInputTokens: result.metrics.cachedInputTokens }
+            : {}),
+          ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+        });
         return;
       }
     }
@@ -566,6 +611,25 @@ async function handleAiTurn(params: {
     if (result.action === "dismiss") {
       clearInterval(typingTimer);
       logger.info("handleAiTurn: model chose to dismiss (silence)");
+      await groupRuntime.recordTurn({
+        kind: "passive",
+        startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+        completedAt: Date.now(),
+        model: result.metrics?.model ?? "unknown",
+        tier,
+        needsSearch,
+        toolCalls: result.metrics?.toolCalls ?? [],
+        action: "dismiss",
+        messages: [],
+        ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
+        ...(result.metrics?.outputTokens != null
+          ? { outputTokens: result.metrics.outputTokens }
+          : {}),
+        ...(result.metrics?.cachedInputTokens != null
+          ? { cachedInputTokens: result.metrics.cachedInputTokens }
+          : {}),
+        ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+      });
       return;
     }
 
@@ -577,6 +641,10 @@ async function handleAiTurn(params: {
     for (const msg of result.messages) {
       pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
     }
+    await groupRuntime.recordBotMessages({
+      messages: result.messages,
+      stickerFileId: result.stickerFileId,
+    });
 
     // Sticker-only: push a sticker marker so the buffer stays coherent
     if (result.messages.length === 0 && result.stickerFileId) {
@@ -596,11 +664,42 @@ async function handleAiTurn(params: {
       messages: result.messages,
       stickerFileId: result.stickerFileId,
     });
+    await groupRuntime.recordTurn({
+      kind: "passive",
+      startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+      completedAt: Date.now(),
+      model: result.metrics?.model ?? "unknown",
+      tier,
+      needsSearch,
+      toolCalls: result.metrics?.toolCalls ?? [],
+      action: "send",
+      messages: result.messages,
+      stickerFileId: result.stickerFileId,
+      ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
+      ...(result.metrics?.outputTokens != null
+        ? { outputTokens: result.metrics.outputTokens }
+        : {}),
+      ...(result.metrics?.cachedInputTokens != null
+        ? { cachedInputTokens: result.metrics.cachedInputTokens }
+        : {}),
+      ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+    });
   } catch (err) {
     clearInterval(typingTimer);
     logger.error({ err }, "handleAiTurn: AI turn failed");
     await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
       logger.warn({ err: replyErr }, "handleAiTurn: fallback reply failed");
+    });
+    await groupRuntime.recordTurn({
+      kind: "passive",
+      startedAt: Date.now(),
+      completedAt: Date.now(),
+      model: "unknown",
+      needsSearch: false,
+      toolCalls: [],
+      action: "error",
+      messages: [],
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 }
@@ -621,10 +720,19 @@ async function buildStatusText(): Promise<string> {
     logger.warn({ err }, "countUsersWithMemories failed");
     return null;
   });
+  const runtimeStatus = groupRuntime.getStatusSnapshot();
+  const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
+    logger.warn({ err }, "status runtime context failed");
+    return null;
+  });
   return [
     `📊 ${config.botPersonaName} 状态`,
     `运行时间: ${uptimeStr}`,
     `缓冲区消息数: ${historyLen}`,
+    `Runtime: running=${runtimeStatus.running} debouncing=${runtimeStatus.debouncing} dirty=${runtimeStatus.dirty}`,
+    `Quiet 剩余: ${Math.ceil(runtimeStatus.quietRemainingMs / 1000)}s`,
+    `Summary cursor: ${runtimeContext?.summaryCursorTs ?? 0}`,
+    `Recent events: ${runtimeContext?.recentEvents.length ?? "?"}`,
     `记忆用户数: ${memUsers ?? "?"}`,
     `内存 RSS: ${rssMb} MB`,
   ].join("\n");
@@ -729,7 +837,34 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
-    if (bufferLine) {
+    const isCommandMessage = entities.some((entity) => entity.type === "bot_command");
+    const runtimeDecision = await groupRuntime.ingestUserMessage({
+      chatId: config.tgGroupId,
+      messageId: msg.message_id,
+      updateId: ctx.update.update_id,
+      kind: isCommandMessage ? "command" : "user_message",
+      uid: from.id.toString(),
+      name: displayName,
+      ...(from.username ? { username: from.username } : {}),
+      text: bufferLine || rawText,
+      mediaRefs,
+      urls,
+      ...(replyToInfo
+        ? {
+            replyTo: {
+              uid: replyToInfo.uid,
+              name: replyToInfo.name,
+              ...(replyToInfo.username ? { username: replyToInfo.username } : {}),
+              text: replyToInfo.text,
+              ...(replyTo?.message_id != null ? { messageId: replyTo.message_id } : {}),
+            },
+          }
+        : {}),
+      ts: Date.now(),
+      triggered: isMentioned || isRepliedToBot,
+    });
+
+    if (bufferLine && runtimeDecision.accepted) {
       pushMessage(
         config.tgGroupId,
         from.id.toString(),
@@ -828,6 +963,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // 11. If the bot wasn't pinged, we're done.
     if (!isMentioned && !isRepliedToBot) return;
+    if (!runtimeDecision.allowAiTrigger) {
+      logger.info(
+        {
+          ignoredReason: runtimeDecision.ignoredReason,
+          runtimeStatus: runtimeDecision.lateBindingStatus,
+        },
+        "runtime blocked AI trigger",
+      );
+      return;
+    }
 
     // Reset proactive cooldown immediately to prevent double-reply.
     touchBotActivity();
@@ -850,17 +995,26 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
     });
 
-    await handleAiTurn({
-      ctx,
-      replyToMessageId: msg.message_id,
-      user,
-      userMessage,
-      systemHint,
-      isMentioned,
-      isRepliedToBot,
-      mediaRefs,
-      urls,
-      ...(from.username ? { senderUsername: from.username } : {}),
+    groupRuntime.schedulePassiveTurn({
+      label: `message:${msg.message_id}`,
+      execute: () =>
+        handleAiTurn({
+          ctx,
+          replyToMessageId: msg.message_id,
+          user,
+          userMessage,
+          systemHint,
+          isMentioned,
+          isRepliedToBot,
+          mediaRefs,
+          urls,
+          ...(from.username ? { senderUsername: from.username } : {}),
+          ...(runtimeDecision.lateBindingStatus
+            ? { runtimeStatus: runtimeDecision.lateBindingStatus }
+            : {}),
+          allowWebSearch: runtimeDecision.allowWebSearch,
+          allowMediaTools: runtimeDecision.allowMediaTools,
+        }),
     });
   });
 
@@ -902,18 +1056,53 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    // Push the edited text into the buffer so the AI sees the correction
-    let editedBuffer = rawText;
+    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
     if (replyTo && !isRepliedToBot) {
-      const replyText = replyTo.text ?? replyTo.caption ?? "";
-      const replyFirstName = replyTo.from?.first_name ?? "某人";
-      const replyUsername = replyTo.from?.username;
-      const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
-      if (replyText) {
-        editedBuffer = `[回复 ${replyTo.from?.id?.toString() ?? ""} ${replyName}: "${replyText.slice(0, 100)}"] ${rawText}`;
+      replyToInfo = {
+        uid: replyTo.from?.id?.toString() ?? "",
+        name: replyTo.from?.first_name ?? "某人",
+        text: replyTo.text ?? replyTo.caption ?? "",
+      };
+      if (replyTo.from?.username) {
+        replyToInfo.username = replyTo.from.username;
       }
     }
-    if (editedBuffer) {
+    const editedBuffer = buildBufferLine({
+      rawText,
+      mediaRefs,
+      urls,
+      ...(replyToInfo ? { replyToInfo } : {}),
+    });
+    const runtimeDecision = await groupRuntime.ingestUserMessage({
+      chatId: config.tgGroupId,
+      messageId: msg.message_id,
+      updateId: ctx.update.update_id,
+      ...(msg.edit_date != null ? { editDate: msg.edit_date } : {}),
+      kind: "edited_message",
+      uid: from.id.toString(),
+      name: displayName,
+      ...(from.username ? { username: from.username } : {}),
+      text: editedBuffer || rawText,
+      mediaRefs,
+      urls,
+      ...(replyToInfo
+        ? {
+            replyTo: {
+              uid: replyToInfo.uid,
+              name: replyToInfo.name,
+              ...(replyToInfo.username ? { username: replyToInfo.username } : {}),
+              text: replyToInfo.text,
+              ...(replyTo?.message_id != null ? { messageId: replyTo.message_id } : {}),
+            },
+          }
+        : {}),
+      ts: Date.now(),
+      triggered: isMentioned || isRepliedToBot,
+    });
+    if (runtimeDecision.ignoredReason === "non_content_edit") return;
+
+    if (editedBuffer && runtimeDecision.accepted) {
       pushMessage(
         config.tgGroupId,
         from.id.toString(),
@@ -922,8 +1111,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         from.username ?? undefined,
       );
     }
-
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
 
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
@@ -939,6 +1126,17 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
+    if (!runtimeDecision.allowAiTrigger) {
+      logger.info(
+        {
+          ignoredReason: runtimeDecision.ignoredReason,
+          runtimeStatus: runtimeDecision.lateBindingStatus,
+        },
+        "runtime blocked edited-message AI trigger",
+      );
+      return;
+    }
+
     if (!rawText) return;
 
     const userMessage = buildUserMessage({
@@ -951,17 +1149,26 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
     });
 
-    await handleAiTurn({
-      ctx,
-      replyToMessageId: msg.message_id,
-      user,
-      userMessage,
-      systemHint: null,
-      isMentioned,
-      isRepliedToBot,
-      mediaRefs,
-      urls,
-      ...(from.username ? { senderUsername: from.username } : {}),
+    groupRuntime.schedulePassiveTurn({
+      label: `edited:${msg.message_id}`,
+      execute: () =>
+        handleAiTurn({
+          ctx,
+          replyToMessageId: msg.message_id,
+          user,
+          userMessage,
+          systemHint: null,
+          isMentioned,
+          isRepliedToBot,
+          mediaRefs,
+          urls,
+          ...(from.username ? { senderUsername: from.username } : {}),
+          ...(runtimeDecision.lateBindingStatus
+            ? { runtimeStatus: runtimeDecision.lateBindingStatus }
+            : {}),
+          allowWebSearch: runtimeDecision.allowWebSearch,
+          allowMediaTools: runtimeDecision.allowMediaTools,
+        }),
     });
   });
 }

@@ -2,6 +2,17 @@
 
 nyarbot is a single-group Telegram bot written in TypeScript (ESM) with a configurable catgirl persona.
 
+## Single-Group Runtime
+
+nyarbot still serves only `TG_GROUP_ID`, but AI scheduling no longer starts directly from the handler. `src/libs/group-runtime.ts` is the single runtime for the group:
+
+- message-level dedup by `chatId + messageId + editDate`
+- abuse gates for repeated text, per-user bursts, URL flood, and media flood
+- debounce with a 5s default quiet wait and a 30s max delay
+- one `running` lock plus a `dirty` flag so passive/proactive turns never overlap
+- quiet mode for hot chat periods; proactive is paused and ordinary non-mention messages do not trigger
+- append-only Firestore records for `events`, `turns`, `compactions`, and `runtime/group`
+
 ## Data Flow
 
 ```
@@ -49,13 +60,17 @@ handlers/index.ts (setupHandlers)
     │     └─ simple → flashNoThinkModel
     │     └─ complex → flashThinkModel
     │     └─ tech → proThinkModel
+    ├─ Runtime scheduling (group-runtime.ts)
+    │     ├─ Persist event, dedup, rate-limit, debounce, running lock
+    │     └─ Build summary + recent events context
     ├─ AI turn (handleAiTurn → generateAiTurn)
-    │     ├─ System prompt (buildSystemPrompt + buildLateBindingPrompt)
+    │     ├─ Static system prompt (buildSystemPrompt)
+    │     ├─ User-tail late binding (time, trigger state, tool availability, runtime state)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
-│     │               deleteMemory, sendSticker
-│     ├─ Conditional: webSearch (tavilySearch, when needsSearch=true)
-│     ├─ Optional: writeDiary → firestore.ts (diary/{date})
-    │     ├─ Dismiss retry (up to 3×, escalating reply hint)
+│     │               deleteMemory, sendSticker, writeDiary, webSearch,
+│     │               describeTelegramMedia, fetchUrlContent, startSubagent
+    │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
+    │     ├─ Dismiss retry (simple/complex 1×, tech 0×)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
     │     └─ Send via sendAiMessages (typing indicator, stagger delay, sticker dispatch)
 └─ Proactive checker (proactive.ts, env-configurable interval)
@@ -81,7 +96,8 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 | `describeTelegramMedia` | On-demand media description by Telegram `file_id` / `thumbnail_file_id` (passive-triggered turns only).          |
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive-triggered turns only).                 |
 | `writeDiary`            | Record a diary observation about the conversation in natural language. Stored in Firestore `diary/{YYYY-MM-DD}`. |
-| `webSearch`             | Tavily search (only attached when `needsSearch=true` from classification)                                        |
+| `webSearch`             | Tavily search. Tool schema stays stable; when flood protection disables search, the tool returns the reason.     |
+| `startSubagent`         | One-shot helper for URL/media/technical research. It returns a short summary and cannot send group messages.     |
 
 ### AiTurnResult
 
@@ -96,7 +112,7 @@ type AiTurnResult =
 
 ### Dismiss Retry
 
-When the bot is triggered (@mention or reply) but the model chooses `dismiss`, the handler retries up to 3 times. Each retry appends an escalating hint:
+When the bot is triggered (@mention or reply) but the model chooses `dismiss`, the handler retries simple/complex turns once; tech turns do not retry. The retry appends:
 
 > `[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]`
 
@@ -147,7 +163,7 @@ If all retries still dismiss:
 
 ### Forced Web Search
 
-When `classifyMessage()` returns `needsSearch=true`, the `webSearch` tool (Tavily) is included in the tool set. Additionally, a mandatory instruction is appended to the user prompt:
+When `classifyMessage()` returns `needsSearch=true`, late binding adds a mandatory search requirement. If the model calls `send_message` without first calling `webSearch`, the turn is treated as a policy violation: retry once with a stronger search hint, then use a conservative fallback if it still fails.
 
 > `<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
 
@@ -155,26 +171,31 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Conversation buffer**: In-memory ring buffer (max 30 entries per group, 500 chars per entry). Pushed on every user message and every bot reply. Used for `buildSystemPrompt` and `probeGate` proactive check. Lost on process restart. Media and links are stored as lightweight presence/reference markers (including raw URLs and media file ids), not eager Gemini/Tavily summaries. Special bot insertions such as command replies, shocked reactions, morning greetings, and diary notifications are stored with explicit `kind` markers.
+- **Runtime events**: Firestore `events` are the append-only source for recovery, debugging, and compaction.
+- **Conversation buffer**: The in-memory ring buffer remains a hot cache and quick proactive scan window. It is no longer the only context source; restart recovery uses Firestore runtime events plus `runtime/group.summary`.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted to Firestore.
+- **Compaction**: When recent events exceed thresholds, the runtime generates a working-memory summary, appends a `compactions` record, and updates `runtime/group.summary` / `summaryCursorTs`. Compaction is untrusted working memory; diary is literary archive.
 
 ## Prompt Architecture
 
 ### System Prompt (`buildSystemPrompt`)
 
-Built per-turn with:
+Fully static and KV-cache friendly:
 
 - Persona (name/reading/identity from env) and naturalness guidelines (based on human vs AI chat analysis)
-- Current user context (nickname, uid, memories)
-- Recent members list (for uid validation in memory/nickname tools)
-- Recent chat history
+- Tool-call, group-chat, and safety rules
+- No current time, current user, memories, recent history, or runtime state
 
 ### Late-Binding Prompt (`buildLateBindingPrompt`)
 
 Appended per-turn with dynamic feedback:
 
 - Whether the bot was @mentioned or replied-to
+- Current time
+- Search/media tool availability
+- Hot chat / quiet mode / flood-protection state
+- Mandatory search hint when `needsSearch=true`
 - Human-likeness feedback: if recent bot messages end with `。` too often or average length > 40 chars, a reminder is injected
 
 ### Probe Prompt (`buildProbeSystemPrompt`)

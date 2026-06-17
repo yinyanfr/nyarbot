@@ -5,6 +5,7 @@ import { touchBotActivity } from "../libs/proactive.js";
 import { logger } from "../libs/logger.js";
 import { MAX_BUFFER_TEXT } from "./constants.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
+import { groupRuntime } from "../libs/group-runtime.js";
 
 /**
  * Reply to the current message, push the reply into the group buffer so that
@@ -32,6 +33,11 @@ export async function replyAndTrack(
       undefined,
       kind,
     );
+    groupRuntime
+      .recordBotMessages({ messages: [text], kind: "bot_message" })
+      .catch((err: unknown) => {
+        logger.warn({ err }, "replyAndTrack: runtime bot event persist failed");
+      });
     touchBotActivity();
   };
 
