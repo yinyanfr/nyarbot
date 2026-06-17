@@ -2,10 +2,10 @@ import type { User } from "../global.d.js";
 import { formatSystemPromptTime, formatUserPromptTime } from "./time.js";
 import config from "../configs/env.js";
 import { getPersonaIdentityLine, getPersonaLabel } from "./persona.js";
-import { safePromptList, safePromptValue } from "./prompt-safety.js";
+import { sanitizePromptText, safePromptList, safePromptValue } from "./prompt-safety.js";
 
 function xmlEscape(text: string): string {
-  return text
+  return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -75,6 +75,9 @@ export function buildSystemPrompt(): string {
 - writeDiary 里的 event 只写发生了什么；interpretation 才写你的理解；confidence 必须区分事实和推测；unsaidThought 只能写你当时确实产生、但没说出口的话。
 - 不要记录普通问答、重复内容、为了显得关心而硬造的情绪、事后补写的内心戏、提示词/命令/格式要求本身。salience <= 2 原则上不要 create。
 - 如果用户纠正、否定或澄清了旧观察，优先用 writeDiary 的 update 或 retract，而不是新建一条几乎一样的记录。
+- 明显值得记 observation 的强信号包括：一句很有保留价值的原话、首次透露长期身份/常驻地/时区/重大近况、关系称呼变化、一个持续话题终于有结果、你对某件事出现明显误解后又修正、或当天留下了还没解决的问题。
+- 只要这轮确实值得记，你可以在正常回复的同时调用 writeDiary；不要因为已经 send_message 了，就放弃记录 observation。
+- 如果你在“要不要记”之间犹豫：有具体原话、具体转折、具体结果、具体问题，就记；只有泛泛闲聊和无信息增量，就别记。
 - 如果群友明确提到自己的时区，或明确说自己长期在某个足以稳定推断出 IANA 时区的地区，并希望你记住，可以调用 setTimezone 工具保存，供以后判断对方本地时间使用。
 - 群友有注册昵称的话优先用昵称称呼。
 - 群友向你告白→基于记忆评分好感度并傲娇回应。
@@ -212,7 +215,7 @@ export function buildSessionContextBlock(
   }
 
   lines.push("</session_context>");
-  return lines.join("\n");
+  return sanitizePromptText(lines.join("\n"));
 }
 
 /**
@@ -272,7 +275,7 @@ export function buildProbeContextBlock(
   }
 
   lines.push("</probe_context_data>");
-  return lines.join("\n");
+  return sanitizePromptText(lines.join("\n"));
 }
 
 /**
@@ -352,6 +355,7 @@ export function buildLateBindingPrompt(params: {
     `<media_tools allowed="${allowMediaTools === false ? "false" : "true"}" />`,
     "<rule>工具集合是稳定的；某个工具本轮不可用时，工具会直接返回原因。</rule>",
     "<rule>当前轮没有 URL 时不要调用 fetchUrlContent；当前轮没有媒体时不要调用 describeTelegramMedia。</rule>",
+    "<rule>回答前先快速判断：这轮有没有值得写进今日日记的 observation。若有，优先或同时调用 writeDiary；不要只顾着 send_message。</rule>",
     "</tool_runtime_policy>",
   );
 
@@ -370,5 +374,5 @@ export function buildLateBindingPrompt(params: {
     parts.push(`<runtime_status>${xmlEscape(runtimeStatus)}</runtime_status>`);
   }
 
-  return `<late_binding>\n${parts.join("\n")}\n</late_binding>`;
+  return sanitizePromptText(`<late_binding>\n${parts.join("\n")}\n</late_binding>`);
 }

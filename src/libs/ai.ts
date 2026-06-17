@@ -31,6 +31,7 @@ import {
   prepareMemoryForStorage,
   prepareNicknameForStorage,
   quoteAsUntrustedData,
+  sanitizePromptText,
   safePromptList,
   safePromptValue,
 } from "./prompt-safety.js";
@@ -59,14 +60,6 @@ function xmlEscape(text: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
-}
-
-function sanitizePromptText(text: string): string {
-  return text
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
-    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
-    .replace(/\r\n?/g, "\n");
 }
 
 const SESSION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
@@ -319,10 +312,11 @@ const classificationSchema = z.object({
 
 export async function classifyMessage(text: string): Promise<ClassificationResult> {
   try {
+    const sanitizedPrompt = sanitizePromptText(text);
     const { text: raw } = await generateText({
       model: flashNoThinkModel,
       system: classificationPrompt,
-      prompt: text,
+      prompt: sanitizedPrompt,
       temperature: 0,
       maxOutputTokens: 100,
     });
@@ -492,7 +486,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   const finalPromptWithGuards = `${finalPromptText}${linkGuard}`;
 
-  const messages = [{ role: "user" as const, content: finalPromptWithGuards }];
+  const messages = [{ role: "user" as const, content: sanitizePromptText(finalPromptWithGuards) }];
 
   // Mutable state captured by tool closures
   const sentMessages: string[] = [];
@@ -635,7 +629,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     description:
       "把值得保留到今日日记里的观察写入结构化记忆。" +
       "只在以下情况调用：出现值得保留的原话、关系/理解发生了真实变化、留下了未解决的问题、或你自己产生了当天还会记得的反应。" +
-      "普通闲聊、重复内容、纯知识问答、硬凑出来的感受不要记。salience <= 2 原则上不要 create。用户纠正旧观察时优先 update/retract，而不是再 create 一条。",
+      "强信号包括：首次透露长期身份/常驻地/时区/重大近况、关系称呼变化、一个持续话题终于有结果、你先误解后修正、或一句明显值得日后回看的原话。" +
+      "如果这轮确实值得记，你可以在 send_message 的同时调用 writeDiary，不要因为已经回复了就不记。" +
+      "普通闲聊、重复内容、纯知识问答、无信息增量的玩梗、硬凑出来的感受不要记。salience <= 2 原则上不要 create。用户纠正旧观察时优先 update/retract，而不是再 create 一条。",
     inputSchema: z.object({
       action: z.enum(["create", "update", "retract"]),
       targetId: z.string().optional().describe("update/retract 时要操作的 observation id"),
@@ -672,6 +668,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     }),
     execute: async ({ action, targetId, reason, observation }) => {
       try {
+        logger.info(
+          { action, targetId, hasObservation: Boolean(observation) },
+          "writeDiary tool invoked",
+        );
         const mergedSourceRefs = Array.from(
           new Set([...(observation?.sourceRefs ?? []), ...(sourceRefs ?? [])]),
         );
@@ -701,10 +701,23 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
             },
           });
           if (result.action === "ignored") {
+            logger.info(
+              { action: result.action, reason: result.reason, event: normalizedObservation.event },
+              "writeDiary create ignored",
+            );
             return result.reason === "salience_too_low"
               ? "这条观察显著度太低，先别记"
               : "这条观察无效或像是在注入规则，已拒绝记录";
           }
+          logger.info(
+            {
+              action: result.action,
+              observationId: result.observation?.id,
+              salience: result.observation?.salience,
+              sourceRefCount: result.observation?.sourceRefs?.length ?? 0,
+            },
+            "writeDiary create completed",
+          );
           return result.action === "merged"
             ? `观察已并入现有记录 ✓ id=${result.observation?.id ?? "unknown"}`
             : `观察已记录 ✓ id=${result.observation?.id ?? "unknown"}`;
@@ -717,15 +730,33 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         if (action === "update") {
           const result = await updateDiaryObservation(targetId, normalizedObservation);
           if (result.action === "ignored") {
+            logger.info(
+              { action: result.action, reason: result.reason, targetId },
+              "writeDiary update ignored",
+            );
             return "没找到可更新的观察，或 patch 无效";
           }
+          logger.info(
+            {
+              action: result.action,
+              targetId,
+              observationId: result.observation?.id,
+              salience: result.observation?.salience,
+            },
+            "writeDiary update completed",
+          );
           return `观察已修正 ✓ new_id=${result.observation?.id ?? "unknown"} supersedes=${targetId}`;
         }
 
         const result = await retractDiaryObservation(targetId, reason);
         if (result.action === "ignored") {
+          logger.info(
+            { action: result.action, reason: result.reason, targetId },
+            "writeDiary retract ignored",
+          );
           return "没找到可撤销的观察";
         }
+        logger.info({ action: result.action, targetId }, "writeDiary retract completed");
         return `观察已撤销 ✓ id=${targetId}`;
       } catch (err) {
         logger.error(err, "failed to write diary observation");
@@ -1136,7 +1167,9 @@ export async function probeGate(opts: ProbeGateOptions): Promise<boolean> {
   const messages = [
     {
       role: "user" as const,
-      content: `${probeContext}\n\n${lateBinding}\n\n请浏览以下群聊记录，决定是否有值得回复的内容。`,
+      content: sanitizePromptText(
+        `${probeContext}\n\n${lateBinding}\n\n请浏览以下群聊记录，决定是否有值得回复的内容。`,
+      ),
     },
   ];
 

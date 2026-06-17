@@ -44,6 +44,7 @@ import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
+import { sanitizePromptText } from "../libs/prompt-safety.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
@@ -135,7 +136,7 @@ function parseShockCommand(
 }
 
 function xmlEscape(text: string): string {
-  return text
+  return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
