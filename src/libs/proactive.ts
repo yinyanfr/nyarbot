@@ -107,7 +107,6 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
         name: info.name,
         ...(info.username ? { username: info.username } : {}),
       }));
-      const allowedUids = new Set(memberMap.keys());
 
       const shouldProceed = await probeGate({
         recentConversation: recentHistory
@@ -165,7 +164,6 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
           userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
           recentConversation: runtimeContext?.recentEventsText || formattedHistory,
           recentMembers,
-          allowedUids,
           tier: "simple", // proactive messages should always be short
           needsSearch: false,
           systemHint: null,

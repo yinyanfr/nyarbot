@@ -4,6 +4,7 @@ import config from "../configs/env.js";
 import {
   getDiaryObservation,
   getOrCreateUser,
+  loadRecentRuntimeEvents,
   listDiaryObservationsByDate,
   retractDiaryObservation,
   setNightyTimestamp,
@@ -310,13 +311,165 @@ function buildBufferLine(params: {
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
 }
 
+const RECENT_MEDIA_FOLLOWUP_REGEX =
+  /这张图|这个图|刚才那张图|上一张图|那张图|这图|那图|图里|图片里|截图里|看图|识图|帮我看图|图上|上面写了什么|这是什么|啥意思|解释一下/u;
+
+function parseMediaRefsFromBufferText(text: string): MediaRef[] {
+  const refs: MediaRef[] = [];
+
+  for (const match of text.matchAll(/\[图片 file_id=([^\]\s]+)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({ type: "image", source: "reply_to", fileId });
+  }
+  for (const match of text.matchAll(/\[视频 file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "video",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[GIF file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "animation",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[视频消息 file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "video_note",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[文件 file_id=([^\]\s]+) thumb=([^\]\s]*)\s*([^\]]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "document",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+      ...(match[3]?.trim() ? { filename: match[3].trim() } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[音频 file_id=([^\]\s]+) thumb=([^\]\s]*)\s*([^\]]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "audio",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+      ...(match[3]?.trim() ? { title: match[3].trim() } : {}),
+    });
+  }
+
+  return refs;
+}
+
+function maybeAttachRecentMediaRefs(params: {
+  groupId: string;
+  rawText: string;
+  mediaRefs: MediaRef[];
+}): MediaRef[] {
+  if (params.mediaRefs.length > 0) return params.mediaRefs;
+  if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
+
+  const history = getHistory(params.groupId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i];
+    if (!entry || entry.uid === "bot" || entry.uid === "system") continue;
+    const refs = parseMediaRefsFromBufferText(entry.text);
+    if (refs.length > 0) {
+      logger.info(
+        { matchedText: params.rawText, sourceUid: entry.uid, recoveredRefs: refs.length },
+        "attached recent media refs for follow-up",
+      );
+      return refs;
+    }
+  }
+
+  return params.mediaRefs;
+}
+
+function mapRuntimeMediaRefToMediaRef(ref: {
+  type: string;
+  source?: string;
+  fileId?: string;
+  thumbnailFileId?: string;
+  emoji?: string;
+  filename?: string;
+  title?: string;
+}): MediaRef | null {
+  if (
+    ref.type !== "image" &&
+    ref.type !== "sticker" &&
+    ref.type !== "video" &&
+    ref.type !== "animation" &&
+    ref.type !== "video_note" &&
+    ref.type !== "document" &&
+    ref.type !== "audio"
+  ) {
+    return null;
+  }
+
+  const source = ref.source === "current" || ref.source === "reply_to" ? ref.source : "reply_to";
+  return {
+    type: ref.type,
+    source,
+    ...(ref.fileId ? { fileId: ref.fileId } : {}),
+    ...(ref.thumbnailFileId ? { thumbnailFileId: ref.thumbnailFileId } : {}),
+    ...(ref.emoji ? { emoji: ref.emoji } : {}),
+    ...(ref.filename ? { filename: ref.filename } : {}),
+    ...(ref.title ? { title: ref.title } : {}),
+  };
+}
+
+async function attachRecentMediaRefs(params: {
+  groupId: string;
+  rawText: string;
+  mediaRefs: MediaRef[];
+}): Promise<MediaRef[]> {
+  if (params.mediaRefs.length > 0) return params.mediaRefs;
+  if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
+
+  try {
+    const recentEvents = await loadRecentRuntimeEvents({ limit: 20, newestFirst: true });
+    for (let i = recentEvents.length - 1; i >= 0; i--) {
+      const event = recentEvents[i];
+      if (!event || event.uid === "bot" || event.uid === "system") continue;
+      const refs = event.mediaRefs.map(mapRuntimeMediaRefToMediaRef).filter(Boolean) as MediaRef[];
+      if (refs.length > 0) {
+        logger.info(
+          { matchedText: params.rawText, sourceUid: event.uid, recoveredRefs: refs.length },
+          "attached recent media refs from runtime events",
+        );
+        return refs;
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "failed to recover recent media refs from runtime events");
+  }
+
+  return maybeAttachRecentMediaRefs(params);
+}
+
 /**
- * Aggregate distinct recent participants from the in-memory buffer so the LLM
- * knows which uids are safe to reference from memory tools.
+ * Aggregate distinct recent participants from the in-memory buffer for prompt context.
  */
 function collectRecentMembers(groupId: string): {
   recentMembers: { uid: string; name: string; username?: string }[];
-  allowedUids: Set<string>;
 } {
   const history = getHistory(groupId);
   const map = new Map<string, { name: string; username?: string }>();
@@ -333,7 +486,7 @@ function collectRecentMembers(groupId: string): {
     name: info.name,
     ...(info.username ? { username: info.username } : {}),
   }));
-  return { recentMembers, allowedUids: new Set(map.keys()) };
+  return { recentMembers };
 }
 
 /**
@@ -481,16 +634,24 @@ async function handleAiTurn(params: {
     return null;
   });
   const recentConversation = runtimeContext?.recentEventsText || formatHistoryAsContext(history);
-  const { recentMembers, allowedUids } = collectRecentMembers(config.tgGroupId);
-  // The current speaker's uid should always be allowed even if they haven't
-  // accumulated buffer entries yet (e.g. first message after /reset).
-  allowedUids.add(user.uid);
+  const { recentMembers } = collectRecentMembers(config.tgGroupId);
   if (!recentMembers.some((m) => m.uid === user.uid)) {
     recentMembers.push({
       uid: user.uid,
       name: user.nickname || "大哥哥",
       ...(senderUsername ? { username: senderUsername } : {}),
     });
+  }
+  const replyTo = ctx.msg?.reply_to_message;
+  if (replyTo && replyTo.from && replyTo.from.id !== ctx.me.id) {
+    const replyUid = replyTo.from.id.toString();
+    if (!recentMembers.some((m) => m.uid === replyUid)) {
+      recentMembers.push({
+        uid: replyUid,
+        name: replyTo.from.first_name ?? "某人",
+        ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
+      });
+    }
   }
 
   const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
@@ -520,7 +681,6 @@ async function handleAiTurn(params: {
       recentMembers,
       tier,
       needsSearch,
-      allowedUids,
       systemHint: currentHint,
       wasMentioned: isMentioned,
       wasRepliedTo: isRepliedToBot,
@@ -560,7 +720,6 @@ async function handleAiTurn(params: {
           recentMembers,
           tier,
           needsSearch,
-          allowedUids,
           systemHint: currentHint,
           wasMentioned: isMentioned,
           wasRepliedTo: isRepliedToBot,
@@ -940,7 +1099,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const rawText = msg.text ?? msg.caption ?? "";
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const urls = extracted.urls;
+    const mediaRefs = await attachRecentMediaRefs({
+      groupId: config.tgGroupId,
+      rawText,
+      mediaRefs: extracted.mediaRefs,
+    });
 
     // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
     const replyTo = msg.reply_to_message;
@@ -1195,7 +1360,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const urls = extracted.urls;
+    const mediaRefs = await attachRecentMediaRefs({
+      groupId: config.tgGroupId,
+      rawText,
+      mediaRefs: extracted.mediaRefs,
+    });
     let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
     if (replyTo && !isRepliedToBot) {
       replyToInfo = {
