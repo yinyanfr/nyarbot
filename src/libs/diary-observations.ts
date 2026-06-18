@@ -5,7 +5,9 @@ import type {
   DiaryObservationSalience,
   DiaryObservationV2,
 } from "../global.d.js";
+import config from "../configs/env.js";
 import { safePromptValue, truncateUnicode } from "./prompt-safety.js";
+import { formatTimestampInputForTimezone } from "./time.js";
 
 export const DIARY_PROMPT_VERSION = "diary-v2";
 export const DIARY_STYLE_REFERENCE_VERSION = "lixia-v1";
@@ -162,15 +164,22 @@ function topicKey(observation: DiaryObservationV2): string {
   return normalizeSimilarityText(observation.event).slice(0, 24);
 }
 
+function formatObservationPromptTime(value: string): string {
+  const localized = formatTimestampInputForTimezone(value, config.appTimezone);
+  return localized ? `${localized} (${config.appTimezone})` : value;
+}
+
 export function selectObservationsForDiary(
   observations: DiaryObservationV2[],
   limit = MAX_DAILY_DIARY_OBSERVATIONS,
 ): DiaryObservationV2[] {
-  const ranked = [...observations].sort((a, b) => {
-    const byPriority = observationPriority(b) - observationPriority(a);
-    if (byPriority !== 0) return byPriority;
-    return a.recordedAt.localeCompare(b.recordedAt);
-  });
+  const ranked = observations
+    .filter((observation) => observation.salience >= 2)
+    .sort((a, b) => {
+      const byPriority = observationPriority(b) - observationPriority(a);
+      if (byPriority !== 0) return byPriority;
+      return a.recordedAt.localeCompare(b.recordedAt);
+    });
   const selected: DiaryObservationV2[] = [];
   const usedTopics = new Map<string, number>();
   while (ranked.length > 0 && selected.length < limit) {
@@ -207,9 +216,13 @@ export function serializeDiaryObservationsXml(
     );
     lines.push(`    <event>${xmlEscape(observation.event)}</event>`);
     if (observation.occurredAt) {
-      lines.push(`    <occurred_at>${xmlEscape(observation.occurredAt)}</occurred_at>`);
+      lines.push(
+        `    <occurred_at>${xmlEscape(formatObservationPromptTime(observation.occurredAt))}</occurred_at>`,
+      );
     }
-    lines.push(`    <recorded_at>${xmlEscape(observation.recordedAt)}</recorded_at>`);
+    lines.push(
+      `    <recorded_at>${xmlEscape(formatObservationPromptTime(observation.recordedAt))}</recorded_at>`,
+    );
     if (observation.exactQuote) {
       lines.push(`    <exact_quote>${xmlEscape(observation.exactQuote)}</exact_quote>`);
     }

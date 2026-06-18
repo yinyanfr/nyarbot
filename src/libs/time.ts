@@ -43,6 +43,16 @@ export function parseTimestampInputForTimezone(value: string, timeZone: string):
   return zoned.isValid() ? zoned.valueOf() : null;
 }
 
+export function formatTimestampInputForTimezone(
+  value: string,
+  timeZone: string,
+  fmt = "YYYY-MM-DD HH:mm",
+): string | null {
+  const parsed = parseTimestampInputForTimezone(value, timeZone);
+  if (parsed == null) return null;
+  return dayjs(parsed).tz(timeZone).format(fmt);
+}
+
 export function now(): dayjs.Dayjs {
   return dayjs().tz(TZ);
 }
