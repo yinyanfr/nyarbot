@@ -27,6 +27,7 @@ function db(): Firestore {
 // Tunables
 const MEMORY_MAX_ENTRIES = 30;
 const DIARY_OBSERVATION_DEDUPE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const DIARY_OBSERVATION_SAME_SOURCE_MERGE_WINDOW_MS = 2 * 60 * 1000;
 
 function isValidUser(data: unknown): data is User {
   const d = data as Record<string, unknown>;
@@ -357,6 +358,23 @@ async function listRecentDiaryObservationCandidates(
     .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
 }
 
+function shouldMergeObservationBySharedSource(
+  candidate: DiaryObservationV2,
+  draft: DiaryObservationDraft,
+): boolean {
+  const candidateRefs = new Set(candidate.sourceRefs ?? []);
+  const draftRefs = new Set(draft.sourceRefs ?? []);
+  if (candidateRefs.size === 0 || draftRefs.size === 0) return false;
+
+  const hasSharedSource = [...draftRefs].some((ref) => candidateRefs.has(ref));
+  if (!hasSharedSource) return false;
+
+  const candidateRecordedAt = Date.parse(candidate.recordedAt);
+  if (Number.isNaN(candidateRecordedAt)) return false;
+
+  return Date.now() - candidateRecordedAt <= DIARY_OBSERVATION_SAME_SOURCE_MERGE_WINDOW_MS;
+}
+
 export async function createDiaryObservation(params: {
   observation: Partial<DiaryObservationDraft>;
   sourceRefs?: string[];
@@ -372,7 +390,11 @@ export async function createDiaryObservation(params: {
   }
   const localDate = resolveObservationDate(sanitized.occurredAt);
   const candidates = await listRecentDiaryObservationCandidates(localDate);
-  const duplicate = candidates.find((candidate) => observationsLikelyMatch(candidate, sanitized));
+  const duplicate = candidates.find(
+    (candidate) =>
+      observationsLikelyMatch(candidate, sanitized) ||
+      shouldMergeObservationBySharedSource(candidate, sanitized),
+  );
 
   if (duplicate) {
     const next: DiaryObservationV2 = {

@@ -441,6 +441,8 @@ export interface GenerateOptions {
   mandatorySearchHint?: boolean;
   /** Soft hint that current turn may contain reusable user facts worth saving. */
   memoryCandidateHints?: string[];
+  /** Retry turn after a dismiss; should avoid repeating persistent side effects. */
+  isRetryTurn?: boolean;
 }
 
 interface PrefetchedContext {
@@ -663,6 +665,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     allowMediaTools,
     mandatorySearchHint,
     memoryCandidateHints,
+    isRetryTurn,
   } = opts;
 
   const systemPrompt = buildSystemPrompt();
@@ -709,6 +712,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ...(allowWebSearch != null ? { allowWebSearch } : {}),
     ...(mandatorySearchHint != null ? { mandatorySearchHint } : {}),
     ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+    ...(isRetryTurn ? { isRetryTurn } : {}),
   });
 
   const promptText = systemHint
@@ -735,6 +739,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   const sentMessages: string[] = [];
   let stickerFileId: string | null = null;
   let dismissed = false;
+  const persistentToolRetryReason =
+    "这是补发回复的重试轮，本轮不要再次写入记忆或日记，只专注把真正要说的话发出去";
 
   const sendMessageTool = tool({
     description:
@@ -772,6 +778,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       memory: z.string().describe("关于该群友的一条简洁记忆，用中文，不超过一句话"),
     }),
     execute: async ({ uid, memory }) => {
+      if (isRetryTurn) {
+        logger.info({ uid }, "saveMemory skipped during retry turn");
+        return persistentToolRetryReason;
+      }
       try {
         logger.info({ uid, hasMemory: Boolean(memory) }, "saveMemory tool invoked");
         const normalizedMemory = prepareMemoryForStorage(memory);
@@ -806,6 +816,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       nickname: z.string().describe("群友希望你称呼的昵称，不要超过 10 个字"),
     }),
     execute: async ({ uid, nickname }) => {
+      if (isRetryTurn) {
+        logger.info({ uid }, "setNickname skipped during retry turn");
+        return persistentToolRetryReason;
+      }
       try {
         const normalizedNickname = prepareNicknameForStorage(nickname);
         if (!normalizedNickname) {
@@ -831,6 +845,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         .describe("该群友的 IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/Los_Angeles"),
     }),
     execute: async ({ uid, timeZone }) => {
+      if (isRetryTurn) {
+        logger.info({ uid }, "setTimezone skipped during retry turn");
+        return persistentToolRetryReason;
+      }
       const normalizedTimeZone = timeZone.trim();
       if (!isValidTimezone(normalizedTimeZone)) {
         return "这个时区不是有效的 IANA 时区，已拒绝保存";
@@ -854,6 +872,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       memory: z.string().describe("要删除的记忆内容（与已存储的条目匹配）"),
     }),
     execute: async ({ uid, memory }) => {
+      if (isRetryTurn) {
+        logger.info({ uid }, "deleteMemory skipped during retry turn");
+        return persistentToolRetryReason;
+      }
       try {
         const removed = await removeUserMemory(uid, memory);
         return removed ? "记忆已删除 ✓" : "没找到完全匹配的那条记忆，暂时删不掉";
@@ -907,6 +929,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         .optional(),
     }),
     execute: async ({ action, targetId, reason, observation }) => {
+      if (isRetryTurn) {
+        logger.info({ action, targetId }, "writeDiary skipped during retry turn");
+        return persistentToolRetryReason;
+      }
       try {
         logger.info(
           { action, targetId, hasObservation: Boolean(observation) },

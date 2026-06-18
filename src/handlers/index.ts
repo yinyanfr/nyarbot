@@ -743,6 +743,7 @@ async function handleAiTurn(params: {
       ...(allowWebSearch != null ? { allowWebSearch } : {}),
       ...(allowMediaTools != null ? { allowMediaTools } : {}),
       ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+      isRetryTurn: false,
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -783,6 +784,7 @@ async function handleAiTurn(params: {
           ...(allowWebSearch != null ? { allowWebSearch } : {}),
           ...(allowMediaTools != null ? { allowMediaTools } : {}),
           ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+          isRetryTurn: true,
         });
 
         if (result.action === "send") break;

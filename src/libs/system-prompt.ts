@@ -300,6 +300,7 @@ export function buildLateBindingPrompt(params: {
   allowMediaTools?: boolean;
   mandatorySearchHint?: boolean;
   memoryCandidateHints?: string[];
+  isRetryTurn?: boolean;
 }): string {
   const {
     wasMentioned,
@@ -312,6 +313,7 @@ export function buildLateBindingPrompt(params: {
     allowMediaTools,
     mandatorySearchHint,
     memoryCandidateHints,
+    isRetryTurn,
   } = params;
 
   const parts: string[] = [];
@@ -360,6 +362,12 @@ export function buildLateBindingPrompt(params: {
   if (memoryCandidateHints && memoryCandidateHints.length > 0) {
     parts.push(
       `<memory_candidate_hints>${xmlEscape(memoryCandidateHints.join("；"))}</memory_candidate_hints>`,
+    );
+  }
+
+  if (isRetryTurn) {
+    parts.push(
+      "<retry_turn_notice>这是一次补发回复的重试轮。只专注把真正要说的话通过 send_message 发出去；不要再次调用 saveMemory、setNickname、setTimezone、deleteMemory 或 writeDiary。</retry_turn_notice>",
     );
   }
 
