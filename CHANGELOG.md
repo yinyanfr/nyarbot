@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Fallback rescue send path** (`src/libs/ai.ts`, `src/handlers/index.ts`): dismissed raw drafts are now retried through a real `send_message` rescue flow before sticker-only fallback, so visible replies stay closer to the model's intended output.
+
+### Changed
+
+- **Search prefetch policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search for the current turn, and mandatory search hints no longer conflict with the prefetch flow.
+- **Memory and diary heuristics** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/handlers/index.ts`): `saveMemory` now prefers reusable user facts, `writeDiary` is more candidate-first, and `memoryCandidateHints` are narrower to reduce false positives.
+
+### Fixed
+
+- **Turn metrics consistency** (`src/handlers/index.ts`): rescue-generated `send_message` calls are now reflected in turn tool-call records and logs.
+
+### Docs
+
+- **README and docs sync** (`README.md`, `README.en.md`, `docs/architecture*.md`, `docs/commands-and-interactions*.md`): documented the new search, rescue, memory, and diary behavior.
+
 ## [1.0.0] — 2026-05-21
 
 ### Added

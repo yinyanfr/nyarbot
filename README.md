@@ -191,7 +191,7 @@ English docs:
 ## Release Notes
 
 - 当前发布版本：[`1.0.0`](CHANGELOG.md)
-- 发布重点：`/shock`、特殊上下文 `kind`、按需富内容工具、日记发布链路、prompt injection 防护、频道日志增强
+- 最近更新重点：`saveMemory` 语义放宽为“以后大概率还会用到的用户事实”，`writeDiary` 更偏向先收集候选再筛；搜索改为“预取成功即算已搜过”；被 dismiss 后的 raw draft 会尽量通过真实 `send_message` rescue 出站；`memoryCandidateHints` 也收紧了
 
 ## Disclaimer
 

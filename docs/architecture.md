@@ -69,8 +69,10 @@ handlers/index.ts (setupHandlers)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, startSubagent
+    │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search
     │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
     │     ├─ Dismiss retry (simple/complex 1×, tech 0×)
+    │     ├─ Raw draft rescue: after dismiss, try to rewrite the draft into real send_message output
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
     │     └─ Send via sendAiMessages (typing indicator, stagger delay, sticker dispatch)
 └─ Proactive checker (proactive.ts, env-configurable interval)
@@ -164,6 +166,7 @@ If all retries still dismiss:
 ### Forced Web Search
 
 When `classifyMessage()` returns `needsSearch=true`, late binding adds a mandatory search requirement. If the model calls `send_message` without first calling `webSearch`, the turn is treated as a policy violation: retry once with a stronger search hint, then use a conservative fallback if it still fails.
+If a prefetch search already succeeded before generation, that counts as the required search for the turn. Only if the prefetched result is still insufficient should the model call `webSearch` again.
 
 > `<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
 
@@ -176,6 +179,12 @@ This prevents the model from skipping the search tool call.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted to Firestore.
 - **Compaction**: When recent events exceed thresholds, the runtime generates a working-memory summary, appends a `compactions` record, and updates `runtime/group.summary` / `summaryCursorTs`. Compaction is untrusted working memory; diary is literary archive.
+
+## Memory and Diary
+
+- `saveMemory` now prefers reusable user facts, not only permanent traits.
+- `writeDiary` is more candidate-first: if a turn leaves a concrete trace, it can be recorded and filtered later.
+- `memoryCandidateHints` are only soft hints from the handler, used to improve recall without auto-saving anything.
 
 ## Prompt Architecture
 

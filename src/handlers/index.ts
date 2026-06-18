@@ -18,6 +18,7 @@ import {
   generateMorningGreeting,
   generateLoveResponse,
   generateShockResponse,
+  rescueSendMessagesFromDraft,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
 import {
@@ -311,6 +312,51 @@ function buildBufferLine(params: {
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
 }
 
+const MEMORY_CANDIDATE_PATTERNS: { type: string; regex: RegExp; hint: string }[] = [
+  {
+    type: "nickname",
+    regex: /(?:我叫|叫我|可以叫我|喊我|昵称是|名字是)/u,
+    hint: "当前轮可能出现了称呼/昵称信息",
+  },
+  {
+    type: "timezone",
+    regex: /(?:时区|UTC[+-]?\d{1,2}|GMT[+-]?\d{1,2}|Asia\/[A-Za-z_]+)/u,
+    hint: "当前轮可能出现了时区信息",
+  },
+  {
+    type: "location",
+    regex:
+      /(?:我住在|人在|回老家|我在[^\n]{0,20}(?:上班|工作|读书)|在[^\n]{1,20}(?:上班|工作|读书))/u,
+    hint: "当前轮可能出现了常驻地/地区/生活地点信息",
+  },
+  {
+    type: "project",
+    regex: /(?:(?:最近|这阵子|这几天)?在做|正在做|还在做|维护.+项目|开发.+项目|做.+毕设|写.+论文)/u,
+    hint: "当前轮可能出现了持续项目或近期会反复提到的近况",
+  },
+  {
+    type: "preference",
+    regex: /(?:最喜欢|比较喜欢|更喜欢|爱吃|不吃|偏好|只会用|习惯用|平时都用|一般都用|常用的是)/u,
+    hint: "当前轮可能出现了偏好/习惯/常用工具信息",
+  },
+  {
+    type: "account",
+    regex: /(?:号叫|账号叫|角色叫|ID叫|我的猫娘叫|我家.+叫)/u,
+    hint: "当前轮可能出现了账号名/角色名/长期会复用的命名信息",
+  },
+];
+
+function detectMemoryCandidateHints(rawText: string): string[] {
+  const trimmed = rawText.trim();
+  if (!trimmed) return [];
+
+  const hints = MEMORY_CANDIDATE_PATTERNS.filter((item) => item.regex.test(trimmed)).map(
+    (item) => item.hint,
+  );
+
+  return Array.from(new Set(hints));
+}
+
 const RECENT_MEDIA_FOLLOWUP_REGEX =
   /这张图|这个图|刚才那张图|上一张图|那张图|这图|那图|图里|图片里|截图里|看图|识图|帮我看图|图上|上面写了什么|这是什么|啥意思|解释一下/u;
 
@@ -600,6 +646,7 @@ async function handleAiTurn(params: {
   runtimeStatus?: string;
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
+  memoryCandidateHints?: string[];
 }): Promise<void> {
   const {
     ctx,
@@ -616,6 +663,7 @@ async function handleAiTurn(params: {
     runtimeStatus,
     allowWebSearch,
     allowMediaTools,
+    memoryCandidateHints,
   } = params;
 
   const chatId = ctx.chatId;
@@ -694,6 +742,7 @@ async function handleAiTurn(params: {
       ...(runtimeStatus ? { runtimeStatus } : {}),
       ...(allowWebSearch != null ? { allowWebSearch } : {}),
       ...(allowMediaTools != null ? { allowMediaTools } : {}),
+      ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -733,6 +782,7 @@ async function handleAiTurn(params: {
           ...(runtimeStatus ? { runtimeStatus } : {}),
           ...(allowWebSearch != null ? { allowWebSearch } : {}),
           ...(allowMediaTools != null ? { allowMediaTools } : {}),
+          ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
         });
 
         if (result.action === "send") break;
@@ -742,22 +792,46 @@ async function handleAiTurn(params: {
         clearInterval(typingTimer);
         logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
+        let finalFallbackMessages: string[] = [];
+        let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
 
         if (result.rawText) {
+          const rescued = await rescueSendMessagesFromDraft({
+            userContext: user,
+            userMessage,
+            recentConversation,
+            recentMembers,
+            recentBotMessages,
+            rawDraft: result.rawText,
+          });
+          const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
+          finalFallbackMessages = fallbackMessages;
+          if (rescued?.messages.length) {
+            finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
+            logger.info(
+              {
+                rescuedMessages: rescued.messages.length,
+                rescueToolCalls: rescued.toolCalls.length,
+              },
+              "handleAiTurn: rescued raw draft via send_message",
+            );
+          }
           touchBotActivity();
-          pushMessage(
-            config.tgGroupId,
-            "bot",
-            config.botUsername,
-            result.rawText.slice(0, MAX_BUFFER_TEXT),
-          );
-          await groupRuntime.recordBotMessages({ messages: [result.rawText] });
+          for (const message of fallbackMessages) {
+            pushMessage(
+              config.tgGroupId,
+              "bot",
+              config.botUsername,
+              message.slice(0, MAX_BUFFER_TEXT),
+            );
+          }
+          await groupRuntime.recordBotMessages({ messages: fallbackMessages });
           await sendAiMessages({
             ctx,
             chatId,
             replyToMessageId,
-            messages: [result.rawText],
-            stickerFileId: getStickerFileId(fallbackEmoji),
+            messages: fallbackMessages,
+            stickerFileId: rescued?.messages.length ? null : getStickerFileId(fallbackEmoji),
           });
         } else {
           touchBotActivity();
@@ -790,9 +864,9 @@ async function handleAiTurn(params: {
           model: result.metrics?.model ?? "unknown",
           tier,
           needsSearch,
-          toolCalls: result.metrics?.toolCalls ?? [],
+          toolCalls: finalFallbackToolCalls,
           action: result.rawText ? "send" : "dismiss",
-          messages: result.rawText ? [result.rawText] : [],
+          messages: finalFallbackMessages,
           ...(result.metrics?.inputTokens != null
             ? { inputTokens: result.metrics.inputTokens }
             : {}),
@@ -1297,6 +1371,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       isMentioned,
       urls,
     });
+    const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
     groupRuntime.schedulePassiveTurn({
       label: `message:${msg.message_id}`,
@@ -1318,6 +1393,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });
   });
@@ -1458,6 +1534,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       isMentioned,
       urls,
     });
+    const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
     groupRuntime.schedulePassiveTurn({
       label: `edited:${msg.message_id}`,
@@ -1479,6 +1556,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });
   });

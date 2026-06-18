@@ -23,7 +23,7 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
 2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
-4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail.
+4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail; if there is a raw draft, the handler first tries to rescue it into real `send_message` output.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
 
 ### Special Context Records
@@ -94,6 +94,8 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)   |
 | `writeDiary`            | Record a diary observation about the current conversation                         |
 | `webSearch`             | Tavily search (only attached when `needsSearch=true` from classification)         |
+
+If a web search already succeeded during prefetch before generation, that counts as the turn's required search; the model only needs to call `webSearch` again when the prefetched result is still insufficient.
 
 All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
 

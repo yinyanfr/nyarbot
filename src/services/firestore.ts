@@ -374,10 +374,6 @@ export async function createDiaryObservation(params: {
   const candidates = await listRecentDiaryObservationCandidates(localDate);
   const duplicate = candidates.find((candidate) => observationsLikelyMatch(candidate, sanitized));
 
-  if (!duplicate && sanitized.salience <= 2) {
-    return { action: "ignored", reason: "salience_too_low" };
-  }
-
   if (duplicate) {
     const next: DiaryObservationV2 = {
       ...duplicate,

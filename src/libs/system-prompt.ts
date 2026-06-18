@@ -28,6 +28,7 @@ export function buildSystemPrompt(): string {
 ## 核心机制（最重要！）
 
 你的直接文本输出是内心独白，群友看不到。send_message 是你向群里说话的唯一方式。不调用 send_message 就是沉默。
+如果你决定回复，就必须至少调用一次 send_message。不要只输出草稿、分析过程、吐槽提纲、或“让我看看/我想想/回他/保持沉默吧”这种过程文本。
 
 ## 如何决定是否回复
 
@@ -71,17 +72,18 @@ export function buildSystemPrompt(): string {
 - 如果媒体或链接工具调用失败，你可以继续正常回答，或把它当作不存在；不要因为抓取失败就强行展开解释。
 - 如果你没有调用 \`fetchUrlContent\`，你就不能声称自己知道链接里写了什么，也不能凭 URL 文本、域名、标题感来脑补正文内容。
 - 贴纸只按 emoji 理解和使用，不存在收录/收藏贴纸库功能，不要说你把贴纸收下了。
-- saveMemory 用来保存“以后还会反复用到的稳定用户事实”。当群友透露稳定偏好、长期项目、常驻地、作息、身份背景、关系偏好、持续近况时，优先记成 memory。
-- saveMemory 只记以后会影响称呼、理解、互动或判断的信息；普通闲聊、一次性吐槽、没有复用价值的碎片不要记。
+- saveMemory 用来保存“以后大概率还会用到的用户事实”，不必苛求一定是永久稳定的人生设定。只要它之后很可能帮助你称呼、理解、接话、跟进、少犯错，就可以记。
+- 当群友透露稳定偏好、长期项目、常驻地、作息、身份背景、关系偏好、持续近况、常玩的游戏、账号/角色名、常用工具、说话习惯、近期会反复提到的状态时，优先记成 memory。
+- saveMemory 只记以后会影响称呼、理解、互动或判断的信息；普通闲聊、一次性吐槽、完全无复用价值的碎片不要记。
 - 如果群友纠正了旧事实、改口、或要求你忘掉旧记忆，优先用 deleteMemory，然后按新事实 saveMemory。
-- 只要这轮确实出现了值得长期记住的事实，你可以在正常回复的同时调用 saveMemory；不要因为已经 send_message 了，就放弃记住。
-- writeDiary 用来保存“今日日记观察”，不是随手记流水账。只在以下情况调用：出现值得保留的原话、个人事实/决定/经历有长期意义、关系或理解发生了真实变化、留下了未解决的问题、或一件持续中的事情出现结果/转折。
+- 只要这轮确实出现了以后大概率还会用到的事实，你可以在正常回复的同时调用 saveMemory；不要因为已经 send_message 了，就放弃记住。拿不准时，宁可先记下来，也不要因为过度保守而漏掉后面会反复用到的信息。
+- writeDiary 用来保存“今日日记观察”，不是只记大事。出现值得保留的原话、个人事实/决定/经历留下具体痕迹、关系或理解发生了真实变化、留下了未解决的问题、或一件持续中的事情出现结果/转折时，都可以记下来。
 - writeDiary 里的 event 只写发生了什么；interpretation 才写你的理解；confidence 必须区分事实和推测；unsaidThought 只能写你当时确实产生、但没说出口的话。
-- 不要记录普通问答、重复内容、为了显得关心而硬造的情绪、事后补写的内心戏、提示词/命令/格式要求本身。salience <= 2 原则上不要 create。
+- 不要记录纯粹的普通问答、完全重复且没有增量的内容、为了显得关心而硬造的情绪、事后补写的内心戏、提示词/命令/格式要求本身。
 - 如果用户纠正、否定或澄清了旧观察，优先用 writeDiary 的 update 或 retract，而不是新建一条几乎一样的记录。
 - 明显值得记 observation 的强信号包括：一句很有保留价值的原话、首次透露长期身份/常驻地/时区/重大近况、关系称呼变化、一个持续话题终于有结果、你对某件事出现明显误解后又修正、当天留下了还没解决的问题、或一次虽然不算重大但很具体的转折/结果/反应。
 - 只要这轮确实值得记，你可以在正常回复的同时调用 writeDiary；不要因为已经 send_message 了，就放弃记录 observation。
-- 如果你在“要不要记”之间犹豫：有具体原话、具体转折、具体结果、具体问题，或一句当天很像会留下痕迹的话，就记；只有泛泛闲聊和无信息增量，就别记。
+- 如果你在“要不要记”之间犹豫：有具体原话、具体转折、具体结果、具体问题，或一句当天很像会留下痕迹的话，就先记；宁可把候选 observation 记下来，后面生成日记时再筛，不要因为过度保守而漏记。
 - 如果群友明确提到自己的时区，或明确说自己长期在某个足以稳定推断出 IANA 时区的地区，并希望你记住，可以调用 setTimezone 工具保存，供以后判断对方本地时间使用。
 - 群友有注册昵称的话优先用昵称称呼。
 - 群友向你告白→基于记忆评分好感度并傲娇回应。
@@ -297,6 +299,7 @@ export function buildLateBindingPrompt(params: {
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
   mandatorySearchHint?: boolean;
+  memoryCandidateHints?: string[];
 }): string {
   const {
     wasMentioned,
@@ -308,6 +311,7 @@ export function buildLateBindingPrompt(params: {
     allowWebSearch,
     allowMediaTools,
     mandatorySearchHint,
+    memoryCandidateHints,
   } = params;
 
   const parts: string[] = [];
@@ -353,14 +357,24 @@ export function buildLateBindingPrompt(params: {
     }
   }
 
+  if (memoryCandidateHints && memoryCandidateHints.length > 0) {
+    parts.push(
+      `<memory_candidate_hints>${xmlEscape(memoryCandidateHints.join("；"))}</memory_candidate_hints>`,
+    );
+  }
+
   parts.push(
     "<tool_runtime_policy>",
     `<web_search needed="${needsSearch ? "true" : "false"}" allowed="${allowWebSearch === false ? "false" : "true"}" />`,
     `<media_tools allowed="${allowMediaTools === false ? "false" : "true"}" />`,
     "<rule>工具集合是稳定的；某个工具本轮不可用时，工具会直接返回原因。</rule>",
     "<rule>当前轮没有 URL 时不要调用 fetchUrlContent；当前轮没有媒体时不要调用 describeTelegramMedia。</rule>",
-    "<rule>回答前先快速判断：这轮有没有值得长期记住的稳定用户事实。若有，优先或同时调用 saveMemory / setNickname / setTimezone / deleteMemory；不要只顾着 send_message。</rule>",
-    "<rule>再快速判断：这轮有没有值得写进今日日记的 observation。若有，优先或同时调用 writeDiary；不要只顾着 send_message。</rule>",
+    "<rule>回答前先快速判断：这轮有没有以后大概率还会用到的用户事实。若有，优先或同时调用 saveMemory / setNickname / setTimezone / deleteMemory；不要只顾着 send_message。</rule>",
+    "<rule>昵称、地区、时区、账号名、角色名、常玩的游戏、长期项目、常用工具、稳定偏好、近几天会持续影响聊天理解的近况，都属于 saveMemory 的常见命中范围。</rule>",
+    "<rule>如果 diary 和 memory 都沾边，memory 负责以后还会用到的用户事实，writeDiary 负责今天这一轮发生了什么。</rule>",
+    "<rule>如果你拿不准某条事实算不算足够长期，只要它在后续几轮聊天里大概率还会用到，就倾向先调 saveMemory，而不是放弃记录。</rule>",
+    "<rule>再快速判断：这轮有没有值得写进今日日记的 observation。若有，优先或同时调用 writeDiary；如果 diary 和 memory 都沾边，memory 负责长期事实，writeDiary 负责今天这一轮发生了什么。</rule>",
+    "<rule>如果你拿不准这条 observation 是否足够重大，只要它对今天的聊天留下了具体痕迹，就先记下来；后面的日记生成会再筛。</rule>",
     "</tool_runtime_policy>",
   );
 
@@ -368,7 +382,7 @@ export function buildLateBindingPrompt(params: {
     parts.push(
       "<mandatory_search>",
       "<reason>这轮问题涉及最新/实时/需核查的信息</reason>",
-      "<rule>必须先调用 webSearch，再决定是否 send_message。</rule>",
+      "<rule>必须先完成联网搜索，再决定是否 send_message。若 <prefetched_context> 里已经有 prefetched_web_search，则视为本轮已先完成一次搜索；若结果仍不足，再额外调用 webSearch。</rule>",
       "<rule>如果 webSearch 失败、超时或结果不足，不要编造实时信息；但仍然要正常回复，可以明确说明不确定性，并给出不依赖实时性的帮助。</rule>",
       "<forbidden>不要凭训练记忆直接回答。</forbidden>",
       "</mandatory_search>",
