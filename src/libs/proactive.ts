@@ -1,4 +1,4 @@
-import { probeGate, generateAiTurn } from "./ai.js";
+import { probeGate, generateAiTurn, type RichMediaRef } from "./ai.js";
 import { getHistory, pushMessage, formatHistoryAsContext } from "./conversation-buffer.js";
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
@@ -57,6 +57,44 @@ export interface ProactiveCallbacks {
       | "record_video_note"
       | "upload_video_note",
   ) => Promise<void>;
+  /** Resolve a Telegram file_id to a data URL so proactive turns can inspect images. */
+  resolveTelegramFileAsDataUrl: (fileId: string) => Promise<string | null>;
+}
+
+function collectRecentImageMediaRefs(
+  recentEvents:
+    | {
+        uid: string;
+        mediaRefs: {
+          type: string;
+          source?: string;
+          fileId?: string;
+          thumbnailFileId?: string;
+        }[];
+      }[]
+    | undefined,
+): RichMediaRef[] {
+  const refs: RichMediaRef[] = [];
+  const seen = new Set<string>();
+
+  for (let i = (recentEvents?.length ?? 0) - 1; i >= 0; i--) {
+    const event = recentEvents?.[i];
+    if (!event || event.uid === "bot" || event.uid === "system") continue;
+    for (const media of event.mediaRefs) {
+      if (media.type !== "image" || !media.fileId || seen.has(media.fileId)) continue;
+      seen.add(media.fileId);
+      refs.push({
+        type: "image",
+        source:
+          media.source === "current" || media.source === "reply_to" ? media.source : "current",
+        fileId: media.fileId,
+        ...(media.thumbnailFileId ? { thumbnailFileId: media.thumbnailFileId } : {}),
+      });
+    }
+    if (refs.length > 0) break;
+  }
+
+  return refs.slice(0, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +197,13 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
           logger.warn({ err }, "proactive: load runtime context failed");
           return null;
         });
+        const recentImageMediaRefs = collectRecentImageMediaRefs(runtimeContext?.recentEvents);
         result = await generateAiTurn({
           userContext: { uid: "proactive", nickname: "", memories: [] },
-          userMessage: "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
+          userMessage:
+            recentImageMediaRefs.length > 0
+              ? "（主动性回复：浏览群聊记录，决定是否有值得回复的内容。最近消息中包含图片；若要围绕图片发言，必须先理解图片内容。）"
+              : "（主动性回复：浏览群聊记录，决定是否有值得回复的内容）",
           recentConversation: runtimeContext?.recentEventsText || formattedHistory,
           recentMembers,
           tier: "simple", // proactive messages should always be short
@@ -170,8 +212,10 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
           wasMentioned: false,
           wasRepliedTo: false,
           recentBotMessages,
-          allowRichContentTools: false,
-          ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+          ...(recentImageMediaRefs.length > 0 ? { mediaRefs: recentImageMediaRefs } : {}),
+          resolveTelegramFileAsDataUrl: callbacks.resolveTelegramFileAsDataUrl,
+          allowRichContentTools: recentImageMediaRefs.length > 0,
+          ...(recentImageMediaRefs.length > 0 ? { allowMediaTools: true } : {}),
         });
       } finally {
         clearInterval(typingTimer);

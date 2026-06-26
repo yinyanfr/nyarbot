@@ -658,6 +658,15 @@ export async function writeRuntimeGroupState(patch: Partial<RuntimeGroupStateDoc
     .set(stripUndefined({ ...patch, updatedAt: Date.now() }), { merge: true });
 }
 
+export async function resetRuntimeConversationSummary(): Promise<void> {
+  const resetTs = Date.now();
+  await writeRuntimeGroupState({
+    summary: "",
+    summaryCursorTs: resetTs,
+    lastCompactedAt: 0,
+  });
+}
+
 export async function appendRuntimeEvent(record: RuntimeEventRecord): Promise<void> {
   await db()
     .collection("events")

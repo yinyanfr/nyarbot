@@ -12,6 +12,7 @@ import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
 import { groupRuntime } from "./libs/group-runtime.js";
+import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
@@ -62,6 +63,16 @@ async function main(): Promise<void> {
         await bot.api.sendChatAction(config.tgGroupId, action);
       } catch {
         // Best-effort; typing indicators are non-critical
+      }
+    },
+    resolveTelegramFileAsDataUrl: async (fileId: string) => {
+      try {
+        const file = await bot.api.getFile(fileId);
+        if (!file.file_path) return null;
+        return await downloadTelegramFileAsDataUrl(file.file_path);
+      } catch (err) {
+        logger.warn({ err, fileId }, "proactive: resolveTelegramFileAsDataUrl failed");
+        return null;
       }
     },
   };

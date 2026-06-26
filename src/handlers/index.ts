@@ -7,6 +7,7 @@ import {
   loadRecentRuntimeEvents,
   listDiaryObservationsByDate,
   retractDiaryObservation,
+  resetRuntimeConversationSummary,
   setNightyTimestamp,
   setMorningGreeted,
   countUsersWithMemories,
@@ -1039,6 +1040,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
       if (matchCommand(privEntities, privText, "/reset", botUsername)) {
         clearHistory(config.tgGroupId);
+        await resetRuntimeConversationSummary().catch((err: unknown) => {
+          logger.warn({ err }, "private /reset runtime summary clear failed");
+        });
         await ctx.reply(pickResetReply()).catch((err: unknown) => {
           logger.warn({ err }, "private /reset reply failed");
         });
@@ -1303,6 +1307,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
       clearHistory(config.tgGroupId);
+      await resetRuntimeConversationSummary().catch((err: unknown) => {
+        logger.warn({ err }, "group /reset runtime summary clear failed");
+      });
       await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
       return;
     }

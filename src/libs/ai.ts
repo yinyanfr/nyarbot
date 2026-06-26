@@ -547,6 +547,7 @@ async function prefetchTurnContext(params: {
   needsSearch: boolean;
   urls?: string[];
   mediaRefs?: RichMediaRef[];
+  forcePrefetchMedia?: boolean;
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
   allowRichContentTools?: boolean;
@@ -557,6 +558,7 @@ async function prefetchTurnContext(params: {
     needsSearch,
     urls,
     mediaRefs,
+    forcePrefetchMedia,
     allowWebSearch,
     allowMediaTools,
     allowRichContentTools,
@@ -570,7 +572,7 @@ async function prefetchTurnContext(params: {
   };
 
   const prefetchUrls = shouldPrefetchUrls({ userMessage, urls, needsSearch });
-  const prefetchMedia = shouldPrefetchMedia({ userMessage, mediaRefs });
+  const prefetchMedia = forcePrefetchMedia || shouldPrefetchMedia({ userMessage, mediaRefs });
 
   if (needsSearch && allowWebSearch !== false) {
     const searchResult = await performWebSearch(userMessage, { maxResults: 3 });
@@ -687,17 +689,22 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   }
 
   const maxTokens = MAX_TOKENS_BY_TIER[tier];
+  const requireImageUnderstanding = (mediaRefs ?? []).some((ref) => ref.type === "image");
 
   const prefetchedContext = await prefetchTurnContext({
     userMessage,
     needsSearch,
     ...(urls ? { urls } : {}),
     ...(mediaRefs ? { mediaRefs } : {}),
+    ...(requireImageUnderstanding ? { forcePrefetchMedia: true } : {}),
     ...(allowWebSearch != null ? { allowWebSearch } : {}),
     ...(allowMediaTools != null ? { allowMediaTools } : {}),
     ...(allowRichContentTools != null ? { allowRichContentTools } : {}),
     ...(resolveTelegramFileAsDataUrl ? { resolveTelegramFileAsDataUrl } : {}),
   });
+  let hasImageUnderstanding =
+    !requireImageUnderstanding ||
+    prefetchedContext.mediaDescriptions.some((item) => item.mediaType.startsWith("image"));
   const prefetchedContextBlock = buildPrefetchedContextBlock(prefetchedContext);
 
   // Build the late-binding prompt that goes at the end of the user message
@@ -713,6 +720,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ...(mandatorySearchHint != null ? { mandatorySearchHint } : {}),
     ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
     ...(isRetryTurn ? { isRetryTurn } : {}),
+    ...(requireImageUnderstanding ? { requireImageUnderstanding } : {}),
+    ...(requireImageUnderstanding ? { hasImageUnderstanding } : {}),
   });
 
   const promptText = systemHint
@@ -1101,6 +1110,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         },
       );
       const result = description.trim() || null;
+      if (result && meta.type === "image") {
+        hasImageUnderstanding = true;
+      }
       setSessionCached(mediaDescriptionCache, cacheKey, result, SESSION_MEDIA_CACHE_MAX);
       return result ?? "描述失败";
     },
@@ -1188,11 +1200,15 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
           if (!resolveTelegramFileAsDataUrl) return "当前会话未启用媒体解析能力";
           const dataUrl = await resolveTelegramFileAsDataUrl(file_id);
           if (!dataUrl) return "媒体下载失败";
-          return await describeImage(
+          const description = await describeImage(
             dataUrl,
             prompt,
             meta.viaThumbnail ? `${meta.type} 缩略图/封面` : meta.type,
           );
+          if (description.trim() && meta.type === "image") {
+            hasImageUnderstanding = true;
+          }
+          return description;
         },
       });
 
@@ -1309,6 +1325,19 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     if (sentMessages.length > 0 && allowWebSearch !== false && !mandatorySearchHint) {
       return generateAiTurn({ ...opts, mandatorySearchHint: true });
     }
+  }
+
+  if (requireImageUnderstanding && !hasImageUnderstanding) {
+    logger.info(
+      {
+        allowRichContentTools,
+        allowMediaTools,
+        toolCallNames,
+        prefetchedMediaCount: prefetchedContext.mediaDescriptions.length,
+      },
+      "generateAiTurn: dismissing because image understanding was required but unavailable",
+    );
+    return { action: "dismiss" as const, metrics, toolCallNames };
   }
 
   // Determine the outcome
