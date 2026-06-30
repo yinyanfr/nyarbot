@@ -83,11 +83,33 @@ function buildDiaryChannelPost(diary: string): string {
   return diary;
 }
 
+function buildDiaryNotificationSummary(diary: string): string {
+  const cleaned = diary.replace(/\r/g, "").trim();
+  if (!cleaned) return "";
+
+  const paragraphs = cleaned
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  let summary = paragraphs.slice(0, 2).join("\n");
+  if (!summary) summary = cleaned;
+  if (summary.length > 360) {
+    const sentences = summary
+      .split(/(?<=[。！？!?])/u)
+      .map((part) => part.trim())
+      .filter(Boolean);
+    summary = sentences.slice(0, 3).join("");
+  }
+  return summary.slice(0, 360).trim();
+}
+
 async function generateDiaryNotification(
   yesterdayDate: string,
+  diary: string,
   diaryUrl: string | null,
   options: { pagesReady: boolean },
 ): Promise<string> {
+  const diarySummary = buildDiaryNotificationSummary(diary);
   const urlNote = diaryUrl ? `\n日记的链接是：${diaryUrl}` : "";
   const pagesNote = options.pagesReady
     ? "页面已经更新好了，可以直接点链接。"
@@ -96,8 +118,8 @@ async function generateDiaryNotification(
       : "";
   const { text } = await generateText({
     model: flashNoThinkModel,
-    system: `<diary_notification_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>日记更新后在群里发通知</task><tone>自然傲娇、群友口吻</tone><constraints><length>2-3句</length><structure>一句感叹昨天，一句提示可查看并附链接</structure></constraints></diary_notification_system>`,
-    prompt: `<diary_notification_request><date>${xmlEscape(yesterdayDate)}</date><url>${xmlEscape(diaryUrl ?? "")}</url><pages_ready>${options.pagesReady ? "true" : "false"}</pages_ready><extra>${xmlEscape(`${urlNote}${pagesNote ? `\n${pagesNote}` : ""}`)}</extra><output>仅输出通知文本</output></diary_notification_request>`,
+    system: `<diary_notification_system><persona>${xmlEscape(getPersonaLabel())}</persona><task>日记更新后在群里发通知</task><tone>自然傲娇、群友口吻</tone><constraints><length>2-3句</length><structure>一句概括昨日日记里真的写到的内容，一句提示可查看并附链接</structure></constraints><rules><rule>你只能根据提供的 diary_summary 改写通知，不能编造日记里没有出现的人、事、情绪或冲突。</rule><rule>如果 diary_summary 很平静，就平静地说，不要为了热闹乱写剧情。</rule><rule>不要输出解释，不要复述规则。</rule></rules></diary_notification_system>`,
+    prompt: `<diary_notification_request><date>${xmlEscape(yesterdayDate)}</date><diary_summary>${xmlEscape(diarySummary)}</diary_summary><url>${xmlEscape(diaryUrl ?? "")}</url><pages_ready>${options.pagesReady ? "true" : "false"}</pages_ready><extra>${xmlEscape(`${urlNote}${pagesNote ? `\n${pagesNote}` : ""}`)}</extra><output>仅输出通知文本</output></diary_notification_request>`,
     temperature: 0.8,
     maxOutputTokens: 200,
   });
@@ -313,7 +335,7 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     }
 
     if (diaryCallbacks) {
-      generateDiaryNotification(yesterdayDate, diaryUrl, { pagesReady })
+      generateDiaryNotification(yesterdayDate, diary, diaryUrl, { pagesReady })
         .then((notification) =>
           diaryCallbacks!.sendText(notification, "diary_notification", {
             inlineKeyboardText: "加入今天的挑战",

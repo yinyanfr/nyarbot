@@ -6,6 +6,7 @@ export {
   describeImage,
   generateLoveResponse,
   generateShockResponse,
+  generateStrokeResponse,
   fetchUrlContent,
 } from "./ai.js";
 export type { AiTurnResult, GenerateOptions, ProbeGateOptions } from "./ai.js";

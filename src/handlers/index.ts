@@ -19,6 +19,7 @@ import {
   generateMorningGreeting,
   generateLoveResponse,
   generateShockResponse,
+  generateStrokeResponse,
   rescueSendMessagesFromDraft,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
@@ -65,6 +66,94 @@ const RESET_REPLIES = [
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function isReplyTargetMissingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("message to be replied not found");
+}
+
+async function sendTextMessageWithReplyFallback(params: {
+  ctx: BotContext;
+  chatId: number;
+  text: string;
+  formatted: string;
+  replyToMessageId?: number;
+}): Promise<void> {
+  const { ctx, chatId, text, formatted, replyToMessageId } = params;
+
+  const sendPlain = async (withReply: boolean): Promise<void> => {
+    const sendParams: Record<string, unknown> = {};
+    if (withReply && replyToMessageId !== undefined) {
+      sendParams.reply_parameters = { message_id: replyToMessageId };
+    }
+    await ctx.api.sendMessage(chatId, text, sendParams);
+  };
+
+  try {
+    const sendParams: Record<string, unknown> = { parse_mode: "HTML" };
+    if (replyToMessageId !== undefined) {
+      sendParams.reply_parameters = { message_id: replyToMessageId };
+    }
+    await ctx.api.sendMessage(chatId, formatted, sendParams);
+    return;
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: reply target missing, retrying without reply",
+      );
+      try {
+        await ctx.api.sendMessage(chatId, formatted, { parse_mode: "HTML" });
+        return;
+      } catch {
+        await sendPlain(false);
+        return;
+      }
+    }
+  }
+
+  try {
+    await sendPlain(replyToMessageId !== undefined);
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: plain-text reply target missing, retrying without reply",
+      );
+      await sendPlain(false);
+      return;
+    }
+    throw err;
+  }
+}
+
+async function sendStickerWithReplyFallback(params: {
+  ctx: BotContext;
+  chatId: number;
+  stickerFileId: string;
+  replyToMessageId?: number;
+}): Promise<void> {
+  const { ctx, chatId, stickerFileId, replyToMessageId } = params;
+  try {
+    if (replyToMessageId === undefined) {
+      await ctx.api.sendSticker(chatId, stickerFileId);
+      return;
+    }
+    await ctx.api.sendSticker(chatId, stickerFileId, {
+      reply_parameters: { message_id: replyToMessageId },
+    });
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: sticker reply target missing, retrying without reply",
+      );
+      await ctx.api.sendSticker(chatId, stickerFileId);
+      return;
+    }
+    throw err;
+  }
 }
 
 function formatDiaryObservationSummary(
@@ -120,6 +209,30 @@ function parseShockCommand(
   botUsername: string,
 ): { intensity?: number; extraText?: string } | null {
   const commandEntity = findCommandEntity(entities, text, "/shock", botUsername);
+  if (!commandEntity) return null;
+
+  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
+  if (!remainder) return {};
+
+  const match = remainder.match(/^([+-]?\d+)(?:\s+(.*))?$/s);
+  if (match) {
+    const intensity = Number.parseInt(match[1] ?? "", 10);
+    const extraText = match[2]?.trim();
+    return {
+      intensity,
+      ...(extraText ? { extraText } : {}),
+    };
+  }
+
+  return { extraText: remainder };
+}
+
+function parseStrokeCommand(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  botUsername: string,
+): { intensity?: number; extraText?: string } | null {
+  const commandEntity = findCommandEntity(entities, text, "/stroke", botUsername);
   if (!commandEntity) return null;
 
   const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
@@ -568,8 +681,11 @@ async function sendAiMessages(params: {
     // No text messages — if there's a sticker, send it with a reply reference
     if (stickerFileId) {
       try {
-        await ctx.api.sendSticker(chatId, stickerFileId, {
-          reply_parameters: { message_id: replyToMessageId },
+        await sendStickerWithReplyFallback({
+          ctx,
+          chatId,
+          stickerFileId,
+          replyToMessageId,
         });
       } catch (err) {
         logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
@@ -583,22 +699,15 @@ async function sendAiMessages(params: {
   for (let i = 0; i < messages.length; i++) {
     const text = messages[i]!;
     const formatted = formatForTelegramHtml(text);
-    const sendParams: Record<string, unknown> = {};
-
-    if (i === 0) {
-      sendParams.reply_parameters = { message_id: replyToMessageId };
-    }
 
     try {
-      // Try HTML formatting first, fall back to plain text
-      try {
-        await ctx.api.sendMessage(chatId, formatted, {
-          ...sendParams,
-          parse_mode: "HTML",
-        });
-      } catch {
-        await ctx.api.sendMessage(chatId, text, sendParams);
-      }
+      await sendTextMessageWithReplyFallback({
+        ctx,
+        chatId,
+        text,
+        formatted,
+        ...(i === 0 ? { replyToMessageId } : {}),
+      });
     } catch (err) {
       logger.warn({ err, i }, "sendAiMessages: failed to send message");
     }
@@ -851,8 +960,11 @@ async function handleAiTurn(params: {
           });
           if (stickerFileId) {
             try {
-              await ctx.api.sendSticker(chatId, stickerFileId, {
-                reply_parameters: { message_id: replyToMessageId },
+              await sendStickerWithReplyFallback({
+                ctx,
+                chatId,
+                stickerFileId,
+                replyToMessageId,
               });
             } catch (err) {
               logger.warn({ err, emoji: fallbackEmoji }, "handleAiTurn: fallback sticker failed");
@@ -1266,6 +1378,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
 • /shock [0-200|想说的话] — 电我一下，也可以带强度或顺便说话
+• /stroke [1-200|想说的话] — 撸撸本喵，也可以带力度或边撸边说话
 • /nighty — 跟我说晚安，8小时后我会发早安问候
 • 发图片 — 我会看看是什么然后吐槽
 • 让我「叫我XX」— 我会记住你的昵称
@@ -1287,6 +1400,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     if (shockArgs) {
       const shocked = await generateShockResponse(user, shockArgs);
       await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      return;
+    }
+
+    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
+    if (strokeArgs) {
+      const stroked = await generateStrokeResponse(user, strokeArgs);
+      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
       return;
     }
 
@@ -1440,6 +1560,15 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const isRepliedToBot =
       replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
       replyTo?.from?.id === botId;
+
+    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
+    if (strokeArgs) {
+      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const stroked = await generateStrokeResponse(user, strokeArgs);
+      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      return;
+    }
+
     if (!isMentioned && !isRepliedToBot) return;
 
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
