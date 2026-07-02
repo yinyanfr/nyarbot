@@ -20,6 +20,9 @@ import {
   serializeDiaryObservationsXml,
 } from "./diary-observations.js";
 
+const DIARY_NOTIFICATION_TIMEOUT_MS = 20_000;
+const DIARY_GENERATION_TIMEOUT_MS = 120_000;
+
 function xmlEscape(text: string): string {
   return text
     .replaceAll("&", "&amp;")
@@ -122,6 +125,7 @@ async function generateDiaryNotification(
     prompt: `<diary_notification_request><date>${xmlEscape(yesterdayDate)}</date><diary_summary>${xmlEscape(diarySummary)}</diary_summary><url>${xmlEscape(diaryUrl ?? "")}</url><pages_ready>${options.pagesReady ? "true" : "false"}</pages_ready><extra>${xmlEscape(`${urlNote}${pagesNote ? `\n${pagesNote}` : ""}`)}</extra><output>仅输出通知文本</output></diary_notification_request>`,
     temperature: 0.8,
     maxOutputTokens: 200,
+    timeout: { totalMs: DIARY_NOTIFICATION_TIMEOUT_MS },
   });
   return `${text.trim()}\n\n日语姬本日题库已更新，欢迎打卡`;
 }
@@ -229,6 +233,7 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
       model: geminiDiaryModel,
       system: buildDiarySystemPrompt(date),
       messages: [{ role: "user", content: requestPayload }],
+      timeout: { totalMs: DIARY_GENERATION_TIMEOUT_MS },
     });
 
     const diary = result.text.trim();
