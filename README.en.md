@@ -191,7 +191,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 ## Release Notes
 
 - Current release: [`1.0.0`](CHANGELOG.md)
-- Release focus: `/shock`, special context `kind`, on-demand rich-content tools, diary publishing flow, prompt-injection hardening, stronger channel-send diagnostics
+- Recent updates: `saveMemory` now targets reusable user facts instead of only permanent traits; `writeDiary` is more candidate-first; successful prefetch now counts as having searched; dismissed raw drafts are rescued through real `send_message` when possible; `memoryCandidateHints` are narrower and softer
 
 ## Disclaimer
 

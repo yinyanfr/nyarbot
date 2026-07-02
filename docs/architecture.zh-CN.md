@@ -69,8 +69,10 @@ handlers/index.ts（setupHandlers）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
 │     │           describeTelegramMedia、fetchUrlContent、startSubagent
+    │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
     │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
     │     ├─ 沉默重试（simple/complex 1 次；tech 0 次）
+    │     ├─ raw draft rescue：dismiss 后尽量用真实 send_message 把草稿改写后补发
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
     │     └─ 通过 sendAiMessages 发送（打字指示、消息间隔、贴纸分发）
     └─ 主动插话检查器（proactive.ts，间隔可由环境变量配置）
@@ -164,6 +166,7 @@ type AiTurnResult =
 ### 强制联网搜索
 
 当 `classifyMessage()` 返回 `needsSearch=true` 时，late-binding 会追加强制搜索要求。若模型在没有调用 `webSearch` 的情况下调用了 `send_message`，本轮视为策略违规：自动重试一次并追加更硬的搜索提示；若仍失败，发送保守失败文案，避免凭记忆乱答。
+如果本轮在模型生成前已经完成了成功的预取搜索，则这次预取视为“已经搜索过”；只有结果仍不足时，才需要再额外调用 `webSearch`。
 
 > `<强制指令：这条消息涉及需要最新/实时信息的内容，你必须先调用 webSearch 工具搜索后再回答。不要凭记忆回答，务必搜索。>`
 
@@ -176,6 +179,12 @@ type AiTurnResult =
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
 - **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
+
+## 记忆与日记
+
+- `saveMemory` 现在更偏向“以后大概率还会用到的用户事实”，不必要求它是永久设定。
+- `writeDiary` 更偏向收集当天值得回看的候选观察，而不是只记特别重大的事件。
+- `memoryCandidateHints` 是 handler 提供的软提示，只用于提高相关命中，不是自动写入依据。
 
 ## 提示词架构
 

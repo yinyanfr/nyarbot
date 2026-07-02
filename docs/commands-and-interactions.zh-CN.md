@@ -23,7 +23,7 @@
 1. **分类** — `classifyMessage()` 将消息归类为 `simple`、`complex` 或 `tech`，以及是否需要联网搜索。
 2. **模型选择** — `simple` → flash-无思考、`complex` → flash-思考、`tech` → pro-思考。
 3. **工具增强生成** — `generateAiTurn()` 运行带工具的生成（send_message、dismiss、记忆、昵称、贴纸、可选联网搜索）。
-4. **沉默重试** — 如果模型在被触发时选择 `dismiss`，最多重试 3 次，每次追加递增的回复提示。所有重试仍沉默则回退到原始文本或贴纸。
+4. **沉默重试** — 如果模型在被触发时选择 `dismiss`，最多重试 3 次，每次追加递增的回复提示。所有重试仍沉默则回退到原始文本或贴纸；如果有 raw draft，handler 会先尽量把草稿救成真实的 `send_message` 发出去。
 5. **输出** — 消息通过 `formatForTelegramHtml()` 格式化（Markdown → Telegram HTML），带打字指示和可选贴纸分发。
 
 ### 特殊上下文记录
@@ -94,6 +94,8 @@
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容（仅被动触发）                          |
 | `writeDiary`            | 记录关于当前对话的观察笔记                                     |
 | `webSearch`             | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）          |
+
+如果本轮在模型生成前已经完成成功的搜索预取，这次预取就算已经搜索过；只有结果仍不足时，模型才需要再额外调用 `webSearch`。
 
 所有记忆/昵称工具在写入 Firestore 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
 

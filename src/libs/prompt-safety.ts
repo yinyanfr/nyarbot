@@ -19,10 +19,23 @@ function stripControlChars(text: string): string {
   return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 }
 
+export function sanitizePromptText(text: string): string {
+  return stripControlChars(text)
+    .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, "")
+    .replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")
+    .replace(/\r\n?/g, "\n");
+}
+
+export function truncateUnicode(text: string, maxLen: number): string {
+  if (maxLen <= 0) return "";
+  const chars = Array.from(text);
+  return chars.length > maxLen ? chars.slice(0, maxLen).join("") : text;
+}
+
 export function normalizePromptData(text: string, maxLen = 500): string {
-  const normalized = stripControlChars(text).replace(/\r\n?/g, "\n").trim();
+  const normalized = sanitizePromptText(text).trim();
   if (!normalized) return "";
-  return normalized.length > maxLen ? normalized.slice(0, maxLen) : normalized;
+  return truncateUnicode(normalized, maxLen);
 }
 
 export function isPromptInjectionLike(text: string): boolean {

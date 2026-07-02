@@ -2,12 +2,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
+import { sanitizePromptText } from "./prompt-safety.js";
 
 export type HistoryEntryKind =
   | "normal"
   | "command_help"
   | "command_love"
   | "command_shock"
+  | "command_stroke"
   | "command_reset"
   | "command_status"
   | "command_nighty"
@@ -31,7 +33,7 @@ const MAX_TEXT_LEN = 500;
 const buffers = new Map<string, HistoryEntry[]>();
 
 function xmlEscape(text: string): string {
-  return text
+  return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")

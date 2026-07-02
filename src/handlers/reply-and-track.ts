@@ -7,6 +7,11 @@ import { MAX_BUFFER_TEXT } from "./constants.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { groupRuntime } from "../libs/group-runtime.js";
 
+function isReplyTargetMissingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("message to be replied not found");
+}
+
 /**
  * Reply to the current message, push the reply into the group buffer so that
  * later AI calls and the proactive checker have full context, and reset the
@@ -43,16 +48,33 @@ export async function replyAndTrack(
 
   if (formatMarkdown) {
     const formatted = formatForTelegramHtml(text);
-    const opts: Record<string, unknown> = { parse_mode: "HTML" };
-    if (replyToMessageId !== undefined) {
-      opts.reply_parameters = { message_id: replyToMessageId };
-    }
     try {
-      await ctx.reply(formatted, opts);
+      const htmlOpts: Record<string, unknown> = { parse_mode: "HTML" };
+      if (replyToMessageId !== undefined) {
+        htmlOpts.reply_parameters = { message_id: replyToMessageId };
+      }
+      await ctx.reply(formatted, htmlOpts);
       push();
       return;
     } catch (err) {
-      logger.warn({ err }, "replyAndTrack: HTML reply failed, falling back to plain text");
+      if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+        logger.info(
+          { replyToMessageId },
+          "replyAndTrack: reply target missing, retrying without reply",
+        );
+        try {
+          await ctx.reply(formatted, { parse_mode: "HTML" });
+          push();
+          return;
+        } catch (retryErr) {
+          logger.warn(
+            { err: retryErr },
+            "replyAndTrack: HTML send without reply failed, falling back to plain text",
+          );
+        }
+      } else {
+        logger.warn({ err }, "replyAndTrack: HTML reply failed, falling back to plain text");
+      }
     }
   }
 
@@ -63,8 +85,21 @@ export async function replyAndTrack(
     }
     await ctx.reply(text, opts);
   } catch (err) {
-    logger.warn({ err }, "replyAndTrack: reply failed");
-    return;
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "replyAndTrack: plain-text reply target missing, retrying without reply",
+      );
+      try {
+        await ctx.reply(text);
+      } catch (retryErr) {
+        logger.warn({ err: retryErr }, "replyAndTrack: plain-text send without reply failed");
+        return;
+      }
+    } else {
+      logger.warn({ err }, "replyAndTrack: reply failed");
+      return;
+    }
   }
   push();
 }

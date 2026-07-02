@@ -2,10 +2,16 @@ import { Bot } from "grammy";
 import type { Message } from "grammy/types";
 import config from "../configs/env.js";
 import {
+  getDiaryObservation,
   getOrCreateUser,
+  loadRecentRuntimeEvents,
+  listDiaryObservationsByDate,
+  retractDiaryObservation,
+  resetRuntimeConversationSummary,
   setNightyTimestamp,
   setMorningGreeted,
   countUsersWithMemories,
+  updateDiaryObservation,
 } from "../services/firestore.js";
 import {
   classifyMessage,
@@ -13,6 +19,8 @@ import {
   generateMorningGreeting,
   generateLoveResponse,
   generateShockResponse,
+  generateStrokeResponse,
+  rescueSendMessagesFromDraft,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
 import {
@@ -40,8 +48,10 @@ import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
+import { sanitizePromptText } from "../libs/prompt-safety.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
+import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -56,6 +66,125 @@ const RESET_REPLIES = [
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function isReplyTargetMissingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("message to be replied not found");
+}
+
+async function sendTextMessageWithReplyFallback(params: {
+  ctx: BotContext;
+  chatId: number;
+  text: string;
+  formatted: string;
+  replyToMessageId?: number;
+}): Promise<void> {
+  const { ctx, chatId, text, formatted, replyToMessageId } = params;
+
+  const sendPlain = async (withReply: boolean): Promise<void> => {
+    const sendParams: Record<string, unknown> = {};
+    if (withReply && replyToMessageId !== undefined) {
+      sendParams.reply_parameters = { message_id: replyToMessageId };
+    }
+    await ctx.api.sendMessage(chatId, text, sendParams);
+  };
+
+  try {
+    const sendParams: Record<string, unknown> = { parse_mode: "HTML" };
+    if (replyToMessageId !== undefined) {
+      sendParams.reply_parameters = { message_id: replyToMessageId };
+    }
+    await ctx.api.sendMessage(chatId, formatted, sendParams);
+    return;
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: reply target missing, retrying without reply",
+      );
+      try {
+        await ctx.api.sendMessage(chatId, formatted, { parse_mode: "HTML" });
+        return;
+      } catch {
+        await sendPlain(false);
+        return;
+      }
+    }
+  }
+
+  try {
+    await sendPlain(replyToMessageId !== undefined);
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: plain-text reply target missing, retrying without reply",
+      );
+      await sendPlain(false);
+      return;
+    }
+    throw err;
+  }
+}
+
+async function sendStickerWithReplyFallback(params: {
+  ctx: BotContext;
+  chatId: number;
+  stickerFileId: string;
+  replyToMessageId?: number;
+}): Promise<void> {
+  const { ctx, chatId, stickerFileId, replyToMessageId } = params;
+  try {
+    if (replyToMessageId === undefined) {
+      await ctx.api.sendSticker(chatId, stickerFileId);
+      return;
+    }
+    await ctx.api.sendSticker(chatId, stickerFileId, {
+      reply_parameters: { message_id: replyToMessageId },
+    });
+  } catch (err) {
+    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+      logger.info(
+        { replyToMessageId },
+        "sendAiMessages: sticker reply target missing, retrying without reply",
+      );
+      await ctx.api.sendSticker(chatId, stickerFileId);
+      return;
+    }
+    throw err;
+  }
+}
+
+function formatDiaryObservationSummary(
+  date: string,
+  items: Awaited<ReturnType<typeof listDiaryObservationsByDate>>,
+): string {
+  if (items.length === 0) return `${date} 没有 observation`;
+  return [
+    `${date} observations (${items.length})`,
+    ...items.map((item) => {
+      const extras = [
+        `status=${item.status}`,
+        `confidence=${item.confidence}`,
+        `salience=${item.salience}`,
+        item.supersedesId ? `supersedes=${item.supersedesId}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const refs = item.sourceRefs?.length ? ` refs=${item.sourceRefs.join(",")}` : "";
+      return `- ${item.id} ${extras}\n  event: ${item.event}${refs}`;
+    }),
+  ].join("\n");
+}
+
+function buildDiaryPatchFromJson(text: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function findCommandEntity(
@@ -98,8 +227,32 @@ function parseShockCommand(
   return { extraText: remainder };
 }
 
+function parseStrokeCommand(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  botUsername: string,
+): { intensity?: number; extraText?: string } | null {
+  const commandEntity = findCommandEntity(entities, text, "/stroke", botUsername);
+  if (!commandEntity) return null;
+
+  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
+  if (!remainder) return {};
+
+  const match = remainder.match(/^([+-]?\d+)(?:\s+(.*))?$/s);
+  if (match) {
+    const intensity = Number.parseInt(match[1] ?? "", 10);
+    const extraText = match[2]?.trim();
+    return {
+      intensity,
+      ...(extraText ? { extraText } : {}),
+    };
+  }
+
+  return { extraText: remainder };
+}
+
 function xmlEscape(text: string): string {
-  return text
+  return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -273,13 +426,210 @@ function buildBufferLine(params: {
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
 }
 
+const MEMORY_CANDIDATE_PATTERNS: { type: string; regex: RegExp; hint: string }[] = [
+  {
+    type: "nickname",
+    regex: /(?:我叫|叫我|可以叫我|喊我|昵称是|名字是)/u,
+    hint: "当前轮可能出现了称呼/昵称信息",
+  },
+  {
+    type: "timezone",
+    regex: /(?:时区|UTC[+-]?\d{1,2}|GMT[+-]?\d{1,2}|Asia\/[A-Za-z_]+)/u,
+    hint: "当前轮可能出现了时区信息",
+  },
+  {
+    type: "location",
+    regex:
+      /(?:我住在|人在|回老家|我在[^\n]{0,20}(?:上班|工作|读书)|在[^\n]{1,20}(?:上班|工作|读书))/u,
+    hint: "当前轮可能出现了常驻地/地区/生活地点信息",
+  },
+  {
+    type: "project",
+    regex: /(?:(?:最近|这阵子|这几天)?在做|正在做|还在做|维护.+项目|开发.+项目|做.+毕设|写.+论文)/u,
+    hint: "当前轮可能出现了持续项目或近期会反复提到的近况",
+  },
+  {
+    type: "preference",
+    regex: /(?:最喜欢|比较喜欢|更喜欢|爱吃|不吃|偏好|只会用|习惯用|平时都用|一般都用|常用的是)/u,
+    hint: "当前轮可能出现了偏好/习惯/常用工具信息",
+  },
+  {
+    type: "account",
+    regex: /(?:号叫|账号叫|角色叫|ID叫|我的猫娘叫|我家.+叫)/u,
+    hint: "当前轮可能出现了账号名/角色名/长期会复用的命名信息",
+  },
+];
+
+function detectMemoryCandidateHints(rawText: string): string[] {
+  const trimmed = rawText.trim();
+  if (!trimmed) return [];
+
+  const hints = MEMORY_CANDIDATE_PATTERNS.filter((item) => item.regex.test(trimmed)).map(
+    (item) => item.hint,
+  );
+
+  return Array.from(new Set(hints));
+}
+
+const RECENT_MEDIA_FOLLOWUP_REGEX =
+  /这张图|这个图|刚才那张图|上一张图|那张图|这图|那图|图里|图片里|截图里|看图|识图|帮我看图|图上|上面写了什么|这是什么|啥意思|解释一下/u;
+
+function parseMediaRefsFromBufferText(text: string): MediaRef[] {
+  const refs: MediaRef[] = [];
+
+  for (const match of text.matchAll(/\[图片 file_id=([^\]\s]+)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({ type: "image", source: "reply_to", fileId });
+  }
+  for (const match of text.matchAll(/\[视频 file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "video",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[GIF file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "animation",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[视频消息 file_id=([^\]\s]+) thumb=([^\]\s]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "video_note",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[文件 file_id=([^\]\s]+) thumb=([^\]\s]*)\s*([^\]]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "document",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+      ...(match[3]?.trim() ? { filename: match[3].trim() } : {}),
+    });
+  }
+  for (const match of text.matchAll(/\[音频 file_id=([^\]\s]+) thumb=([^\]\s]*)\s*([^\]]*)\]/g)) {
+    const fileId = match[1];
+    if (!fileId) continue;
+    refs.push({
+      type: "audio",
+      source: "reply_to",
+      fileId,
+      ...(match[2] ? { thumbnailFileId: match[2] } : {}),
+      ...(match[3]?.trim() ? { title: match[3].trim() } : {}),
+    });
+  }
+
+  return refs;
+}
+
+function maybeAttachRecentMediaRefs(params: {
+  groupId: string;
+  rawText: string;
+  mediaRefs: MediaRef[];
+}): MediaRef[] {
+  if (params.mediaRefs.length > 0) return params.mediaRefs;
+  if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
+
+  const history = getHistory(params.groupId);
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i];
+    if (!entry || entry.uid === "bot" || entry.uid === "system") continue;
+    const refs = parseMediaRefsFromBufferText(entry.text);
+    if (refs.length > 0) {
+      logger.info(
+        { matchedText: params.rawText, sourceUid: entry.uid, recoveredRefs: refs.length },
+        "attached recent media refs for follow-up",
+      );
+      return refs;
+    }
+  }
+
+  return params.mediaRefs;
+}
+
+function mapRuntimeMediaRefToMediaRef(ref: {
+  type: string;
+  source?: string;
+  fileId?: string;
+  thumbnailFileId?: string;
+  emoji?: string;
+  filename?: string;
+  title?: string;
+}): MediaRef | null {
+  if (
+    ref.type !== "image" &&
+    ref.type !== "sticker" &&
+    ref.type !== "video" &&
+    ref.type !== "animation" &&
+    ref.type !== "video_note" &&
+    ref.type !== "document" &&
+    ref.type !== "audio"
+  ) {
+    return null;
+  }
+
+  const source = ref.source === "current" || ref.source === "reply_to" ? ref.source : "reply_to";
+  return {
+    type: ref.type,
+    source,
+    ...(ref.fileId ? { fileId: ref.fileId } : {}),
+    ...(ref.thumbnailFileId ? { thumbnailFileId: ref.thumbnailFileId } : {}),
+    ...(ref.emoji ? { emoji: ref.emoji } : {}),
+    ...(ref.filename ? { filename: ref.filename } : {}),
+    ...(ref.title ? { title: ref.title } : {}),
+  };
+}
+
+async function attachRecentMediaRefs(params: {
+  groupId: string;
+  rawText: string;
+  mediaRefs: MediaRef[];
+}): Promise<MediaRef[]> {
+  if (params.mediaRefs.length > 0) return params.mediaRefs;
+  if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
+
+  try {
+    const recentEvents = await loadRecentRuntimeEvents({ limit: 20, newestFirst: true });
+    for (let i = recentEvents.length - 1; i >= 0; i--) {
+      const event = recentEvents[i];
+      if (!event || event.uid === "bot" || event.uid === "system") continue;
+      const refs = event.mediaRefs.map(mapRuntimeMediaRefToMediaRef).filter(Boolean) as MediaRef[];
+      if (refs.length > 0) {
+        logger.info(
+          { matchedText: params.rawText, sourceUid: event.uid, recoveredRefs: refs.length },
+          "attached recent media refs from runtime events",
+        );
+        return refs;
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, "failed to recover recent media refs from runtime events");
+  }
+
+  return maybeAttachRecentMediaRefs(params);
+}
+
 /**
- * Aggregate distinct recent participants from the in-memory buffer so the LLM
- * knows which uids are safe to reference from memory tools.
+ * Aggregate distinct recent participants from the in-memory buffer for prompt context.
  */
 function collectRecentMembers(groupId: string): {
   recentMembers: { uid: string; name: string; username?: string }[];
-  allowedUids: Set<string>;
 } {
   const history = getHistory(groupId);
   const map = new Map<string, { name: string; username?: string }>();
@@ -296,7 +646,7 @@ function collectRecentMembers(groupId: string): {
     name: info.name,
     ...(info.username ? { username: info.username } : {}),
   }));
-  return { recentMembers, allowedUids: new Set(map.keys()) };
+  return { recentMembers };
 }
 
 /**
@@ -331,8 +681,11 @@ async function sendAiMessages(params: {
     // No text messages — if there's a sticker, send it with a reply reference
     if (stickerFileId) {
       try {
-        await ctx.api.sendSticker(chatId, stickerFileId, {
-          reply_parameters: { message_id: replyToMessageId },
+        await sendStickerWithReplyFallback({
+          ctx,
+          chatId,
+          stickerFileId,
+          replyToMessageId,
         });
       } catch (err) {
         logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
@@ -346,22 +699,15 @@ async function sendAiMessages(params: {
   for (let i = 0; i < messages.length; i++) {
     const text = messages[i]!;
     const formatted = formatForTelegramHtml(text);
-    const sendParams: Record<string, unknown> = {};
-
-    if (i === 0) {
-      sendParams.reply_parameters = { message_id: replyToMessageId };
-    }
 
     try {
-      // Try HTML formatting first, fall back to plain text
-      try {
-        await ctx.api.sendMessage(chatId, formatted, {
-          ...sendParams,
-          parse_mode: "HTML",
-        });
-      } catch {
-        await ctx.api.sendMessage(chatId, text, sendParams);
-      }
+      await sendTextMessageWithReplyFallback({
+        ctx,
+        chatId,
+        text,
+        formatted,
+        ...(i === 0 ? { replyToMessageId } : {}),
+      });
     } catch (err) {
       logger.warn({ err, i }, "sendAiMessages: failed to send message");
     }
@@ -405,10 +751,12 @@ async function handleAiTurn(params: {
   isRepliedToBot: boolean;
   mediaRefs: RichMediaRef[];
   urls: string[];
+  sourceRefs?: string[];
   senderUsername?: string;
   runtimeStatus?: string;
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
+  memoryCandidateHints?: string[];
 }): Promise<void> {
   const {
     ctx,
@@ -420,10 +768,12 @@ async function handleAiTurn(params: {
     isRepliedToBot,
     mediaRefs,
     urls,
+    sourceRefs,
     senderUsername,
     runtimeStatus,
     allowWebSearch,
     allowMediaTools,
+    memoryCandidateHints,
   } = params;
 
   const chatId = ctx.chatId;
@@ -442,16 +792,24 @@ async function handleAiTurn(params: {
     return null;
   });
   const recentConversation = runtimeContext?.recentEventsText || formatHistoryAsContext(history);
-  const { recentMembers, allowedUids } = collectRecentMembers(config.tgGroupId);
-  // The current speaker's uid should always be allowed even if they haven't
-  // accumulated buffer entries yet (e.g. first message after /reset).
-  allowedUids.add(user.uid);
+  const { recentMembers } = collectRecentMembers(config.tgGroupId);
   if (!recentMembers.some((m) => m.uid === user.uid)) {
     recentMembers.push({
       uid: user.uid,
       name: user.nickname || "大哥哥",
       ...(senderUsername ? { username: senderUsername } : {}),
     });
+  }
+  const replyTo = ctx.msg?.reply_to_message;
+  if (replyTo && replyTo.from && replyTo.from.id !== ctx.me.id) {
+    const replyUid = replyTo.from.id.toString();
+    if (!recentMembers.some((m) => m.uid === replyUid)) {
+      recentMembers.push({
+        uid: replyUid,
+        name: replyTo.from.first_name ?? "某人",
+        ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
+      });
+    }
   }
 
   const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
@@ -481,19 +839,21 @@ async function handleAiTurn(params: {
       recentMembers,
       tier,
       needsSearch,
-      allowedUids,
       systemHint: currentHint,
       wasMentioned: isMentioned,
       wasRepliedTo: isRepliedToBot,
       recentBotMessages,
       mediaRefs,
       urls,
+      ...(sourceRefs ? { sourceRefs } : {}),
       resolveTelegramFileAsDataUrl,
       allowRichContentTools: isTriggered,
       ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
       ...(runtimeStatus ? { runtimeStatus } : {}),
       ...(allowWebSearch != null ? { allowWebSearch } : {}),
       ...(allowMediaTools != null ? { allowMediaTools } : {}),
+      ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+      isRetryTurn: false,
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -520,19 +880,21 @@ async function handleAiTurn(params: {
           recentMembers,
           tier,
           needsSearch,
-          allowedUids,
           systemHint: currentHint,
           wasMentioned: isMentioned,
           wasRepliedTo: isRepliedToBot,
           recentBotMessages,
           mediaRefs,
           urls,
+          ...(sourceRefs ? { sourceRefs } : {}),
           resolveTelegramFileAsDataUrl,
           allowRichContentTools: isTriggered,
           ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
           ...(runtimeStatus ? { runtimeStatus } : {}),
           ...(allowWebSearch != null ? { allowWebSearch } : {}),
           ...(allowMediaTools != null ? { allowMediaTools } : {}),
+          ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+          isRetryTurn: true,
         });
 
         if (result.action === "send") break;
@@ -542,22 +904,46 @@ async function handleAiTurn(params: {
         clearInterval(typingTimer);
         logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
+        let finalFallbackMessages: string[] = [];
+        let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
 
         if (result.rawText) {
+          const rescued = await rescueSendMessagesFromDraft({
+            userContext: user,
+            userMessage,
+            recentConversation,
+            recentMembers,
+            recentBotMessages,
+            rawDraft: result.rawText,
+          });
+          const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
+          finalFallbackMessages = fallbackMessages;
+          if (rescued?.messages.length) {
+            finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
+            logger.info(
+              {
+                rescuedMessages: rescued.messages.length,
+                rescueToolCalls: rescued.toolCalls.length,
+              },
+              "handleAiTurn: rescued raw draft via send_message",
+            );
+          }
           touchBotActivity();
-          pushMessage(
-            config.tgGroupId,
-            "bot",
-            config.botUsername,
-            result.rawText.slice(0, MAX_BUFFER_TEXT),
-          );
-          await groupRuntime.recordBotMessages({ messages: [result.rawText] });
+          for (const message of fallbackMessages) {
+            pushMessage(
+              config.tgGroupId,
+              "bot",
+              config.botUsername,
+              message.slice(0, MAX_BUFFER_TEXT),
+            );
+          }
+          await groupRuntime.recordBotMessages({ messages: fallbackMessages });
           await sendAiMessages({
             ctx,
             chatId,
             replyToMessageId,
-            messages: [result.rawText],
-            stickerFileId: getStickerFileId(fallbackEmoji),
+            messages: fallbackMessages,
+            stickerFileId: rescued?.messages.length ? null : getStickerFileId(fallbackEmoji),
           });
         } else {
           touchBotActivity();
@@ -574,8 +960,11 @@ async function handleAiTurn(params: {
           });
           if (stickerFileId) {
             try {
-              await ctx.api.sendSticker(chatId, stickerFileId, {
-                reply_parameters: { message_id: replyToMessageId },
+              await sendStickerWithReplyFallback({
+                ctx,
+                chatId,
+                stickerFileId,
+                replyToMessageId,
               });
             } catch (err) {
               logger.warn({ err, emoji: fallbackEmoji }, "handleAiTurn: fallback sticker failed");
@@ -590,9 +979,9 @@ async function handleAiTurn(params: {
           model: result.metrics?.model ?? "unknown",
           tier,
           needsSearch,
-          toolCalls: result.metrics?.toolCalls ?? [],
+          toolCalls: finalFallbackToolCalls,
           action: result.rawText ? "send" : "dismiss",
-          messages: result.rawText ? [result.rawText] : [],
+          messages: finalFallbackMessages,
           ...(result.metrics?.inputTokens != null
             ? { inputTokens: result.metrics.inputTokens }
             : {}),
@@ -763,6 +1152,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
       if (matchCommand(privEntities, privText, "/reset", botUsername)) {
         clearHistory(config.tgGroupId);
+        await resetRuntimeConversationSummary().catch((err: unknown) => {
+          logger.warn({ err }, "private /reset runtime summary clear failed");
+        });
         await ctx.reply(pickResetReply()).catch((err: unknown) => {
           logger.warn({ err }, "private /reset reply failed");
         });
@@ -785,6 +1177,103 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
 
+      if (matchCommand(privEntities, privText, "/diaryobs", botUsername)) {
+        const date = privText.replace(/^\/diaryobs(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        try {
+          const observations = await listDiaryObservationsByDate(date);
+          await ctx.reply(formatDiaryObservationSummary(date, observations));
+        } catch (err) {
+          logger.error({ err, date }, "private /diaryobs failed");
+          await ctx.reply("查看 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryretract", botUsername)) {
+        const remainder = privText.replace(/^\/diaryretract(?:@\w+)?\s*/u, "").trim();
+        const [targetId, ...reasonParts] = remainder.split(/\s+/u).filter(Boolean);
+        if (!targetId) {
+          await ctx.reply("用法: /diaryretract <observationId> [reason]").catch(() => void 0);
+          return;
+        }
+        try {
+          const result = await retractDiaryObservation(targetId, reasonParts.join(" "));
+          await ctx.reply(
+            result.action === "retracted"
+              ? `已撤销 ${targetId}`
+              : `撤销失败: ${result.reason ?? "unknown"}`,
+          );
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryretract failed");
+          await ctx.reply("撤销 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryedit", botUsername)) {
+        const remainder = privText.replace(/^\/diaryedit(?:@\w+)?\s*/u, "").trim();
+        const firstSpace = remainder.indexOf(" ");
+        const targetId = firstSpace >= 0 ? remainder.slice(0, firstSpace).trim() : remainder;
+        const jsonText = firstSpace >= 0 ? remainder.slice(firstSpace + 1).trim() : "";
+        if (!targetId || !jsonText) {
+          await ctx.reply("用法: /diaryedit <observationId> <json patch>").catch(() => void 0);
+          return;
+        }
+        const patch = buildDiaryPatchFromJson(jsonText);
+        if (!patch) {
+          await ctx.reply("patch 必须是 JSON 对象").catch(() => void 0);
+          return;
+        }
+        try {
+          const result = await updateDiaryObservation(
+            targetId,
+            patch as Partial<DiaryObservationDraft>,
+          );
+          await ctx.reply(
+            result.action === "updated"
+              ? `已修正 ${targetId} -> ${result.observation?.id ?? "unknown"}`
+              : `修正失败: ${result.reason ?? "unknown"}`,
+          );
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryedit failed");
+          await ctx.reply("修正 observation 失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryshow", botUsername)) {
+        const targetId = privText.replace(/^\/diaryshow(?:@\w+)?\s*/u, "").trim();
+        if (!targetId) {
+          await ctx.reply("用法: /diaryshow <observationId>").catch(() => void 0);
+          return;
+        }
+        try {
+          const item = await getDiaryObservation(targetId);
+          if (!item) {
+            await ctx.reply("没找到这条 observation").catch(() => void 0);
+            return;
+          }
+          await ctx.reply(JSON.stringify(item, null, 2)).catch(() => void 0);
+        } catch (err) {
+          logger.error({ err, targetId }, "private /diaryshow failed");
+          await ctx.reply("查看 observation 详情失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/diaryregen", botUsername)) {
+        const date = privText.replace(/^\/diaryregen(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        await ctx.reply(`正在重生日记 ${date}...`).catch(() => void 0);
+        try {
+          const diary = await generateDiaryForDate(date);
+          await ctx.reply(diary ?? "生成失败或返回空内容").catch(() => void 0);
+        } catch (err) {
+          logger.error({ err, date }, "private /diaryregen failed");
+          await ctx.reply("重生日记失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
       return;
     }
 
@@ -802,7 +1291,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const rawText = msg.text ?? msg.caption ?? "";
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const urls = extracted.urls;
+    const mediaRefs = await attachRecentMediaRefs({
+      groupId: config.tgGroupId,
+      rawText,
+      mediaRefs: extracted.mediaRefs,
+    });
 
     // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
     const replyTo = msg.reply_to_message;
@@ -883,6 +1378,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
 • /shock [0-200|想说的话] — 电我一下，也可以带强度或顺便说话
+• /stroke [1-200|想说的话] — 撸撸本喵，也可以带力度或边撸边说话
 • /nighty — 跟我说晚安，8小时后我会发早安问候
 • 发图片 — 我会看看是什么然后吐槽
 • 让我「叫我XX」— 我会记住你的昵称
@@ -907,6 +1403,13 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
+    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
+    if (strokeArgs) {
+      const stroked = await generateStrokeResponse(user, strokeArgs);
+      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      return;
+    }
+
     // 7. Admin-only: /status, /reset
     if (matchCommand(entities, rawText, "/status", botUsername)) {
       if (from.id.toString() !== config.tgAdminUid) {
@@ -924,6 +1427,9 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
       clearHistory(config.tgGroupId);
+      await resetRuntimeConversationSummary().catch((err: unknown) => {
+        logger.warn({ err }, "group /reset runtime summary clear failed");
+      });
       await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
       return;
     }
@@ -994,6 +1500,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       isMentioned,
       urls,
     });
+    const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
     groupRuntime.schedulePassiveTurn({
       label: `message:${msg.message_id}`,
@@ -1008,12 +1515,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           isRepliedToBot,
           mediaRefs,
           urls,
+          sourceRefs: [`tg:${config.tgGroupId}:message:${msg.message_id}`],
           ...(from.username ? { senderUsername: from.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });
   });
@@ -1051,12 +1560,27 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const isRepliedToBot =
       replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
       replyTo?.from?.id === botId;
+
+    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
+    if (strokeArgs) {
+      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const stroked = await generateStrokeResponse(user, strokeArgs);
+      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      return;
+    }
+
     if (!isMentioned && !isRepliedToBot) return;
 
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    const { urls, mediaRefs } = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const urls = extracted.urls;
+    const mediaRefs = await attachRecentMediaRefs({
+      groupId: config.tgGroupId,
+      rawText,
+      mediaRefs: extracted.mediaRefs,
+    });
     let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
     if (replyTo && !isRepliedToBot) {
       replyToInfo = {
@@ -1148,6 +1672,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       isMentioned,
       urls,
     });
+    const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
     groupRuntime.schedulePassiveTurn({
       label: `edited:${msg.message_id}`,
@@ -1162,12 +1687,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           isRepliedToBot,
           mediaRefs,
           urls,
+          sourceRefs: [`tg:${config.tgGroupId}:edited:${msg.message_id}:${msg.edit_date ?? 0}`],
           ...(from.username ? { senderUsername: from.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });
   });

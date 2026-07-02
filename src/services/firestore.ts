@@ -1,12 +1,19 @@
 import { getFirestore, FieldValue, type Firestore, type Query } from "firebase-admin/firestore";
-import type { User } from "../global.d.ts";
-import { todayDateStr } from "../libs/time.js";
+import type { DiaryEntry, DiaryGenerationRecord, DiaryObservationV2, User } from "../global.d.js";
+import { dateStrForTimezone, parseTimestampInputForTimezone, todayDateStr } from "../libs/time.js";
 import {
   normalizePromptData,
   prepareDiaryNoteForStorage,
   prepareMemoryForStorage,
   prepareNicknameForStorage,
 } from "../libs/prompt-safety.js";
+import {
+  buildObservationFingerprint,
+  observationsLikelyMatch,
+  sanitizeDiaryObservationDraft,
+  type DiaryObservationDraft,
+} from "../libs/diary-observations.js";
+import config from "../configs/env.js";
 
 // Lazy accessor: getFirestore() requires initializeApp() to have run first.
 // Resolving it at module-evaluation time breaks because ESM imports are hoisted
@@ -19,6 +26,8 @@ function db(): Firestore {
 
 // Tunables
 const MEMORY_MAX_ENTRIES = 30;
+const DIARY_OBSERVATION_DEDUPE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const DIARY_OBSERVATION_SAME_SOURCE_MERGE_WINDOW_MS = 2 * 60 * 1000;
 
 function isValidUser(data: unknown): data is User {
   const d = data as Record<string, unknown>;
@@ -196,11 +205,96 @@ export async function setMorningGreeted(uid: string, timestamp: number): Promise
   invalidateUserCache(uid);
 }
 
+function isValidDiaryObservation(data: unknown): data is DiaryObservationV2 {
+  const d = data as Record<string, unknown>;
+  return (
+    d?.schemaVersion === 2 &&
+    typeof d.id === "string" &&
+    typeof d.recordedAt === "string" &&
+    typeof d.localDate === "string" &&
+    typeof d.event === "string" &&
+    (d.occurredAt === undefined || typeof d.occurredAt === "string") &&
+    (d.exactQuote === undefined || typeof d.exactQuote === "string") &&
+    (d.immediateReaction === undefined || typeof d.immediateReaction === "string") &&
+    (d.interpretation === undefined || typeof d.interpretation === "string") &&
+    (d.unsaidThought === undefined || typeof d.unsaidThought === "string") &&
+    (d.unresolvedQuestion === undefined || typeof d.unresolvedQuestion === "string") &&
+    (d.confidence === "fact" || d.confidence === "inference" || d.confidence === "uncertain") &&
+    [1, 2, 3, 4, 5].includes(Number(d.salience)) &&
+    (d.tags === undefined || Array.isArray(d.tags)) &&
+    (d.sourceRefs === undefined || Array.isArray(d.sourceRefs)) &&
+    (d.status === "active" || d.status === "superseded" || d.status === "retracted") &&
+    (d.supersedesId === undefined || typeof d.supersedesId === "string")
+  );
+}
+
+function resolveObservationDate(occurredAt?: string): string {
+  if (occurredAt) {
+    const parsed = parseTimestampInputForTimezone(occurredAt, config.appTimezone);
+    if (parsed != null) {
+      return dateStrForTimezone(parsed, config.appTimezone);
+    }
+  }
+  return todayDateStr();
+}
+
+function mergeObservationFields(
+  existing: DiaryObservationV2,
+  patch: DiaryObservationDraft,
+  options: { preferPatchConfidence: boolean; preferPatchSalience: boolean },
+): DiaryObservationDraft {
+  return {
+    ...((patch.occurredAt ?? existing.occurredAt)
+      ? { occurredAt: patch.occurredAt ?? existing.occurredAt }
+      : {}),
+    event: patch.event,
+    ...((patch.exactQuote ?? existing.exactQuote)
+      ? { exactQuote: patch.exactQuote ?? existing.exactQuote }
+      : {}),
+    ...((patch.immediateReaction ?? existing.immediateReaction)
+      ? { immediateReaction: patch.immediateReaction ?? existing.immediateReaction }
+      : {}),
+    ...((patch.interpretation ?? existing.interpretation)
+      ? { interpretation: patch.interpretation ?? existing.interpretation }
+      : {}),
+    ...((patch.unsaidThought ?? existing.unsaidThought)
+      ? { unsaidThought: patch.unsaidThought ?? existing.unsaidThought }
+      : {}),
+    ...((patch.unresolvedQuestion ?? existing.unresolvedQuestion)
+      ? { unresolvedQuestion: patch.unresolvedQuestion ?? existing.unresolvedQuestion }
+      : {}),
+    confidence: options.preferPatchConfidence ? patch.confidence : existing.confidence,
+    salience: options.preferPatchSalience
+      ? patch.salience > existing.salience
+        ? patch.salience
+        : existing.salience
+      : existing.salience,
+    tags: Array.from(new Set([...(existing.tags ?? []), ...(patch.tags ?? [])])).slice(0, 8),
+    sourceRefs: Array.from(
+      new Set([...(existing.sourceRefs ?? []), ...(patch.sourceRefs ?? [])]),
+    ).slice(0, 12),
+  };
+}
+
+function toObservationDoc(observation: DiaryObservationV2): Record<string, unknown> {
+  const fingerprint = buildObservationFingerprint(
+    observation.localDate,
+    observation.event,
+    observation.sourceRefs ?? [],
+  );
+  return stripUndefined({ ...observation, fingerprint });
+}
+
+export interface DiaryObservationWriteResult {
+  action: "created" | "merged" | "updated" | "retracted" | "ignored";
+  observation?: DiaryObservationV2;
+  previousObservation?: DiaryObservationV2;
+  reason?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Diary
 // ---------------------------------------------------------------------------
-
-import type { DiaryEntry } from "../global.d.js";
 
 export async function writeDiaryEntry(note: string): Promise<void> {
   const normalizedNote = prepareDiaryNoteForStorage(note);
@@ -225,6 +319,227 @@ export async function getDiaryEntries(date: string): Promise<DiaryEntry[]> {
   const data = doc.data();
   if (!data) return [];
   return Array.isArray(data.entries) ? (data.entries as DiaryEntry[]) : [];
+}
+
+export async function getDiaryObservation(id: string): Promise<DiaryObservationV2 | null> {
+  const doc = await db().collection("diaryObservations").doc(id).get();
+  if (!doc.exists) return null;
+  const data = doc.data();
+  return isValidDiaryObservation(data) ? data : null;
+}
+
+export async function listDiaryObservationsByDate(date: string): Promise<DiaryObservationV2[]> {
+  const snap = await db().collection("diaryObservations").where("localDate", "==", date).get();
+  return snap.docs
+    .map((doc) => doc.data())
+    .filter(isValidDiaryObservation)
+    .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
+}
+
+export async function listActiveDiaryObservationsByDate(
+  date: string,
+): Promise<DiaryObservationV2[]> {
+  const all = await listDiaryObservationsByDate(date);
+  return all.filter((observation) => observation.status === "active");
+}
+
+async function listRecentDiaryObservationCandidates(
+  localDate: string,
+): Promise<DiaryObservationV2[]> {
+  const cutoffIso = new Date(Date.now() - DIARY_OBSERVATION_DEDUPE_WINDOW_MS).toISOString();
+  const snap = await db()
+    .collection("diaryObservations")
+    .where("recordedAt", ">=", cutoffIso)
+    .get();
+  return snap.docs
+    .map((doc) => doc.data())
+    .filter(isValidDiaryObservation)
+    .filter((observation) => observation.status === "active" && observation.localDate === localDate)
+    .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt));
+}
+
+function shouldMergeObservationBySharedSource(
+  candidate: DiaryObservationV2,
+  draft: DiaryObservationDraft,
+): boolean {
+  const candidateRefs = new Set(candidate.sourceRefs ?? []);
+  const draftRefs = new Set(draft.sourceRefs ?? []);
+  if (candidateRefs.size === 0 || draftRefs.size === 0) return false;
+
+  const hasSharedSource = [...draftRefs].some((ref) => candidateRefs.has(ref));
+  if (!hasSharedSource) return false;
+
+  const candidateRecordedAt = Date.parse(candidate.recordedAt);
+  if (Number.isNaN(candidateRecordedAt)) return false;
+
+  return Date.now() - candidateRecordedAt <= DIARY_OBSERVATION_SAME_SOURCE_MERGE_WINDOW_MS;
+}
+
+export async function createDiaryObservation(params: {
+  observation: Partial<DiaryObservationDraft>;
+  sourceRefs?: string[];
+}): Promise<DiaryObservationWriteResult> {
+  const preferPatchConfidence = params.observation.confidence !== undefined;
+  const preferPatchSalience = params.observation.salience !== undefined;
+  const sanitized = sanitizeDiaryObservationDraft({
+    ...params.observation,
+    sourceRefs: [...(params.observation.sourceRefs ?? []), ...(params.sourceRefs ?? [])],
+  });
+  if (!sanitized) {
+    return { action: "ignored", reason: "observation payload invalid" };
+  }
+  const localDate = resolveObservationDate(sanitized.occurredAt);
+  const candidates = await listRecentDiaryObservationCandidates(localDate);
+  const duplicate = candidates.find(
+    (candidate) =>
+      observationsLikelyMatch(candidate, sanitized) ||
+      shouldMergeObservationBySharedSource(candidate, sanitized),
+  );
+
+  if (duplicate) {
+    const next: DiaryObservationV2 = {
+      ...duplicate,
+      ...mergeObservationFields(duplicate, sanitized, {
+        preferPatchConfidence,
+        preferPatchSalience,
+      }),
+      schemaVersion: 2,
+      id: duplicate.id,
+      localDate: duplicate.localDate,
+      recordedAt: duplicate.recordedAt,
+      status: "active",
+      ...(duplicate.supersedesId ? { supersedesId: duplicate.supersedesId } : {}),
+    };
+    await db().collection("diaryObservations").doc(duplicate.id).set(toObservationDoc(next));
+    return { action: "merged", observation: next, previousObservation: duplicate };
+  }
+
+  const observation: DiaryObservationV2 = {
+    schemaVersion: 2,
+    id: globalThis.crypto.randomUUID(),
+    recordedAt: new Date().toISOString(),
+    localDate,
+    event: sanitized.event,
+    confidence: sanitized.confidence,
+    salience: sanitized.salience,
+    status: "active",
+    ...(sanitized.occurredAt ? { occurredAt: sanitized.occurredAt } : {}),
+    ...(sanitized.exactQuote ? { exactQuote: sanitized.exactQuote } : {}),
+    ...(sanitized.immediateReaction ? { immediateReaction: sanitized.immediateReaction } : {}),
+    ...(sanitized.interpretation ? { interpretation: sanitized.interpretation } : {}),
+    ...(sanitized.unsaidThought ? { unsaidThought: sanitized.unsaidThought } : {}),
+    ...(sanitized.unresolvedQuestion ? { unresolvedQuestion: sanitized.unresolvedQuestion } : {}),
+    ...(sanitized.tags && sanitized.tags.length > 0 ? { tags: sanitized.tags } : {}),
+    ...(sanitized.sourceRefs && sanitized.sourceRefs.length > 0
+      ? { sourceRefs: sanitized.sourceRefs }
+      : {}),
+    ...(sanitized.supersedesId ? { supersedesId: sanitized.supersedesId } : {}),
+  };
+  await db().collection("diaryObservations").doc(observation.id).set(toObservationDoc(observation));
+  return { action: "created", observation };
+}
+
+export async function updateDiaryObservation(
+  targetId: string,
+  patch: Partial<DiaryObservationDraft>,
+): Promise<DiaryObservationWriteResult> {
+  const current = await getDiaryObservation(targetId);
+  if (!current) return { action: "ignored", reason: "not_found" };
+  const base = sanitizeDiaryObservationDraft({
+    ...((patch.occurredAt ?? current.occurredAt)
+      ? { occurredAt: patch.occurredAt ?? current.occurredAt }
+      : {}),
+    event: patch.event ?? current.event,
+    ...((patch.exactQuote ?? current.exactQuote)
+      ? { exactQuote: patch.exactQuote ?? current.exactQuote }
+      : {}),
+    ...((patch.immediateReaction ?? current.immediateReaction)
+      ? { immediateReaction: patch.immediateReaction ?? current.immediateReaction }
+      : {}),
+    ...((patch.interpretation ?? current.interpretation)
+      ? { interpretation: patch.interpretation ?? current.interpretation }
+      : {}),
+    ...((patch.unsaidThought ?? current.unsaidThought)
+      ? { unsaidThought: patch.unsaidThought ?? current.unsaidThought }
+      : {}),
+    ...((patch.unresolvedQuestion ?? current.unresolvedQuestion)
+      ? { unresolvedQuestion: patch.unresolvedQuestion ?? current.unresolvedQuestion }
+      : {}),
+    confidence: patch.confidence ?? current.confidence,
+    salience: patch.salience ?? current.salience,
+    ...((patch.tags ?? current.tags) ? { tags: patch.tags ?? current.tags } : {}),
+    ...((patch.sourceRefs ?? current.sourceRefs)
+      ? { sourceRefs: patch.sourceRefs ?? current.sourceRefs }
+      : {}),
+    supersedesId: current.id,
+  });
+  if (!base) return { action: "ignored", reason: "invalid_patch" };
+
+  const next: DiaryObservationV2 = {
+    schemaVersion: 2,
+    id: globalThis.crypto.randomUUID(),
+    recordedAt: new Date().toISOString(),
+    localDate: resolveObservationDate(base.occurredAt),
+    event: base.event,
+    confidence: base.confidence,
+    salience: base.salience,
+    status: "active",
+    supersedesId: current.id,
+    ...(base.occurredAt ? { occurredAt: base.occurredAt } : {}),
+    ...(base.exactQuote ? { exactQuote: base.exactQuote } : {}),
+    ...(base.immediateReaction ? { immediateReaction: base.immediateReaction } : {}),
+    ...(base.interpretation ? { interpretation: base.interpretation } : {}),
+    ...(base.unsaidThought ? { unsaidThought: base.unsaidThought } : {}),
+    ...(base.unresolvedQuestion ? { unresolvedQuestion: base.unresolvedQuestion } : {}),
+    ...(base.tags && base.tags.length > 0 ? { tags: base.tags } : {}),
+    ...(base.sourceRefs && base.sourceRefs.length > 0 ? { sourceRefs: base.sourceRefs } : {}),
+  };
+  await db().runTransaction(async (tx) => {
+    tx.set(
+      db().collection("diaryObservations").doc(current.id),
+      { status: "superseded", supersededAt: new Date().toISOString() },
+      { merge: true },
+    );
+    tx.set(db().collection("diaryObservations").doc(next.id), toObservationDoc(next));
+  });
+  return { action: "updated", observation: next, previousObservation: current };
+}
+
+export async function retractDiaryObservation(
+  targetId: string,
+  reason?: string,
+): Promise<DiaryObservationWriteResult> {
+  const current = await getDiaryObservation(targetId);
+  if (!current) return { action: "ignored", reason: "not_found" };
+  if (current.status === "retracted") {
+    return { action: "ignored", reason: "already_retracted", observation: current };
+  }
+  const retractionReason = reason ? normalizePromptData(reason, 200) : "";
+  const next: DiaryObservationV2 = {
+    ...current,
+    status: "retracted",
+  };
+  await db()
+    .collection("diaryObservations")
+    .doc(current.id)
+    .set(
+      stripUndefined({
+        ...toObservationDoc(next),
+        ...(retractionReason ? { retractionReason } : {}),
+        retractedAt: new Date().toISOString(),
+      }),
+    );
+  return { action: "retracted", observation: next, previousObservation: current };
+}
+
+export async function appendDiaryGenerationRecord(record: DiaryGenerationRecord): Promise<void> {
+  await db()
+    .collection("diary")
+    .doc(record.date)
+    .set(
+      { generationRecords: FieldValue.arrayUnion(stripUndefined({ ...record })) },
+      { merge: true },
+    );
 }
 
 export async function writeGeneratedDiary(date: string, diary: string): Promise<void> {
@@ -341,6 +656,15 @@ export async function writeRuntimeGroupState(patch: Partial<RuntimeGroupStateDoc
     .collection("runtime")
     .doc("group")
     .set(stripUndefined({ ...patch, updatedAt: Date.now() }), { merge: true });
+}
+
+export async function resetRuntimeConversationSummary(): Promise<void> {
+  const resetTs = Date.now();
+  await writeRuntimeGroupState({
+    summary: "",
+    summaryCursorTs: resetTs,
+    lastCompactedAt: 0,
+  });
 }
 
 export async function appendRuntimeEvent(record: RuntimeEventRecord): Promise<void> {
