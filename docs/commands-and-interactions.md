@@ -7,9 +7,10 @@
 | `/help`   | Anyone     | Show help text                                             |
 | `/love`   | Anyone     | Get affection scoring breakdown + tsundere response        |
 | `/shock`  | Anyone     | Zap the bot and trigger a shocked / frazzled reaction      |
+| `/stroke` | Anyone     | Pet the bot and trigger a frazzled reaction                |
 | `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
 | `/status` | Admin only | Show uptime, buffer size, memory user count                |
-| `/reset`  | Admin only | Clear the conversation buffer                              |
+| `/reset`  | Admin only | Clear the conversation buffer and runtime summary          |
 | `/diary`  | Admin only | Generate today's diary preview (private chat only)         |
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
@@ -26,9 +27,11 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail; if there is a raw draft, the handler first tries to rescue it into real `send_message` output.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
 
+Before classification, the handler runs a lightweight local route so short chats, technical questions, detailed requests, and current-fact queries can be fast-pathed without always invoking `classifyMessage()`.
+
 ### Special Context Records
 
-- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/reset`, standalone morning greetings, and daily diary notifications.
+- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/stroke`, `/reset`, standalone morning greetings, and daily diary notifications.
 - In XML history, these entries carry a `kind="..."` attribute so the model can treat them as real prior events rather than ordinary user chat lines.
 
 ### Images & Media

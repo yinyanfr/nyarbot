@@ -56,6 +56,7 @@ handlers/index.ts（setupHandlers）
     │     ├─ 成功抓取 → 作为系统条目推送（"[推文]" 或 "[链接]"）
     │     └─ 抓取失败 → 静默忽略（无缓冲区条目，无主动插话噪音）
     ├─ 新鲜图片描述（ai.ts → Gemini）
+    ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
     │     └─ simple → flashNoThinkModel
     │     └─ complex → flashThinkModel
@@ -162,6 +163,22 @@ type AiTurnResult =
 
 - **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
 - **Gemini 3 Flash Preview** 通过 Cloudflare AI Gateway 处理图片理解。描述在请求时生成，以 `[图片: 描述]` 文本形式注入到 DeepSeek 的提示词中。
+
+## 本地路由
+
+不是所有触发轮次都先跑 `classifyMessage()`。handler 会先做一层轻量本地判断：
+
+- 短促闲聊会直接路由到 `simple`
+- 技术/数学/学术信号会直接路由到 `tech`
+- 明确要求“认真/详细/解释”的请求会更偏向 `complex` + `preferAdvisor`
+- 当前事实查询会直接标记 `needsSearch`
+- 轻贴纸闲聊会关闭本轮持久化工具，避免无意义写记忆/写日记
+
+`preferAdvisor` 只是提示主轮次先调用 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
+
+## 超时保护
+
+所有关键模型调用都带总超时，避免单轮卡住 `typing` / `running`：主模型、subagent、视觉描述、日记生成和外部 fetch 都有超时兜底。
 
 ### 强制联网搜索
 

@@ -18,6 +18,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - **Feels like a group member**: conversation-first behavior instead of command-only automation
 - **Tool-call architecture**: speaking, dismissing, stickers, search, media inspection, and diary writing are all explicit tools
 - **Long-lived context**: nicknames, memories, rolling chat history, proactive replies, and daily diary generation
+- **Local routing for speed**: short chats, technical questions, detailed requests, and current-fact queries are routed locally first, then escalated to the classifier / advisor when needed
 - **Publishing pipeline**: midnight diary generation can publish to Hexo/GitHub and Telegram channels
 - **Security-conscious prompt design**: dedicated guardrails for prompt injection, memory poisoning, and external-content replay
 
@@ -119,15 +120,16 @@ node dist/app.js
 
 See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 
-| Command   | Description                                          |
-| --------- | ---------------------------------------------------- |
-| `/help`   | Show help text                                       |
-| `/love`   | Trigger affection scoring + tsundere reply           |
-| `/shock`  | Zap the bot; supports intensity and extra text       |
-| `/nighty` | Schedule a morning greeting 8+ hours later           |
-| `/status` | Show bot runtime status (admin only)                 |
-| `/reset`  | Clear conversation buffer (admin only)               |
-| `/diary`  | Generate today's diary preview (admin only, DM only) |
+| Command   | Description                                                |
+| --------- | ---------------------------------------------------------- |
+| `/help`   | Show help text                                             |
+| `/love`   | Trigger affection scoring + tsundere reply                 |
+| `/shock`  | Zap the bot; supports intensity and extra text             |
+| `/stroke` | Pet the bot; supports intensity and extra text             |
+| `/nighty` | Schedule a morning greeting 8+ hours later                 |
+| `/status` | Show bot runtime status (admin only)                       |
+| `/reset`  | Clear conversation buffer and runtime summary (admin only) |
+| `/diary`  | Generate today's diary preview (admin only, DM only)       |
 
 | Scenario     | Trigger                                                            |
 | ------------ | ------------------------------------------------------------------ |
@@ -191,7 +193,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 ## Release Notes
 
 - Current release: [`1.0.0`](CHANGELOG.md)
-- Recent updates: `saveMemory` now targets reusable user facts instead of only permanent traits; `writeDiary` is more candidate-first; successful prefetch now counts as having searched; dismissed raw drafts are rescued through real `send_message` when possible; `memoryCandidateHints` are narrower and softer
+- Recent updates: local routing now prioritizes short chats, technical questions, detailed requests, and current-fact queries; `saveMemory` now targets reusable user facts instead of only permanent traits; `writeDiary` is more candidate-first; successful prefetch now counts as having searched; dismissed raw drafts are rescued through real `send_message` when possible; `/stroke` has been added; `memoryCandidateHints` are narrower and softer
 
 ## Disclaimer
 

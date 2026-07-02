@@ -4,20 +4,29 @@
 
 ### Added
 
+- **Local AI routing and advisor hints** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): short casual chats, technical/math prompts, detailed requests, and current-fact queries can now be fast-pathed locally before falling back to full classification.
+- **`/stroke` command** (`src/handlers/index.ts`, docs): added a dedicated petting reaction flow parallel to `/shock`.
 - **Fallback rescue send path** (`src/libs/ai.ts`, `src/handlers/index.ts`): dismissed raw drafts are now retried through a real `send_message` rescue flow before sticker-only fallback, so visible replies stay closer to the model's intended output.
 
 ### Changed
 
+- **Model-call timeouts** (`src/libs/ai.ts`, `src/libs/diary.ts`, `src/libs/telegram-image.ts`): main turns, subagents, vision calls, diary generation, and external fetches now have total timeout guards so one stuck request cannot pin typing/running state.
+- **Search and routing heuristics** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search, current-fact queries are detected more precisely, and search hints no longer over-trigger on casual `今天/现在` usage.
+- **Persistent-tool gating** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): lightweight proactive/casual turns can skip memory/diary writes, while normal triggered turns keep them available.
+- **Simplified Chinese normalization** (`package.json`, `src/handlers/index.ts`): `opencc-js` now normalizes traditional input before local routing so keyword detection works consistently.
+- **Reset/runtime summary behavior** (`src/handlers/index.ts`, `src/services/firestore.ts`): `/reset` now clears the active runtime summary injection path as well as the chat buffer.
 - **Search prefetch policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search for the current turn, and mandatory search hints no longer conflict with the prefetch flow.
 - **Memory and diary heuristics** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/handlers/index.ts`): `saveMemory` now prefers reusable user facts, `writeDiary` is more candidate-first, and `memoryCandidateHints` are narrower to reduce false positives.
 
 ### Fixed
 
+- **Retry-side diary duplication** (`src/libs/ai.ts`, `src/handlers/index.ts`, `src/services/firestore.ts`): retry turns no longer duplicate persistent diary writes or other side effects.
+- **Image-trigger reply policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): when a message needs image understanding, the bot now requires it before speaking, instead of bluffing around the image.
 - **Turn metrics consistency** (`src/handlers/index.ts`): rescue-generated `send_message` calls are now reflected in turn tool-call records and logs.
 
 ### Docs
 
-- **README and docs sync** (`README.md`, `README.en.md`, `docs/architecture*.md`, `docs/commands-and-interactions*.md`): documented the new search, rescue, memory, and diary behavior.
+- **README and docs sync** (`README.md`, `README.en.md`, `docs/architecture*.md`, `docs/commands-and-interactions*.md`): documented the new search, rescue, routing, `/stroke`, timeout, and memory/diary behavior.
 
 ## [1.0.0] — 2026-05-21
 

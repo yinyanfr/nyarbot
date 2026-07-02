@@ -56,6 +56,7 @@ handlers/index.ts (setupHandlers)
     │     ├─ Successful fetches → pushed as system entries ("[推文]" or "[链接]")
     │     └─ Failed fetches → silently ignored (no buffer entry, no proactive noise)
     ├─ Fresh image description (ai.ts → Gemini)
+    ├─ Local routing (short chat / tech / current-fact)
     ├─ AI classification (classifyMessage)
     │     └─ simple → flashNoThinkModel
     │     └─ complex → flashThinkModel
@@ -162,6 +163,22 @@ If all retries still dismiss:
 
 - **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
 - **Gemini 3 Flash Preview** handles image understanding via the Cloudflare AI Gateway. Descriptions are generated at request time and injected as `[图片: description]` text into DeepSeek's prompt.
+
+## Local Routing
+
+Not every triggered turn starts with `classifyMessage()`. The handler first runs a lightweight local pass:
+
+- Short casual chats route directly to `simple`
+- Technical / math / academic signals route directly to `tech`
+- Requests like “be serious”, “explain”, or “go into detail” bias toward `complex` + `preferAdvisor`
+- Current-fact questions are marked `needsSearch`
+- Light sticker-only chat disables persistent tools for that turn to avoid pointless memory/diary writes
+
+`preferAdvisor` only nudges the main turn to call `startSubagent` for a short summary first; the helper cannot speak in the group. Normal triggered turns still can write memory and diary entries.
+
+## Timeout Guards
+
+All critical model calls carry total timeouts so a single turn cannot pin `typing` / `running`: the main model, subagent, vision descriptions, diary generation, and external fetches all have timeout fallback.
 
 ### Forced Web Search
 
