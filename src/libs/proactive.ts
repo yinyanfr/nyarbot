@@ -212,6 +212,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
           wasMentioned: false,
           wasRepliedTo: false,
           recentBotMessages,
+          allowPersistentTools: false,
           ...(recentImageMediaRefs.length > 0 ? { mediaRefs: recentImageMediaRefs } : {}),
           resolveTelegramFileAsDataUrl: callbacks.resolveTelegramFileAsDataUrl,
           allowRichContentTools: recentImageMediaRefs.length > 0,

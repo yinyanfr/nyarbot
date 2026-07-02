@@ -579,6 +579,10 @@ export interface GenerateOptions {
   memoryCandidateHints?: string[];
   /** Retry turn after a dismiss; should avoid repeating persistent side effects. */
   isRetryTurn?: boolean;
+  /** Whether persistent memory/diary mutation tools are enabled in this turn. */
+  allowPersistentTools?: boolean;
+  /** Encourage the model to use helper research/reasoning tools before answering. */
+  preferAdvisor?: boolean;
 }
 
 interface PrefetchedContext {
@@ -804,6 +808,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     mandatorySearchHint,
     memoryCandidateHints,
     isRetryTurn,
+    allowPersistentTools,
+    preferAdvisor,
   } = opts;
 
   const systemPrompt = buildSystemPrompt();
@@ -858,6 +864,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ...(isRetryTurn ? { isRetryTurn } : {}),
     ...(requireImageUnderstanding ? { requireImageUnderstanding } : {}),
     ...(requireImageUnderstanding ? { hasImageUnderstanding } : {}),
+    ...(allowPersistentTools != null ? { allowPersistentTools } : {}),
+    ...(preferAdvisor ? { preferAdvisor } : {}),
   });
 
   const promptText = systemHint
@@ -923,6 +931,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       memory: z.string().describe("关于该群友的一条简洁记忆，用中文，不超过一句话"),
     }),
     execute: async ({ uid, memory }) => {
+      if (allowPersistentTools === false) {
+        return "当前是快速回复模式，本轮不写入记忆；如确有需要，后续会走单独的记忆流程";
+      }
       if (isRetryTurn) {
         logger.info({ uid }, "saveMemory skipped during retry turn");
         return persistentToolRetryReason;
@@ -961,6 +972,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       nickname: z.string().describe("群友希望你称呼的昵称，不要超过 10 个字"),
     }),
     execute: async ({ uid, nickname }) => {
+      if (allowPersistentTools === false) {
+        return "当前是快速回复模式，本轮不设置昵称；如确有需要，后续会走单独流程";
+      }
       if (isRetryTurn) {
         logger.info({ uid }, "setNickname skipped during retry turn");
         return persistentToolRetryReason;
@@ -990,6 +1004,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         .describe("该群友的 IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/Los_Angeles"),
     }),
     execute: async ({ uid, timeZone }) => {
+      if (allowPersistentTools === false) {
+        return "当前是快速回复模式，本轮不设置时区；如确有需要，后续会走单独流程";
+      }
       if (isRetryTurn) {
         logger.info({ uid }, "setTimezone skipped during retry turn");
         return persistentToolRetryReason;
@@ -1017,6 +1034,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       memory: z.string().describe("要删除的记忆内容（与已存储的条目匹配）"),
     }),
     execute: async ({ uid, memory }) => {
+      if (allowPersistentTools === false) {
+        return "当前是快速回复模式，本轮不修改记忆；如确有需要，后续会走单独流程";
+      }
       if (isRetryTurn) {
         logger.info({ uid }, "deleteMemory skipped during retry turn");
         return persistentToolRetryReason;
@@ -1074,6 +1094,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         .optional(),
     }),
     execute: async ({ action, targetId, reason, observation }) => {
+      if (allowPersistentTools === false) {
+        return "当前是快速回复模式，本轮不写入日记观察；如确有需要，后续会走单独日记流程";
+      }
       if (isRetryTurn) {
         logger.info({ action, targetId }, "writeDiary skipped during retry turn");
         return persistentToolRetryReason;

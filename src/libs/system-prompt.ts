@@ -309,6 +309,8 @@ export function buildLateBindingPrompt(params: {
   isRetryTurn?: boolean;
   requireImageUnderstanding?: boolean;
   hasImageUnderstanding?: boolean;
+  allowPersistentTools?: boolean;
+  preferAdvisor?: boolean;
 }): string {
   const {
     wasMentioned,
@@ -324,6 +326,8 @@ export function buildLateBindingPrompt(params: {
     isRetryTurn,
     requireImageUnderstanding,
     hasImageUnderstanding,
+    allowPersistentTools,
+    preferAdvisor,
   } = params;
 
   const parts: string[] = [];
@@ -396,12 +400,24 @@ export function buildLateBindingPrompt(params: {
     "<rule>工具集合是稳定的；某个工具本轮不可用时，工具会直接返回原因。</rule>",
     "<rule>当前轮没有 URL 时不要调用 fetchUrlContent；当前轮没有媒体时不要调用 describeTelegramMedia。</rule>",
     "<rule>如果当前轮涉及图片，而你要就这条消息发言，就必须先拿到图片内容理解；拿不到就 dismiss，不要说“我看不到图”。</rule>",
-    "<rule>回答前先快速判断：这轮有没有以后大概率还会用到的用户事实。若有，优先或同时调用 saveMemory / setNickname / setTimezone / deleteMemory；不要只顾着 send_message。</rule>",
-    "<rule>昵称、地区、时区、账号名、角色名、常玩的游戏、长期项目、常用工具、稳定偏好、近几天会持续影响聊天理解的近况，都属于 saveMemory 的常见命中范围。</rule>",
-    "<rule>如果 diary 和 memory 都沾边，memory 负责以后还会用到的用户事实，writeDiary 负责今天这一轮发生了什么。</rule>",
-    "<rule>如果你拿不准某条事实算不算足够长期，只要它在后续几轮聊天里大概率还会用到，就倾向先调 saveMemory，而不是放弃记录。</rule>",
-    "<rule>再快速判断：这轮有没有值得写进今日日记的 observation。若有，优先或同时调用 writeDiary；如果 diary 和 memory 都沾边，memory 负责长期事实，writeDiary 负责今天这一轮发生了什么。</rule>",
-    "<rule>如果你拿不准这条 observation 是否足够重大，只要它对今天的聊天留下了具体痕迹，就先记下来；后面的日记生成会再筛。</rule>",
+    ...(allowPersistentTools === false
+      ? [
+          "<rule>当前是快速回复模式。本轮不要主动处理 memory / diary 持久化，只专注理解上下文并把该说的话说好。</rule>",
+        ]
+      : [
+          "<rule>回答前先快速判断：这轮有没有以后大概率还会用到的用户事实。若有，优先或同时调用 saveMemory / setNickname / setTimezone / deleteMemory；不要只顾着 send_message。</rule>",
+          "<rule>昵称、地区、时区、账号名、角色名、常玩的游戏、长期项目、常用工具、稳定偏好、近几天会持续影响聊天理解的近况，都属于 saveMemory 的常见命中范围。</rule>",
+          "<rule>如果 diary 和 memory 都沾边，memory 负责以后还会用到的用户事实，writeDiary 负责今天这一轮发生了什么。</rule>",
+          "<rule>如果你拿不准某条事实算不算足够长期，只要它在后续几轮聊天里大概率还会用到，就倾向先调 saveMemory，而不是放弃记录。</rule>",
+          "<rule>再快速判断：这轮有没有值得写进今日日记的 observation。若有，优先或同时调用 writeDiary；如果 diary 和 memory 都沾边，memory 负责长期事实，writeDiary 负责今天这一轮发生了什么。</rule>",
+          "<rule>如果你拿不准这条 observation 是否足够重大，只要它对今天的聊天留下了具体痕迹，就先记下来；后面的日记生成会再筛。</rule>",
+        ]),
+    ...(preferAdvisor
+      ? [
+          "<rule>当前轮被标记为可能需要更深入解释、认真回答或更强推理。若你觉得直接短答不稳，优先调用 startSubagent 获取 helper 摘要，再决定如何 send_message。</rule>",
+          "<rule>helper / advisor 不能代你发群消息；它只提供内部参考、摘要、证据或草稿，最终仍由你自己决定是否 send_message。</rule>",
+        ]
+      : []),
     "</tool_runtime_policy>",
   );
 

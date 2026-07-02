@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import type { Message } from "grammy/types";
+import OpenCC from "opencc-js";
 import config from "../configs/env.js";
 import {
   getDiaryObservation,
@@ -63,9 +64,163 @@ const RESET_REPLIES = [
   "咳 刚才那段我不记得了喵",
 ] as const;
 
+const SIMPLE_CASUAL_MESSAGE_REGEX =
+  /^(?:在吗|在嘛|早|早安|晚安|午安|下午好|晚上好|哈哈+|哈+|草+|6+|666+|笑死|绷不住|确实|懂了|好耶|好哦|好喔|好吧|谢谢|谢啦|牛|可爱|可爱捏|什么鬼|啥|这啥|真的假的|啊\??|哦+|喵+|？+|\?+|!+|！+|嗯+|呜+|欸+|诶+)$/u;
+const DETAILED_REQUEST_REGEX = /认真|详细|解释(?:一下|清楚|清楚点)?|展开讲|细说|具体说说|说详细点/u;
+const REALTIME_REQUEST_REGEX =
+  /最新|刚刚发生|实时(?:消息|资讯|信息|数据)?|新闻|版本(?:号)?|更新(?:了没|了吗|内容)?|价格|股价|汇率|天气|日期|几点|时间|几号|星期几|发布(?:了没|了吗|时间)?|官网/u;
+const CURRENT_FACT_QUESTION_REGEX =
+  /(?:现在(?:几点|几[号點]|是什么时间|幾點|幾號)|今天(?:几号|星期几|多少号|日期|天氣|天气)|(?:現在|今天).*(?:幾點|几點|幾號|几号|星期幾|星期几|天氣|天气))/u;
+const TECHNICAL_SIGNAL_REGEX =
+  /```|`[^`]+`|\b(?:api|sdk|json|sql|http|https|node|npm|pnpm|yarn|git|docker|typescript|javascript|python|java|rust|go|react|vue|astro|firebase|eslint|prettier|pm2|linux|nginx|redis)\b|(?:报错|报錯|错误|錯誤|异常|例外|堆栈|堆疊|代码|代碼|函数|函數|编译|編譯|语法|語法|类型|類型|接口|介面|实现|實現|性能|架构|原理|命令|脚本|日誌|日志|矩阵|矩陣|微积分|微積分|线代|線代|高数|高數|数学|數學|证明|證明|定理|极限|極限|导数|導數|积分|積分|概率|機率|統計|统计|traceback|exception|stack trace|tsconfig|package\.json|pnpm-lock|npm run|import |export |const |let |var |class )/iu;
+const traditionalToSimplified = OpenCC.Converter({ from: "t", to: "cn" });
+
+interface LocalAiRoute {
+  tier: "simple" | "complex" | "tech";
+  needsSearch: boolean;
+  preferAdvisor: boolean;
+  allowPersistentTools: boolean;
+  usedLocalRoute: boolean;
+  reason: string;
+}
+
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function countSentenceLikeSegments(text: string): number {
+  return text
+    .split(/[\n。！？!?]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean).length;
+}
+
+function normalizeLocalRouteText(text: string): string {
+  return traditionalToSimplified(text);
+}
+
+function decideLocalAiRoute(params: {
+  rawText: string;
+  isMentioned: boolean;
+  isRepliedToBot: boolean;
+  urls: string[];
+  mediaRefs: RichMediaRef[];
+}): LocalAiRoute | null {
+  const { rawText, isMentioned, isRepliedToBot, urls, mediaRefs } = params;
+  const normalized = normalizeLocalRouteText(rawText).replace(/\s+/g, " ").trim();
+  const currentMedia = mediaRefs.filter((media) => media.source === "current");
+  const hasCurrentMedia = currentMedia.length > 0;
+  const hasNonStickerMedia = currentMedia.some((media) => media.type !== "sticker");
+  const hasUrls = urls.length > 0;
+  const asksCurrentFact = CURRENT_FACT_QUESTION_REGEX.test(normalized);
+  const needsSearch = hasUrls || REALTIME_REQUEST_REGEX.test(normalized) || asksCurrentFact;
+  const looksTechnical = TECHNICAL_SIGNAL_REGEX.test(normalized);
+  const wantsDetailedAnswer = DETAILED_REQUEST_REGEX.test(normalized);
+  const isTriggered = isMentioned || isRepliedToBot;
+
+  if (looksTechnical) {
+    return {
+      tier: "tech",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "technical_signal",
+    };
+  }
+
+  if (wantsDetailedAnswer) {
+    return {
+      tier: "complex",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "explicit_detailed_request",
+    };
+  }
+
+  if (hasNonStickerMedia) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "current_non_sticker_media_present",
+    };
+  }
+
+  if (hasCurrentMedia && !hasUrls && normalized.length <= 16) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: false,
+      usedLocalRoute: true,
+      reason: "sticker_or_light_media_chat",
+    };
+  }
+
+  const shortLen = normalized.length > 0 && normalized.length <= 24;
+  const mediumLen = normalized.length > 0 && normalized.length <= 48;
+  const shortSentenceCount = countSentenceLikeSegments(normalized) <= 2;
+  const mediumSentenceCount = countSentenceLikeSegments(normalized) <= 3;
+  const looksCasual = SIMPLE_CASUAL_MESSAGE_REGEX.test(normalized);
+  if (
+    isTriggered &&
+    !hasUrls &&
+    !needsSearch &&
+    !hasCurrentMedia &&
+    shortLen &&
+    shortSentenceCount &&
+    looksCasual
+  ) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: false,
+      usedLocalRoute: true,
+      reason: "short_casual_triggered_chat",
+    };
+  }
+
+  if (isTriggered && !hasUrls && !hasCurrentMedia && shortLen && shortSentenceCount) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "short_triggered_chat",
+    };
+  }
+
+  if (isTriggered && !hasUrls && !hasCurrentMedia && mediumLen && mediumSentenceCount) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "medium_triggered_chat",
+    };
+  }
+
+  if (needsSearch) {
+    return {
+      tier: "complex",
+      needsSearch: true,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "realtime_or_search_request",
+    };
+  }
+
+  return null;
 }
 
 function isReplyTargetMissingError(err: unknown): boolean {
@@ -814,7 +969,26 @@ async function handleAiTurn(params: {
 
   const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
 
-  const { tier, needsSearch } = await classifyMessage(userMessage);
+  const localRoute = decideLocalAiRoute({
+    rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
+    isMentioned,
+    isRepliedToBot,
+    urls: urls ?? [],
+    mediaRefs: (mediaRefs ?? []) as MediaRef[],
+  });
+  const { tier, needsSearch } = localRoute ?? (await classifyMessage(userMessage));
+  if (localRoute) {
+    logger.info(
+      {
+        tier: localRoute.tier,
+        needsSearch: localRoute.needsSearch,
+        preferAdvisor: localRoute.preferAdvisor,
+        allowPersistentTools: localRoute.allowPersistentTools,
+        reason: localRoute.reason,
+      },
+      "handleAiTurn: applied local AI routing",
+    );
+  }
   const isTriggered = isMentioned || isRepliedToBot;
 
   try {
@@ -854,6 +1028,8 @@ async function handleAiTurn(params: {
       ...(allowMediaTools != null ? { allowMediaTools } : {}),
       ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
       isRetryTurn: false,
+      allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+      ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -895,6 +1071,8 @@ async function handleAiTurn(params: {
           ...(allowMediaTools != null ? { allowMediaTools } : {}),
           ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
           isRetryTurn: true,
+          allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+          ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
         });
 
         if (result.action === "send") break;
