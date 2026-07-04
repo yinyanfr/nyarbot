@@ -1058,6 +1058,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       "强信号包括：首次透露长期身份/常驻地/时区/重大近况、关系称呼变化、一个持续话题终于有结果、你先误解后修正、或一句明显值得日后回看的原话。不是非得特别重大才记；只要今天这轮对话里留下了具体痕迹，就可以记。" +
       "如果这轮确实值得记，你可以在 send_message 的同时调用 writeDiary，不要因为已经回复了就不记。拿不准时也倾向先记，后面的日记生成会再筛。" +
       "writeDiary 记录的是今天的事件、原话、转折和反应；saveMemory 记录的是以后还会反复用到的稳定用户事实。两者可以同一轮同时调用；如果 diary 和 memory 都沾边，memory 记长期事实，writeDiary 记今天这一轮发生了什么。" +
+      "如果这条 observation 明显属于某个具体群友（谁说的话、谁经历的事、谁的状态变化），尽量填写 subjectUid，把它绑定到那个人的稳定 uid；同一个 uid 即使昵称 later 变了也还是同一个人。subjectUid 必须来自 current_turn、reply_to 或 recent_members 里已经出现的人。" +
       "普通闲聊、完全重复且没有增量的内容、纯知识问答、硬凑出来的感受不要记。用户纠正旧观察时优先 update/retract，而不是再 create 一条。",
     inputSchema: z.object({
       action: z.enum(["create", "update", "retract"]),
@@ -1071,6 +1072,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
             .describe(
               "事件发生时间，ISO 字符串；不知道可省略。若不带时区偏移，则按姬器人的固定东八区解释。",
             ),
+          subjectUid: z
+            .string()
+            .optional()
+            .describe("这条 observation 主要属于哪个群友的稳定 uid；不知道时可省略"),
           event: z.string().optional().describe("简洁描述可验证事件，不写心理诊断"),
           exactQuote: z.string().optional().describe("值得原样保留的一句原话，必须确实来自对话"),
           immediateReaction: z.string().optional().describe("你当时实际产生的反应"),
@@ -1109,8 +1114,24 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         const mergedSourceRefs = Array.from(
           new Set([...(observation?.sourceRefs ?? []), ...(sourceRefs ?? [])]),
         );
+        const recentMemberMap = new Map(recentMembers.map((member) => [member.uid, member]));
+        const requestedSubjectUid = observation?.subjectUid?.trim();
+        if (requestedSubjectUid && !recentMemberMap.has(requestedSubjectUid)) {
+          logger.info(
+            { action, targetId, requestedSubjectUid },
+            "writeDiary subjectUid not in recent members",
+          );
+          return "subjectUid 不在当前可见群友列表里，先不要乱记人";
+        }
+        const resolvedSubjectUid = requestedSubjectUid;
+        const subjectMember = resolvedSubjectUid
+          ? recentMemberMap.get(resolvedSubjectUid)
+          : undefined;
         const normalizedObservation = {
           ...(observation?.occurredAt ? { occurredAt: observation.occurredAt } : {}),
+          ...(resolvedSubjectUid ? { subjectUid: resolvedSubjectUid } : {}),
+          ...(subjectMember?.name ? { subjectName: subjectMember.name } : {}),
+          ...(subjectMember?.username ? { subjectUsername: subjectMember.username } : {}),
           ...(observation?.event ? { event: observation.event } : {}),
           ...(observation?.exactQuote ? { exactQuote: observation.exactQuote } : {}),
           ...(observation?.immediateReaction

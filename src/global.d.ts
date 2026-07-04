@@ -26,6 +26,9 @@ export interface DiaryObservationV2 {
   occurredAt?: string;
   recordedAt: string;
   localDate: string;
+  subjectUid?: string;
+  subjectName?: string;
+  subjectUsername?: string;
   event: string;
   exactQuote?: string;
   immediateReaction?: string;

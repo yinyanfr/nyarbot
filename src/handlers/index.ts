@@ -323,6 +323,7 @@ function formatDiaryObservationSummary(
         `status=${item.status}`,
         `confidence=${item.confidence}`,
         `salience=${item.salience}`,
+        item.subjectUid ? `subject=${item.subjectUid}` : "",
         item.supersedesId ? `supersedes=${item.supersedesId}` : "",
       ]
         .filter(Boolean)

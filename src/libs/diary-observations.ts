@@ -15,6 +15,9 @@ export const MAX_DAILY_DIARY_OBSERVATIONS = 12;
 
 const OBSERVATION_FIELD_LIMITS = {
   occurredAt: 64,
+  subjectUid: 64,
+  subjectName: 64,
+  subjectUsername: 64,
   event: 500,
   exactQuote: 500,
   immediateReaction: 500,
@@ -27,6 +30,9 @@ const OBSERVATION_FIELD_LIMITS = {
 
 export interface DiaryObservationDraft {
   occurredAt?: string;
+  subjectUid?: string;
+  subjectName?: string;
+  subjectUsername?: string;
   event: string;
   exactQuote?: string;
   immediateReaction?: string;
@@ -71,6 +77,12 @@ export function sanitizeDiaryObservationDraft(
   const event = cleanField(input.event, OBSERVATION_FIELD_LIMITS.event);
   if (!event) return null;
   const occurredAt = cleanField(input.occurredAt, OBSERVATION_FIELD_LIMITS.occurredAt);
+  const subjectUid = cleanField(input.subjectUid, OBSERVATION_FIELD_LIMITS.subjectUid);
+  const subjectName = cleanField(input.subjectName, OBSERVATION_FIELD_LIMITS.subjectName);
+  const subjectUsername = cleanField(
+    input.subjectUsername,
+    OBSERVATION_FIELD_LIMITS.subjectUsername,
+  );
   const exactQuote = cleanField(input.exactQuote, OBSERVATION_FIELD_LIMITS.exactQuote);
   const immediateReaction = cleanField(
     input.immediateReaction,
@@ -96,6 +108,9 @@ export function sanitizeDiaryObservationDraft(
   return {
     event,
     ...(occurredAt ? { occurredAt } : {}),
+    ...(subjectUid ? { subjectUid } : {}),
+    ...(subjectName ? { subjectName } : {}),
+    ...(subjectUsername ? { subjectUsername } : {}),
     ...(exactQuote ? { exactQuote } : {}),
     ...(immediateReaction ? { immediateReaction } : {}),
     ...(interpretation ? { interpretation } : {}),
@@ -120,6 +135,7 @@ export function buildObservationFingerprint(
   localDate: string,
   event: string,
   sourceRefs: string[] = [],
+  subjectUid?: string,
 ): string {
   const normalizedEvent = normalizeSimilarityText(event);
   const normalizedRefs = [...sourceRefs]
@@ -128,11 +144,12 @@ export function buildObservationFingerprint(
     .sort()
     .join("|");
   return createHash("sha1")
-    .update(`${localDate}\n${normalizedEvent}\n${normalizedRefs}`)
+    .update(`${localDate}\n${subjectUid ?? ""}\n${normalizedEvent}\n${normalizedRefs}`)
     .digest("hex");
 }
 
 export function observationsLikelyMatch(a: DiaryObservationV2, b: DiaryObservationDraft): boolean {
+  if (a.subjectUid && b.subjectUid && a.subjectUid !== b.subjectUid) return false;
   const eventA = normalizeSimilarityText(a.event);
   const eventB = normalizeSimilarityText(b.event);
   if (!eventA || !eventB) return false;
@@ -214,6 +231,11 @@ export function serializeDiaryObservationsXml(
     lines.push(
       `  <observation id="${xmlEscape(observation.id)}" confidence="${observation.confidence}" salience="${String(observation.salience)}" status="${observation.status}">`,
     );
+    if (observation.subjectUid || observation.subjectName || observation.subjectUsername) {
+      lines.push(
+        `    <subject uid="${xmlEscape(observation.subjectUid ?? "")}" name="${xmlEscape(observation.subjectName ?? "")}" username="${xmlEscape(observation.subjectUsername ?? "")}" />`,
+      );
+    }
     lines.push(`    <event>${xmlEscape(observation.event)}</event>`);
     if (observation.occurredAt) {
       lines.push(
