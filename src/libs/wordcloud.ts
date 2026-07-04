@@ -1,6 +1,6 @@
 import { InputFile } from "grammy";
 import { GlobalFonts, createCanvas, type CanvasRenderingContext2D } from "@napi-rs/canvas";
-import { cut, load as loadJieba } from "nodejieba";
+import nodejieba from "nodejieba";
 import {
   hasWordcloudRunForDate,
   listStoredMessagesForDate,
@@ -138,7 +138,7 @@ function ensureJiebaLoaded(): void {
   if (jiebaLoaded) return;
   jiebaLoaded = true;
   try {
-    loadJieba();
+    nodejieba.load();
   } catch (err) {
     logger.warn({ err }, "wordcloud: failed to load nodejieba dictionaries");
   }
@@ -182,7 +182,7 @@ function extractTokens(text: string): string[] {
     .replace(/[#/][^\s]+/gu, " ")
     .replace(/[\r\n\t]+/gu, " ");
   const tokens: string[] = [];
-  for (const segment of cut(sanitized, true)) {
+  for (const segment of nodejieba.cut(sanitized, true)) {
     const normalized = normalizeToken(segment);
     if (normalized) tokens.push(normalized);
   }
