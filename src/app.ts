@@ -9,12 +9,18 @@ import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
 import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
+import { checkAndGenerateWordcloud, initWordcloudCallbacks } from "./libs/wordcloud.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
 import { groupRuntime } from "./libs/group-runtime.js";
 import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
+import {
+  closeLocalWordcloudStore,
+  initLocalWordcloudStore,
+} from "./services/local-wordcloud-store.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
+let wordcloudTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
 
 initFirebase();
@@ -41,6 +47,7 @@ async function main(): Promise<void> {
 
   // Restore conversation context from last session
   await loadConversationBuffer();
+  initLocalWordcloudStore();
 
   const proactiveCallbacks: ProactiveCallbacks = {
     sendText: async (text: string) => {
@@ -133,9 +140,28 @@ async function main(): Promise<void> {
     },
   });
 
+  initWordcloudCallbacks({
+    sendPhoto: async (photo, caption) => {
+      try {
+        await bot.api.sendPhoto(config.tgGroupId, photo, { caption });
+      } catch (err) {
+        logger.error({ err }, "wordcloud: group photo publish failed");
+        throw err;
+      }
+      pushMessage(config.tgGroupId, "bot", config.botUsername, caption);
+      groupRuntime.recordBotMessages({ messages: [caption] }).catch((err: unknown) => {
+        logger.warn({ err }, "wordcloud: runtime bot event persist failed");
+      });
+      touchBotActivity();
+    },
+  });
+
   // Midnight diary generation: check interval configurable by env
   diaryTimer = setInterval(checkAndGenerateDiary, config.diaryCheckIntervalMs);
   diaryTimer.unref?.();
+
+  wordcloudTimer = setInterval(checkAndGenerateWordcloud, config.wordcloudCheckIntervalMs);
+  wordcloudTimer.unref?.();
 
   // Periodic buffer save: interval configurable by env
   bufferSaveTimer = setInterval(() => {
@@ -159,25 +185,31 @@ main().catch((err: unknown) => {
 process.once("SIGINT", () => {
   stopProactiveChecker();
   if (diaryTimer) clearInterval(diaryTimer);
+  if (wordcloudTimer) clearInterval(wordcloudTimer);
   if (bufferSaveTimer) clearInterval(bufferSaveTimer);
+  closeLocalWordcloudStore();
   saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
 process.once("SIGTERM", () => {
   stopProactiveChecker();
   if (diaryTimer) clearInterval(diaryTimer);
+  if (wordcloudTimer) clearInterval(wordcloudTimer);
   if (bufferSaveTimer) clearInterval(bufferSaveTimer);
+  closeLocalWordcloudStore();
   saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
 
 // Crash guards: ensure unhandled errors are logged before exit
 process.once("uncaughtException", (err) => {
+  closeLocalWordcloudStore();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal({ err }, "uncaught exception — exiting");
   process.exit(1);
 });
 process.once("unhandledRejection", (reason) => {
+  closeLocalWordcloudStore();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal(
     { err: reason instanceof Error ? reason : new Error(String(reason)) },

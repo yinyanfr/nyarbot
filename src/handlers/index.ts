@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import type { Message } from "grammy/types";
 import OpenCC from "opencc-js";
 import config from "../configs/env.js";
@@ -14,6 +14,7 @@ import {
   countUsersWithMemories,
   updateDiaryObservation,
 } from "../services/firestore.js";
+import { deleteStoredMessage, upsertGroupMessage } from "../services/local-wordcloud-store.js";
 import {
   classifyMessage,
   generateAiTurn,
@@ -37,6 +38,7 @@ import {
 } from "../libs/stickers.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
+import { generateWordcloudPreviewForDate } from "../libs/wordcloud.js";
 import { todayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
@@ -87,6 +89,36 @@ interface LocalAiRoute {
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function isCommandLikeMessage(
+  entities: { type: string; offset: number; length: number }[],
+): boolean {
+  return entities.some((entity) => entity.type === "bot_command");
+}
+
+async function persistWordcloudMessage(params: {
+  chatId: string;
+  messageId: number;
+  userId: string;
+  displayName: string;
+  username?: string;
+  isBot: boolean;
+  text: string;
+  createdAt: number;
+  editedAt?: number;
+}): Promise<void> {
+  await upsertGroupMessage({
+    chatId: params.chatId,
+    messageId: params.messageId,
+    userId: params.userId,
+    displayName: params.displayName,
+    ...(params.username ? { username: params.username } : {}),
+    isBot: params.isBot,
+    text: params.text,
+    createdAt: params.createdAt,
+    ...(params.editedAt ? { editedAt: params.editedAt } : {}),
+  });
 }
 
 function countSentenceLikeSegments(text: string): number {
@@ -1356,6 +1388,29 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         return;
       }
 
+      if (matchCommand(privEntities, privText, "/wordcloud", botUsername)) {
+        const date = privText.replace(/^\/wordcloud(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        await ctx.reply(`正在生成词云 ${date}...`).catch(() => void 0);
+        try {
+          const preview = await generateWordcloudPreviewForDate(date);
+          if (!preview) {
+            await ctx.reply("这一天没有足够的聊天记录可生成词云喵。").catch(() => void 0);
+            return;
+          }
+          await ctx
+            .replyWithPhoto(new InputFile(preview.image, `${date}-wordcloud.png`), {
+              caption: `${preview.caption}\n\n词条数: ${preview.wordCount} | 消息数: ${preview.messageCount}`,
+            })
+            .catch(async () => {
+              await ctx.reply(preview.caption).catch(() => void 0);
+            });
+        } catch (err) {
+          logger.error({ err, date }, "private /wordcloud failed");
+          await ctx.reply("生成词云失败了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
       if (matchCommand(privEntities, privText, "/diaryobs", botUsername)) {
         const date = privText.replace(/^\/diaryobs(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         try {
@@ -1511,7 +1566,21 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
-    const isCommandMessage = entities.some((entity) => entity.type === "bot_command");
+    const isCommandMessage = isCommandLikeMessage(entities);
+    if (!from.is_bot && !isCommandMessage) {
+      await persistWordcloudMessage({
+        chatId: config.tgGroupId,
+        messageId: msg.message_id,
+        userId: from.id.toString(),
+        displayName,
+        ...(from.username ? { username: from.username } : {}),
+        isBot: false,
+        text: rawText,
+        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+      }).catch((err: unknown) => {
+        logger.warn({ err, messageId: msg.message_id }, "wordcloud: persist group message failed");
+      });
+    }
     const runtimeDecision = await groupRuntime.ingestUserMessage({
       chatId: config.tgGroupId,
       messageId: msg.message_id,
@@ -1726,6 +1795,34 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const rawText = msg.text ?? msg.caption ?? "";
 
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+    const isCommandMessage = isCommandLikeMessage(entities);
+    if (!from.is_bot && isCommandMessage) {
+      await deleteStoredMessage(config.tgGroupId, msg.message_id).catch((err: unknown) => {
+        logger.warn(
+          { err, messageId: msg.message_id },
+          "wordcloud: delete edited command message failed",
+        );
+      });
+    } else if (!from.is_bot && !isCommandMessage) {
+      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const displayName = user.nickname || from.first_name || "大哥哥";
+      await persistWordcloudMessage({
+        chatId: config.tgGroupId,
+        messageId: msg.message_id,
+        userId: from.id.toString(),
+        displayName,
+        ...(from.username ? { username: from.username } : {}),
+        isBot: false,
+        text: rawText,
+        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+        ...(msg.edit_date != null ? { editedAt: msg.edit_date * 1000 } : {}),
+      }).catch((err: unknown) => {
+        logger.warn(
+          { err, messageId: msg.message_id },
+          "wordcloud: persist edited group message failed",
+        );
+      });
+    }
 
     const isMentioned = entities.some((e) => {
       if (e.type !== "mention") return false;

@@ -7,6 +7,7 @@
 - **Local AI routing and advisor hints** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): short casual chats, technical/math prompts, detailed requests, and current-fact queries can now be fast-pathed locally before falling back to full classification.
 - **`/stroke` command** (`src/handlers/index.ts`, docs): added a dedicated petting reaction flow parallel to `/shock`.
 - **Fallback rescue send path** (`src/libs/ai.ts`, `src/handlers/index.ts`): dismissed raw drafts are now retried through a real `send_message` rescue flow before sticker-only fallback, so visible replies stay closer to the model's intended output.
+- **Daily local wordcloud pipeline** (`src/services/local-wordcloud-store.ts`, `src/libs/wordcloud.ts`, `src/app.ts`, `src/handlers/index.ts`, `src/configs/env.ts`, `package.json`): the bot now stores recent human group messages in local SQLite, generates a colorful square wordcloud for yesterday after midnight, posts it to the group with top-5 active users, and supports admin DM preview via `/wordcloud [date]`.
 
 ### Changed
 
@@ -26,7 +27,7 @@
 
 ### Docs
 
-- **README and docs sync** (`README.md`, `README.en.md`, `docs/architecture*.md`, `docs/commands-and-interactions*.md`): documented the new search, rescue, routing, `/stroke`, timeout, and memory/diary behavior.
+- **README sync** (`README.md`): documented the local wordcloud pipeline, preview command, and related configuration envs in addition to the newer search, rescue, routing, `/stroke`, timeout, and memory/diary behavior.
 
 ## [1.0.0] — 2026-05-21
 

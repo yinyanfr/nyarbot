@@ -65,6 +65,7 @@ const config = {
   logAppName: process.env.LOG_APP_NAME ?? "nyarbot",
   adminDmMinIntervalMs: parseNumberEnv("ADMIN_DM_MIN_INTERVAL_MS", 5_000),
   conversationBufferPath: process.env.CONVERSATION_BUFFER_PATH ?? "data/conversation-buffer.json",
+  wordcloudDbPath: process.env.WORDCLOUD_DB_PATH ?? "data/wordcloud.sqlite",
   proactiveCheckIntervalMs: parseNumberEnv("PROACTIVE_CHECK_INTERVAL_MS", 15_000),
   proactiveWindowMs: parseNumberEnv("PROACTIVE_WINDOW_MS", 3 * 60 * 1000),
   proactiveMessageDelayMs: parseNumberEnv("PROACTIVE_MESSAGE_DELAY_MS", 400),
@@ -93,6 +94,7 @@ const config = {
   runtimeMaxRecentEvents: parseNumberEnv("RUNTIME_MAX_RECENT_EVENTS", 120),
   runtimeRetainRecentEvents: parseNumberEnv("RUNTIME_RETAIN_RECENT_EVENTS", 40),
   diaryCheckIntervalMs: parseNumberEnv("DIARY_CHECK_INTERVAL_MS", 60_000),
+  wordcloudCheckIntervalMs: parseNumberEnv("WORDCLOUD_CHECK_INTERVAL_MS", 60_000),
   bufferSaveIntervalMs: parseNumberEnv("BUFFER_SAVE_INTERVAL_MS", 300_000),
 } as const;
 
