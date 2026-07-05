@@ -97,6 +97,10 @@ function isCommandLikeMessage(
   return entities.some((entity) => entity.type === "bot_command");
 }
 
+function isForwardedMessage(msg: Message): boolean {
+  return msg.forward_origin != null || msg.is_automatic_forward === true;
+}
+
 async function persistWordcloudMessage(params: {
   chatId: string;
   messageId: number;
@@ -104,6 +108,7 @@ async function persistWordcloudMessage(params: {
   displayName: string;
   username?: string;
   isBot: boolean;
+  isForwarded: boolean;
   text: string;
   createdAt: number;
   editedAt?: number;
@@ -115,6 +120,7 @@ async function persistWordcloudMessage(params: {
     displayName: params.displayName,
     ...(params.username ? { username: params.username } : {}),
     isBot: params.isBot,
+    isForwarded: params.isForwarded,
     text: params.text,
     createdAt: params.createdAt,
     ...(params.editedAt ? { editedAt: params.editedAt } : {}),
@@ -1575,6 +1581,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         ...(from.username ? { username: from.username } : {}),
         isBot: false,
+        isForwarded: isForwardedMessage(msg),
         text: rawText,
         createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
       }).catch((err: unknown) => {
@@ -1813,6 +1820,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         ...(from.username ? { username: from.username } : {}),
         isBot: false,
+        isForwarded: isForwardedMessage(msg),
         text: rawText,
         createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
         ...(msg.edit_date != null ? { editedAt: msg.edit_date * 1000 } : {}),

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { InputFile } from "grammy";
 import { GlobalFonts, createCanvas, type CanvasRenderingContext2D } from "@napi-rs/canvas";
 import nodejieba from "nodejieba";
@@ -15,9 +16,10 @@ import { now, todayDateStr, yesterdayDateStr } from "./time.js";
 const CANVAS_SIZE = 1024;
 const MAX_WORDS = 80;
 const MAX_LAYOUT_ATTEMPTS = 900;
-const MIN_FONT_SIZE = 26;
-const MAX_FONT_SIZE = 118;
+const MIN_FONT_SIZE = 18;
+const MAX_FONT_SIZE = 144;
 const WORD_PADDING = 12;
+const WORD_SIZE_EXPONENT = 1.35;
 const COLORS = [
   "#ff6b9d",
   "#ff8fab",
@@ -30,8 +32,12 @@ const COLORS = [
 ] as const;
 const BACKGROUND_TOP = "#fff9fc";
 const BACKGROUND_BOTTOM = "#f3f7ff";
+const BUNDLED_CJK_FONT_ALIAS = "NyarbotWordcloudCJK";
+const BUNDLED_CJK_FONT_PATH = fileURLToPath(
+  new URL("../../assets/fonts/SourceHanSans-VF.ttf", import.meta.url),
+);
 const DEFAULT_FONT_FAMILY =
-  'system-ui, "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif';
+  '"NyarbotWordcloudCJK", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif';
 const STOP_WORDS = new Set([
   "的",
   "了",
@@ -111,6 +117,7 @@ interface WordPlacement {
   text: string;
   weight: number;
   fontSize: number;
+  direction: "horizontal" | "vertical";
   x: number;
   y: number;
   width: number;
@@ -128,6 +135,18 @@ function ensureFontsLoaded(): void {
   if (fontsLoaded) return;
   fontsLoaded = true;
   try {
+    if (!globalFonts.has(BUNDLED_CJK_FONT_ALIAS)) {
+      const registered = globalFonts.registerFromPath(
+        BUNDLED_CJK_FONT_PATH,
+        BUNDLED_CJK_FONT_ALIAS,
+      );
+      if (!registered) {
+        logger.warn(
+          { fontPath: BUNDLED_CJK_FONT_PATH },
+          "wordcloud: bundled font registration failed",
+        );
+      }
+    }
     globalFonts.loadSystemFonts?.();
   } catch (err) {
     logger.warn({ err }, "wordcloud: failed to load system fonts");
@@ -189,10 +208,15 @@ function extractTokens(text: string): string[] {
   return tokens;
 }
 
+function shouldUseVerticalLayout(token: string): boolean {
+  return isMostlyCjk(token) && Array.from(token).length >= 2;
+}
+
 function buildWordFrequencies(texts: string[]): { text: string; weight: number }[] {
   const counts = new Map<string, number>();
   for (const text of texts) {
-    for (const token of extractTokens(text)) {
+    const uniqueTokens = new Set(extractTokens(text));
+    for (const token of uniqueTokens) {
       counts.set(token, (counts.get(token) ?? 0) + 1);
     }
   }
@@ -221,6 +245,24 @@ function pickColor(index: number, weight: number): string {
   return COLORS[(index + weight) % COLORS.length] ?? COLORS[0];
 }
 
+function measureVerticalText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  fontSize: number,
+): { width: number; height: number } {
+  const chars = Array.from(text);
+  let maxCharWidth = fontSize;
+  for (const char of chars) {
+    const metrics = ctx.measureText(char);
+    maxCharWidth = Math.max(maxCharWidth, metrics.width);
+  }
+  const lineHeight = Math.max(fontSize, Math.round(fontSize * 1.06));
+  return {
+    width: Math.ceil(maxCharWidth + WORD_PADDING * 2),
+    height: Math.ceil(chars.length * lineHeight + WORD_PADDING * 2),
+  };
+}
+
 function buildPlacements(words: { text: string; weight: number }[]): WordPlacement[] {
   ensureFontsLoaded();
   const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
@@ -232,16 +274,25 @@ function buildPlacements(words: { text: string; weight: number }[]): WordPlaceme
 
   words.forEach((word, index) => {
     const ratio = maxWeight === minWeight ? 1 : (word.weight - minWeight) / span;
-    const fontSize = Math.round(MIN_FONT_SIZE + ratio * (MAX_FONT_SIZE - MIN_FONT_SIZE));
+    const scaledRatio = Math.pow(ratio, WORD_SIZE_EXPONENT);
+    const fontSize = Math.round(MIN_FONT_SIZE + scaledRatio * (MAX_FONT_SIZE - MIN_FONT_SIZE));
+    const direction = shouldUseVerticalLayout(word.text) ? "vertical" : "horizontal";
     ctx.font = `700 ${fontSize}px ${DEFAULT_FONT_FAMILY}`;
-    const metrics = ctx.measureText(word.text);
-    const textWidth = Math.max(metrics.width, fontSize);
-    const textHeight = Math.max(
-      metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent,
-      fontSize,
-    );
-    const width = Math.ceil(textWidth + WORD_PADDING * 2);
-    const height = Math.ceil(textHeight + WORD_PADDING * 2);
+    const { width, height } =
+      direction === "vertical"
+        ? measureVerticalText(ctx, word.text, fontSize)
+        : (() => {
+            const metrics = ctx.measureText(word.text);
+            const textWidth = Math.max(metrics.width, fontSize);
+            const textHeight = Math.max(
+              metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent,
+              fontSize,
+            );
+            return {
+              width: Math.ceil(textWidth + WORD_PADDING * 2),
+              height: Math.ceil(textHeight + WORD_PADDING * 2),
+            };
+          })();
 
     for (let attempt = 0; attempt < MAX_LAYOUT_ATTEMPTS; attempt += 1) {
       const angle = attempt * 0.37;
@@ -252,6 +303,7 @@ function buildPlacements(words: { text: string; weight: number }[]): WordPlaceme
         text: word.text,
         weight: word.weight,
         fontSize,
+        direction,
         x: Math.round(centerX - width / 2),
         y: Math.round(centerY - height / 2),
         width,
@@ -303,11 +355,23 @@ function renderWordcloudImage(words: { text: string; weight: number }[]): Buffer
 
   for (const placement of placements) {
     ctx.font = `700 ${placement.fontSize}px ${DEFAULT_FONT_FAMILY}`;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
     ctx.shadowColor = "rgba(255,255,255,0.55)";
     ctx.shadowBlur = 10;
     ctx.fillStyle = placement.color;
+    if (placement.direction === "vertical") {
+      const chars = Array.from(placement.text);
+      const lineHeight = Math.max(placement.fontSize, Math.round(placement.fontSize * 1.06));
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      const textX = placement.x + placement.width / 2;
+      const startY = placement.y + WORD_PADDING;
+      chars.forEach((char, index) => {
+        ctx.fillText(char, textX, startY + index * lineHeight);
+      });
+      continue;
+    }
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
     const textX = placement.x + WORD_PADDING;
     const textY = placement.y + placement.height - WORD_PADDING;
     ctx.fillText(placement.text, textX, textY);
@@ -316,15 +380,37 @@ function renderWordcloudImage(words: { text: string; weight: number }[]): Buffer
   return canvas.toBuffer("image/png");
 }
 
-function buildCaption(date: string, topUsers: ActiveUserStat[]): string {
-  const lines = [`${date} 词云`, "", "昨日最活跃群友前五名："];
+function buildCaption(params: {
+  date: string;
+  topUsers: ActiveUserStat[];
+  hasForwardedMessages: boolean;
+}): string {
+  const { date, topUsers, hasForwardedMessages } = params;
+  const today = todayDateStr();
+  const yesterday = yesterdayDateStr();
+  const introLine =
+    date === today
+      ? "来看看今天大哥哥们都在聊什么喵。"
+      : date === yesterday
+        ? "来看看昨天大哥哥们都在聊什么喵。"
+        : `来看看 ${date} 那天大哥哥们都在聊什么喵。`;
+  const rankingTitle =
+    date === today
+      ? "今日最活跃群友前五名："
+      : date === yesterday
+        ? "昨日最活跃群友前五名："
+        : `${date} 最活跃群友前五名：`;
+  const lines = [`${date} 词云`, "", introLine, "", rankingTitle];
   if (topUsers.length === 0) {
-    lines.push("昨天没有可统计的活人聊天记录喵。");
+    lines.push("那天没有可统计的活人聊天记录喵。", "姬器人有点寂寞地蜷起来了喵。");
     return lines.join("\n");
   }
   topUsers.forEach((user, index) => {
     lines.push(`${index + 1}. ${user.displayName} ${user.messageCount}条`);
   });
+  if (hasForwardedMessages) {
+    lines.push("", "注：转发消息会计入活跃度，但不会进入词云正文喵。");
+  }
   return lines.join("\n");
 }
 
@@ -366,7 +452,11 @@ export async function generateWordcloudPreviewForDate(date: string): Promise<{
 } | null> {
   const messages = await listStoredMessagesForDate(date);
   const topUsers = await listTopActiveUsersForDate(date, 5);
-  const texts = messages.map((message) => message.text).filter((text) => text.trim().length > 0);
+  const wordcloudMessages = messages.filter((message) => !message.isForwarded);
+  const hasForwardedMessages = wordcloudMessages.length !== messages.length;
+  const texts = wordcloudMessages
+    .map((message) => message.text)
+    .filter((text) => text.trim().length > 0);
   if (messages.length === 0 || texts.length === 0) {
     return null;
   }
@@ -377,7 +467,7 @@ export async function generateWordcloudPreviewForDate(date: string): Promise<{
   }
 
   const image = renderWordcloudImage(words);
-  const caption = buildCaption(date, topUsers);
+  const caption = buildCaption({ date, topUsers, hasForwardedMessages });
   return { image, caption, messageCount: messages.length, wordCount: words.length };
 }
 

@@ -12,6 +12,7 @@ export interface StoredGroupMessage {
   displayName: string;
   username?: string;
   isBot: boolean;
+  isForwarded: boolean;
   text: string;
   createdAt: number;
   editedAt?: number;
@@ -45,6 +46,7 @@ function db(): SqliteDatabase {
       display_name TEXT NOT NULL,
       username TEXT,
       is_bot INTEGER NOT NULL,
+      is_forwarded INTEGER NOT NULL DEFAULT 0,
       text TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       edited_at INTEGER,
@@ -62,6 +64,21 @@ function db(): SqliteDatabase {
       published_at INTEGER NOT NULL
     ) STRICT;
   `);
+  const hasIsForwarded = opened
+    .prepare(
+      `
+        SELECT 1
+        FROM pragma_table_info('group_messages')
+        WHERE name = ?
+      `,
+    )
+    .get("is_forwarded");
+  if (!hasIsForwarded) {
+    opened.exec(`
+      ALTER TABLE group_messages
+      ADD COLUMN is_forwarded INTEGER NOT NULL DEFAULT 0;
+    `);
+  }
   database = opened;
   return opened;
 }
@@ -85,15 +102,17 @@ export async function upsertGroupMessage(message: StoredGroupMessage): Promise<v
           display_name,
           username,
           is_bot,
+          is_forwarded,
           text,
           created_at,
           edited_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_id, message_id) DO UPDATE SET
           user_id = excluded.user_id,
           display_name = excluded.display_name,
           username = excluded.username,
           is_bot = excluded.is_bot,
+          is_forwarded = excluded.is_forwarded,
           text = excluded.text,
           created_at = excluded.created_at,
           edited_at = excluded.edited_at
@@ -106,6 +125,7 @@ export async function upsertGroupMessage(message: StoredGroupMessage): Promise<v
       message.displayName,
       message.username ?? null,
       message.isBot ? 1 : 0,
+      message.isForwarded ? 1 : 0,
       message.text,
       message.createdAt,
       message.editedAt ?? null,
@@ -130,7 +150,7 @@ export async function listStoredMessagesForDate(date: string): Promise<StoredGro
   const rows = db()
     .prepare(
       `
-        SELECT chat_id, message_id, user_id, display_name, username, is_bot, text, created_at, edited_at
+        SELECT chat_id, message_id, user_id, display_name, username, is_bot, is_forwarded, text, created_at, edited_at
         FROM group_messages
         WHERE chat_id = ?
           AND created_at >= ?
@@ -147,6 +167,7 @@ export async function listStoredMessagesForDate(date: string): Promise<StoredGro
     displayName: String(row.display_name ?? ""),
     ...(typeof row.username === "string" && row.username ? { username: row.username } : {}),
     isBot: Number(row.is_bot ?? 0) === 1,
+    isForwarded: Number(row.is_forwarded ?? 0) === 1,
     text: String(row.text ?? ""),
     createdAt: Number(row.created_at ?? 0),
     ...(typeof row.edited_at === "number" ? { editedAt: row.edited_at } : {}),
