@@ -52,6 +52,20 @@
   `PROACTIVE_MAX_FAILURES`、`PROACTIVE_COOLDOWN_HIGH_MS`、
   `PROACTIVE_COOLDOWN_MEDIUM_MS`、`PROACTIVE_COOLDOWN_LOW_MS`
 - `DIARY_CHECK_INTERVAL_MS`
+- `WORDCLOUD_DB_PATH`（`data/wordcloud.sqlite`）
+- `WORDCLOUD_CHECK_INTERVAL_MS`（`60000`）
+
+## 本地词云存储
+
+- 词云使用本地 SQLite，不上传 Firestore。
+- 默认数据库路径由 `WORDCLOUD_DB_PATH` 控制，默认 `data/wordcloud.sqlite`。
+- 只保留最近 10 天消息。
+- 仅统计活人；bot 自身和其他 bot 都会被排除。
+- 命令消息不会进入词云；如果普通消息后来被编辑成命令，会从本地词云库删除。
+- 编辑消息按相同 `message_id` 覆盖，词云始终使用最终文本。
+- 转发消息会计入活跃榜和预览 `messageCount`，但不会进入词云正文。
+- 同一条消息里重复出现的同一个词只计 1 次。
+- 词云渲染内置完整 Source Han Sans 可变字体，支持简中、繁中、日文、韩文。
 
 ## Firebase
 

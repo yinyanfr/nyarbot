@@ -2,16 +2,17 @@
 
 ## Slash Commands
 
-| Command   | Who        | Description                                                |
-| --------- | ---------- | ---------------------------------------------------------- |
-| `/help`   | Anyone     | Show help text                                             |
-| `/love`   | Anyone     | Get affection scoring breakdown + tsundere response        |
-| `/shock`  | Anyone     | Zap the bot and trigger a shocked / frazzled reaction      |
-| `/stroke` | Anyone     | Pet the bot and trigger a frazzled reaction                |
-| `/nighty` | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later |
-| `/status` | Admin only | Show uptime, buffer size, memory user count                |
-| `/reset`  | Admin only | Clear the conversation buffer and runtime summary          |
-| `/diary`  | Admin only | Generate today's diary preview (private chat only)         |
+| Command             | Who        | Description                                                          |
+| ------------------- | ---------- | -------------------------------------------------------------------- |
+| `/help`             | Anyone     | Show help text                                                       |
+| `/love`             | Anyone     | Get affection scoring breakdown + tsundere response                  |
+| `/shock`            | Anyone     | Zap the bot and trigger a shocked / frazzled reaction                |
+| `/stroke`           | Anyone     | Pet the bot and trigger a frazzled reaction                          |
+| `/nighty`           | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later           |
+| `/status`           | Admin only | Show uptime, buffer size, memory user count                          |
+| `/reset`            | Admin only | Clear the conversation buffer and runtime summary                    |
+| `/diary`            | Admin only | Generate today's diary preview (private chat only)                   |
+| `/wordcloud [date]` | Admin only | Generate a wordcloud preview for a specific date (private chat only) |
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 
@@ -63,6 +64,13 @@ When answering, the LLM can respond with:
 - **No sticker**: Calls only `send_message` — plain text reply.
 
 The `sendSticker` tool exposes the hardcoded emoji list. The LLM selects by providing an emoji. Invalid emoji cancels sticker sending.
+
+### Wordcloud Preview and Counting Rules
+
+- `/wordcloud [date]` is available only in admin DMs; without an explicit date it previews today.
+- Preview captions adapt to the requested date and say “today”, “yesterday”, or the explicit date instead of hard-coding “yesterday”.
+- Forwarded messages still count toward the activity leaderboard and `messageCount`, but their forwarded text is excluded from the wordcloud body.
+- When forwarded messages are present for that day, the caption explicitly calls out that counting rule.
 
 ### Videos, GIFs, Video Messages, Documents, and Audio
 

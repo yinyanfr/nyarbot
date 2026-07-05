@@ -18,16 +18,18 @@
 - **Reset/runtime summary behavior** (`src/handlers/index.ts`, `src/services/firestore.ts`): `/reset` now clears the active runtime summary injection path as well as the chat buffer.
 - **Search prefetch policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search for the current turn, and mandatory search hints no longer conflict with the prefetch flow.
 - **Memory and diary heuristics** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/handlers/index.ts`): `saveMemory` now prefers reusable user facts, `writeDiary` is more candidate-first, and `memoryCandidateHints` are narrower to reduce false positives.
+- **Wordcloud rendering and filtering** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`, `src/handlers/index.ts`): the wordcloud now uses a bundled full Source Han Sans variable font for CJK text, records forwarded-message state, excludes forwarded text from the cloud body while still counting it in activity stats, removes messages edited into commands, deduplicates repeated tokens within a single message, and uses a tighter center-heavy layout with filler/negative token filtering.
 
 ### Fixed
 
 - **Retry-side diary duplication** (`src/libs/ai.ts`, `src/handlers/index.ts`, `src/services/firestore.ts`): retry turns no longer duplicate persistent diary writes or other side effects.
 - **Image-trigger reply policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): when a message needs image understanding, the bot now requires it before speaking, instead of bluffing around the image.
 - **Turn metrics consistency** (`src/handlers/index.ts`): rescue-generated `send_message` calls are now reflected in turn tool-call records and logs.
+- **Wordcloud startup catch-up and preview wording** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`): restarts after midnight no longer skip yesterday's wordcloud, preview captions now use the requested date instead of hard-coded “yesterday”, and captions explicitly document the forwarded-message counting rule.
 
 ### Docs
 
-- **README sync** (`README.md`): documented the local wordcloud pipeline, preview command, and related configuration envs in addition to the newer search, rescue, routing, `/stroke`, timeout, and memory/diary behavior.
+- **README/docs sync** (`README.md`, `README.en.md`, `docs/architecture.md`, `docs/architecture.zh-CN.md`, `docs/configuration.md`, `docs/configuration.zh-CN.md`, `docs/commands-and-interactions.md`, `docs/commands-and-interactions.zh-CN.md`): documented the local wordcloud pipeline, preview command, local SQLite/envs, forwarded-message policy, bundled CJK font rendering, and layout/filtering behavior.
 
 ## [1.0.0] — 2026-05-21
 

@@ -52,6 +52,20 @@ Additional optional envs with defaults:
   `PROACTIVE_MAX_FAILURES`, `PROACTIVE_COOLDOWN_HIGH_MS`,
   `PROACTIVE_COOLDOWN_MEDIUM_MS`, `PROACTIVE_COOLDOWN_LOW_MS`
 - `DIARY_CHECK_INTERVAL_MS`
+- `WORDCLOUD_DB_PATH` (`data/wordcloud.sqlite`)
+- `WORDCLOUD_CHECK_INTERVAL_MS` (`60000`)
+
+## Local Wordcloud Storage
+
+- The wordcloud pipeline uses local SQLite, not Firestore.
+- The database path is controlled by `WORDCLOUD_DB_PATH` and defaults to `data/wordcloud.sqlite`.
+- Only the most recent 10 days of messages are retained.
+- Only human users count; the bot itself and other bots are excluded.
+- Command messages do not enter the wordcloud store. If a normal message is later edited into a command, it is removed from the local wordcloud database.
+- Edited messages overwrite by the same `message_id`, so the wordcloud always uses the final text.
+- Forwarded messages still count for the activity leaderboard and preview `messageCount`, but are excluded from the wordcloud body itself.
+- Repeated occurrences of the same token inside one message count once.
+- Rendering ships with a bundled full Source Han Sans variable font for Simplified Chinese, Traditional Chinese, Japanese, and Korean.
 
 ## Firebase
 

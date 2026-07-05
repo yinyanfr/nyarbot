@@ -463,23 +463,38 @@ function buildCaption(params: {
   date: string;
   topUsers: ActiveUserStat[];
   hasForwardedMessages: boolean;
+  messageCount: number;
 }): string {
-  const { date, topUsers, hasForwardedMessages } = params;
+  const { date, topUsers, hasForwardedMessages, messageCount } = params;
   const today = todayDateStr();
   const yesterday = yesterdayDateStr();
+  const [, month, day] = date.split("-").map((part) => Number(part));
+  const titleDate = Number.isFinite(month) && Number.isFinite(day) ? `${month}月${day}日` : date;
   const introLine =
     date === today
-      ? "来看看今天大哥哥们都在聊什么喵。"
+      ? "来看看大哥哥们今天都在聊什么喵~"
       : date === yesterday
-        ? "来看看昨天大哥哥们都在聊什么喵。"
-        : `来看看 ${date} 那天大哥哥们都在聊什么喵。`;
+        ? "来看看大哥哥们昨天都在聊什么喵~"
+        : `来看看大哥哥们在 ${titleDate} 都聊了什么喵~`;
   const rankingTitle =
     date === today
-      ? "今日最活跃群友前五名："
+      ? "今日活跃用户排行榜："
       : date === yesterday
-        ? "昨日最活跃群友前五名："
-        : `${date} 最活跃群友前五名：`;
-  const lines = [`${date} 词云`, "", introLine, "", rankingTitle];
+        ? "昨日活跃用户排行榜："
+        : `${titleDate} 活跃用户排行榜：`;
+  const lines = [
+    `${titleDate}的热门话题 ${date === yesterday ? "🐾" : "✨"}`,
+    "",
+    introLine,
+    "",
+    `${date === yesterday ? "昨天" : titleDate}一共有${messageCount}条发言 💬`,
+    "",
+    "看看有没有你感兴趣的关键词喵 ฅ^•ω•^ฅ",
+    "",
+    "",
+    rankingTitle,
+    "",
+  ];
   if (topUsers.length === 0) {
     lines.push("那天没有可统计的活人聊天记录喵。", "姬器人有点寂寞地蜷起来了喵。");
     return lines.join("\n");
@@ -490,6 +505,7 @@ function buildCaption(params: {
   if (hasForwardedMessages) {
     lines.push("", "注：转发消息会计入活跃度，但不会进入词云正文喵。");
   }
+  lines.push("", "感谢大哥哥们的积极发言喵 🐱");
   return lines.join("\n");
 }
 
@@ -546,7 +562,12 @@ export async function generateWordcloudPreviewForDate(date: string): Promise<{
   }
 
   const image = renderWordcloudImage(words);
-  const caption = buildCaption({ date, topUsers, hasForwardedMessages });
+  const caption = buildCaption({
+    date,
+    topUsers,
+    hasForwardedMessages,
+    messageCount: messages.length,
+  });
   return { image, caption, messageCount: messages.length, wordCount: words.length };
 }
 

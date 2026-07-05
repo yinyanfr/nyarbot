@@ -36,6 +36,11 @@ handlers/index.ts（setupHandlers）
     │     │     → Gemini 描述（共享图片缓存）
     │     │     （含回复中的媒体；无需 ffmpeg — Telegram 预生成缩略图）
     │     └─ 贴纸：从硬编码 emoji 表查找 → 直接发送 file_id
+    ├─ 本地词云持久化（local-wordcloud-store.ts）
+    │     ├─ 仅目标群活人消息
+    │     ├─ 命令消息跳过；编辑成命令时删除旧记录
+    │     ├─ 编辑消息按相同 message_id 覆盖
+    │     └─ 转发消息打标，仅参与活跃榜不参与词云正文
     ├─ 缓冲区推送（conversation-buffer.ts）
     │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
     │     └─ 媒体：推送类型标签描述（"[视频: 描述]"、"[GIF动画: 描述]" 等）
@@ -196,6 +201,16 @@ type AiTurnResult =
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
 - **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
+
+## 词云流水线
+
+- `src/services/local-wordcloud-store.ts` 用 SQLite 保存最近 10 天群消息和词云发布记录。
+- `src/libs/wordcloud.ts` 负责分词、词频统计、布局、渲染和发布。
+- 每天 0 点后检查跨天：若昨天还没发过，会自动补发；重启后也会 catch up。
+- 词频对单条消息按集合去重，同一条消息里相同词只算 1 次。
+- 正文词云会过滤转发文本、明显负面词和常见虚词；活跃榜仍统计转发消息。
+- 渲染内置完整 Source Han Sans 可变字体，保证简中、繁中、日文、韩文不掉成方块字。
+- 当前默认布局是“中心骨架优先”：高频词先占中间，少量短中文词可竖排补缝。
 
 ## 记忆与日记
 

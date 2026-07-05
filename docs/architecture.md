@@ -36,6 +36,11 @@ handlers/index.ts (setupHandlers)
     │     │     → Gemini description (shared image cache)
     │     │     (includes reply-to media; no ffmpeg — Telegram pre-generates thumbnails)
     │     └─ Sticker: hardcoded emoji lookup → send file_id directly
+    ├─ Local wordcloud persistence (local-wordcloud-store.ts)
+    │     ├─ target-group human messages only
+    │     ├─ command messages skipped; edited-to-command messages deleted from store
+    │     ├─ edited messages overwrite by the same message_id
+    │     └─ forwarded messages tagged for leaderboard-only counting
     ├─ Buffer push (conversation-buffer.ts)
     │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
     │     └─ Media: push type-tagged descriptions ("[视频: desc]", "[GIF动画: desc]", etc.)
@@ -196,6 +201,16 @@ This prevents the model from skipping the search tool call.
 - **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
 - **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted to Firestore.
 - **Compaction**: When recent events exceed thresholds, the runtime generates a working-memory summary, appends a `compactions` record, and updates `runtime/group.summary` / `summaryCursorTs`. Compaction is untrusted working memory; diary is literary archive.
+
+## Wordcloud Pipeline
+
+- `src/services/local-wordcloud-store.ts` keeps the most recent 10 days of group messages plus per-day publish markers in SQLite.
+- `src/libs/wordcloud.ts` handles tokenization, frequency counting, layout, rendering, preview captions, and publishing.
+- After midnight, the runtime checks whether yesterday already has a publish marker; if not, it can catch up after restart instead of permanently skipping that day.
+- Repeated tokens inside a single message are deduplicated before counting.
+- The wordcloud body filters forwarded text, obvious negative tokens, and common filler/function words, while the activity leaderboard still counts forwarded messages.
+- Rendering bundles the full Source Han Sans variable font so Simplified Chinese, Traditional Chinese, Japanese, and Korean stay readable.
+- The current default layout is center-heavy: high-frequency terms form the core cluster first, with a small amount of vertical short-CJK filling when useful.
 
 ## Memory and Diary
 
