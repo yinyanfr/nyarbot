@@ -14,16 +14,19 @@ import { logger } from "./logger.js";
 import { now, todayDateStr, yesterdayDateStr } from "./time.js";
 
 const CANVAS_SIZE = 1024;
-const MAX_WORDS = 50;
-const MAX_LAYOUT_ATTEMPTS = 1800;
-const MIN_FONT_SIZE = 32;
-const MAX_FONT_SIZE = 290;
+const MAX_WORDS = 80;
+const MAX_LAYOUT_ATTEMPTS = 2200;
+const MIN_FONT_SIZE = 36;
+const MAX_FONT_SIZE = 190;
+const MIN_PLACEMENT_FONT_SIZE = 22;
 const WORD_PADDING = 4;
-const WORD_SIZE_EXPONENT = 0.72;
+const WORD_SIZE_EXPONENT = 0.52;
+const MAX_CORE_WORD_WIDTH_RATIO = 0.55;
+const MAX_WORD_WIDTH_RATIO = 0.44;
 const CENTER_CLUSTER_WORDS = 12;
 const OUTER_MARGIN = 22;
 const CORE_LAYOUT_WORDS = 6;
-const CORE_FONT_SCALE = [1.16, 0.94, 0.9, 0.9, 0.86, 0.82] as const;
+const CORE_FONT_SCALE = [1.08, 0.96, 0.93, 0.93, 0.9, 0.87] as const;
 const CORE_ANCHORS = [
   { x: 0, y: 0 },
   { x: 0, y: -118 },
@@ -54,6 +57,88 @@ const NEGATIVE_WORDS = new Set([
   "去死",
 ]);
 const FUNCTION_WORDS = new Set(["的", "和", "与", "把", "被", "吧", "呢", "吗", "嘛"]);
+const SINGLE_CHAR_STOP_WORDS = new Set([
+  "这",
+  "那",
+  "哪",
+  "会",
+  "要",
+  "来",
+  "有",
+  "能",
+  "得",
+  "不",
+  "没",
+  "很",
+  "太",
+  "更",
+  "最",
+  "还",
+  "又",
+  "再",
+  "都",
+  "就",
+  "才",
+  "也",
+  "在",
+  "去",
+  "给",
+  "让",
+  "把",
+  "被",
+  "向",
+  "对",
+  "从",
+  "到",
+  "用",
+  "像",
+  "跟",
+  "和",
+  "与",
+  "或",
+  "并",
+  "但",
+  "而",
+  "且",
+  "哦",
+  "啊",
+  "呀",
+  "呜",
+  "嗯",
+  "欸",
+  "诶",
+  "哈",
+  "喔",
+  "啦",
+  "哇",
+  "哎",
+  "嘛",
+  "呢",
+  "吗",
+  "吧",
+  "喵",
+  "人",
+  "月",
+  "日",
+]);
+const SINGLE_CHAR_KEEP_WORDS = new Set([
+  "猫",
+  "草",
+  "娘",
+  "涩",
+  "萌",
+  "香",
+  "糖",
+  "鸟",
+  "瓜",
+  "锅",
+  "图",
+  "饭",
+  "酒",
+  "药",
+  "病",
+  "雷",
+]);
 const COLORS = [
   "#ff6b9d",
   "#ff8fab",
@@ -153,7 +238,7 @@ interface WordcloudCallbacks {
 
 interface WordPlacement {
   text: string;
-  weight: number;
+  sizeWeight: number;
   fontSize: number;
   direction: "horizontal" | "vertical";
   x: number;
@@ -224,6 +309,7 @@ function normalizeToken(token: string): string | null {
   if (NEGATIVE_WORDS.has(trimmed)) return null;
   if (/^[a-z0-9_-]+$/u.test(trimmed) && trimmed.length < 2) return null;
   if (isMostlyCjk(trimmed)) {
+    if (trimmed.length === 1 && SINGLE_CHAR_STOP_WORDS.has(trimmed)) return null;
     if (trimmed.length === 1 && STOP_WORDS.has(trimmed)) return null;
     if (trimmed.length === 1 && FUNCTION_WORDS.has(trimmed)) return null;
     if (trimmed.length === 1 && NEGATIVE_WORDS.has(trimmed)) return null;
@@ -233,6 +319,28 @@ function normalizeToken(token: string): string | null {
   if (trimmed.length < 2) return null;
   if (trimmed.length > 24) return null;
   return trimmed;
+}
+
+function getTokenRankingWeight(token: string, count: number): number {
+  const length = Array.from(token).length;
+  if (isMostlyCjk(token) && length === 1) {
+    if (!SINGLE_CHAR_KEEP_WORDS.has(token) && count < 3) return 0;
+    const baseMultiplier = SINGLE_CHAR_KEEP_WORDS.has(token) ? 0.4 : 0.22;
+    const frequencyBoost = count >= 8 ? 1.15 : count >= 5 ? 1.05 : 1;
+    return count * baseMultiplier * frequencyBoost;
+  }
+  if (length === 2) return count * 1.12;
+  if (length === 3) return count * 1.2;
+  if (length >= 4) return count * 1.26;
+  return count;
+}
+
+function getTokenSizeWeight(token: string, count: number): number {
+  const length = Array.from(token).length;
+  if (isMostlyCjk(token) && length === 1) {
+    return count * (SINGLE_CHAR_KEEP_WORDS.has(token) ? 0.58 : 0.42);
+  }
+  return count;
 }
 
 function extractTokens(text: string): string[] {
@@ -255,7 +363,7 @@ function shouldUseVerticalLayout(token: string): boolean {
   return isMostlyCjk(token) && chars.length >= 2 && chars.length <= 3;
 }
 
-function buildWordFrequencies(texts: string[]): { text: string; weight: number }[] {
+function buildWordFrequencies(texts: string[]): { text: string; sizeWeight: number }[] {
   const counts = new Map<string, number>();
   for (const text of texts) {
     const uniqueTokens = new Set(extractTokens(text));
@@ -264,13 +372,29 @@ function buildWordFrequencies(texts: string[]): { text: string; weight: number }
     }
   }
 
-  return Array.from(counts.entries())
-    .map(([text, weight]) => ({ text, weight }))
+  const ranked = Array.from(counts.entries())
+    .map(([text, count]) => ({
+      text,
+      count,
+      rankWeight: getTokenRankingWeight(text, count),
+      sizeWeight: getTokenSizeWeight(text, count),
+    }))
+    .filter((entry) => entry.rankWeight > 0)
     .sort((a, b) => {
-      if (b.weight !== a.weight) return b.weight - a.weight;
+      if (b.rankWeight !== a.rankWeight) return b.rankWeight - a.rankWeight;
+      if (b.count !== a.count) return b.count - a.count;
       return a.text.localeCompare(b.text, "zh-CN");
     })
     .slice(0, MAX_WORDS);
+
+  return ranked
+    .sort((a, b) => {
+      if (b.sizeWeight !== a.sizeWeight) return b.sizeWeight - a.sizeWeight;
+      if (b.count !== a.count) return b.count - a.count;
+      if (b.rankWeight !== a.rankWeight) return b.rankWeight - a.rankWeight;
+      return a.text.localeCompare(b.text, "zh-CN");
+    })
+    .map(({ text, sizeWeight }) => ({ text, sizeWeight }));
 }
 
 function collides(candidate: WordPlacement, placed: WordPlacement[]): boolean {
@@ -306,6 +430,39 @@ function measureVerticalText(
   };
 }
 
+function measureHorizontalText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  fontSize: number,
+): { width: number; height: number } {
+  const metrics = ctx.measureText(text);
+  const textWidth = Math.max(metrics.width, fontSize);
+  const textHeight = Math.max(
+    metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent,
+    fontSize,
+  );
+  return {
+    width: Math.ceil(textWidth + WORD_PADDING * 2),
+    height: Math.ceil(textHeight + WORD_PADDING * 2),
+  };
+}
+
+function getDisplayWidth(text: string): number {
+  let width = 0;
+  for (const char of Array.from(text)) {
+    width += /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(char)
+      ? 2
+      : 1;
+  }
+  return width;
+}
+
+function padToDisplayWidth(text: string, width: number): string {
+  const currentWidth = getDisplayWidth(text);
+  if (currentWidth >= width) return text;
+  return text + " ".repeat(width - currentWidth);
+}
+
 function buildPlacementCandidate(
   index: number,
   attempt: number,
@@ -326,81 +483,97 @@ function buildPlacementCandidate(
 
   const isCoreWord = index < 4;
   const isCenterWord = index < CENTER_CLUSTER_WORDS;
-  const centerBias = isCoreWord ? 0.34 : isCenterWord ? 0.52 : 1;
-  const ringScale = isCoreWord ? 0.26 : isCenterWord ? 0.48 : 1;
-  const baseRadius = 2 + attempt * (isCenterWord ? 1.65 : 2.55) * ringScale;
-  const angleStep = isCoreWord ? 0.15 : isCenterWord ? 0.21 : 0.29;
-  const angleOffset = isCoreWord ? ([-1.05, 0.62, 2.35, 3.82][index] ?? index * 0.7) : index * 0.64;
-  const angle = attempt * angleStep + angleOffset;
-  const ellipticalRadiusX = baseRadius * (isCoreWord ? 1.12 : 1.02) * centerBias;
-  const ellipticalRadiusY = baseRadius * (isCoreWord ? 0.68 : 0.84) * centerBias;
-  const centerX = CANVAS_SIZE / 2 + Math.cos(angle) * ellipticalRadiusX;
-  const centerY = CANVAS_SIZE / 2 + Math.sin(angle) * ellipticalRadiusY;
+  const angleOffset = isCoreWord ? ([-1.05, 0.62, 2.35, 3.82][index] ?? index * 0.7) : index * 0.91;
+  const goldenAngle = 2.399963229728653;
+  const orbitAngle = angleOffset + attempt * goldenAngle;
+  const attemptProgress = Math.sqrt(attempt + 1);
+  const compactness = isCoreWord ? 0.22 : isCenterWord ? 0.42 : 0.78;
+  const radius = 8 + attemptProgress * (isCenterWord ? 15 : 21) * compactness;
+  const waveX = Math.sin(attempt * 0.35 + index * 0.6) * (isCenterWord ? 22 : 34);
+  const waveY = Math.cos(attempt * 0.28 + index * 0.48) * (isCenterWord ? 16 : 26);
+  const centerX =
+    CANVAS_SIZE / 2 + Math.cos(orbitAngle) * radius * (isCenterWord ? 0.94 : 1.02) + waveX;
+  const centerY =
+    CANVAS_SIZE / 2 + Math.sin(orbitAngle) * radius * (isCenterWord ? 0.8 : 0.92) + waveY;
   return {
     x: Math.round(centerX - width / 2),
     y: Math.round(centerY - height / 2),
   };
 }
 
-function buildPlacements(words: { text: string; weight: number }[]): WordPlacement[] {
+function buildPlacements(words: { text: string; sizeWeight: number }[]): WordPlacement[] {
   ensureFontsLoaded();
   const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
   const ctx = canvas.getContext("2d");
-  const maxWeight = words[0]?.weight ?? 1;
-  const minWeight = words[words.length - 1]?.weight ?? maxWeight;
+  const maxWeight = words[0]?.sizeWeight ?? 1;
+  const minWeight = words[words.length - 1]?.sizeWeight ?? maxWeight;
   const span = Math.max(1, maxWeight - minWeight);
   const placed: WordPlacement[] = [];
 
   words.forEach((word, index) => {
-    const ratio = maxWeight === minWeight ? 1 : (word.weight - minWeight) / span;
+    const ratio = maxWeight === minWeight ? 1 : (word.sizeWeight - minWeight) / span;
     const scaledRatio = Math.pow(ratio, WORD_SIZE_EXPONENT);
     const baseFontSize = MIN_FONT_SIZE + scaledRatio * (MAX_FONT_SIZE - MIN_FONT_SIZE);
     const fontScale = CORE_FONT_SCALE[index] ?? 1;
-    const fontSize = Math.round(baseFontSize * fontScale);
+    const initialFontSize = Math.round(baseFontSize * fontScale);
     const direction =
-      index < 16 || !shouldUseVerticalLayout(word.text) || ratio > 0.34 ? "horizontal" : "vertical";
-    ctx.font = `700 ${fontSize}px ${DEFAULT_FONT_FAMILY}`;
-    const { width, height } =
-      direction === "vertical"
-        ? measureVerticalText(ctx, word.text, fontSize)
-        : (() => {
-            const metrics = ctx.measureText(word.text);
-            const textWidth = Math.max(metrics.width, fontSize);
-            const textHeight = Math.max(
-              metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent,
-              fontSize,
-            );
-            return {
-              width: Math.ceil(textWidth + WORD_PADDING * 2),
-              height: Math.ceil(textHeight + WORD_PADDING * 2),
-            };
-          })();
+      index < 18 || !shouldUseVerticalLayout(word.text) || ratio > 0.3 ? "horizontal" : "vertical";
 
-    for (let attempt = 0; attempt < MAX_LAYOUT_ATTEMPTS; attempt += 1) {
-      const { x, y } = buildPlacementCandidate(index, attempt, width, height);
-      const candidate: WordPlacement = {
-        text: word.text,
-        weight: word.weight,
-        fontSize,
-        direction,
-        x,
-        y,
-        width,
-        height,
-        color: pickColor(index, word.weight),
-      };
+    for (
+      let fontSize = initialFontSize;
+      fontSize >= MIN_PLACEMENT_FONT_SIZE;
+      fontSize -= fontSize > 72 ? 10 : fontSize > 40 ? 6 : 4
+    ) {
+      ctx.font = `700 ${fontSize}px ${DEFAULT_FONT_FAMILY}`;
+      let measuredFontSize = fontSize;
+      let box =
+        direction === "vertical"
+          ? measureVerticalText(ctx, word.text, measuredFontSize)
+          : measureHorizontalText(ctx, word.text, measuredFontSize);
 
-      if (
-        candidate.x < OUTER_MARGIN ||
-        candidate.y < OUTER_MARGIN ||
-        candidate.x + candidate.width > CANVAS_SIZE - OUTER_MARGIN ||
-        candidate.y + candidate.height > CANVAS_SIZE - OUTER_MARGIN
-      ) {
-        continue;
+      if (direction === "horizontal") {
+        const maxWidth = Math.floor(
+          CANVAS_SIZE *
+            (index < CORE_LAYOUT_WORDS ? MAX_CORE_WORD_WIDTH_RATIO : MAX_WORD_WIDTH_RATIO),
+        );
+        if (box.width > maxWidth) {
+          measuredFontSize = Math.max(
+            MIN_PLACEMENT_FONT_SIZE,
+            Math.floor((measuredFontSize * maxWidth) / box.width),
+          );
+          ctx.font = `700 ${measuredFontSize}px ${DEFAULT_FONT_FAMILY}`;
+          box = measureHorizontalText(ctx, word.text, measuredFontSize);
+        }
       }
-      if (collides(candidate, placed)) continue;
-      placed.push(candidate);
-      return;
+
+      const { width, height } = box;
+
+      for (let attempt = 0; attempt < MAX_LAYOUT_ATTEMPTS; attempt += 1) {
+        const { x, y } = buildPlacementCandidate(index, attempt, width, height);
+        const candidate: WordPlacement = {
+          text: word.text,
+          sizeWeight: word.sizeWeight,
+          fontSize: measuredFontSize,
+          direction,
+          x,
+          y,
+          width,
+          height,
+          color: pickColor(index, Math.round(word.sizeWeight)),
+        };
+
+        if (
+          candidate.x < OUTER_MARGIN ||
+          candidate.y < OUTER_MARGIN ||
+          candidate.x + candidate.width > CANVAS_SIZE - OUTER_MARGIN ||
+          candidate.y + candidate.height > CANVAS_SIZE - OUTER_MARGIN
+        ) {
+          continue;
+        }
+        if (collides(candidate, placed)) continue;
+        placed.push(candidate);
+        return;
+      }
     }
   });
 
@@ -425,7 +598,7 @@ function drawBackground(ctx: CanvasRenderingContext2D): void {
   }
 }
 
-function renderWordcloudImage(words: { text: string; weight: number }[]): Buffer {
+function renderWordcloudImage(words: { text: string; sizeWeight: number }[]): Buffer {
   ensureFontsLoaded();
   const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
   const ctx = canvas.getContext("2d");
@@ -465,11 +638,12 @@ function buildCaption(params: {
   hasForwardedMessages: boolean;
   messageCount: number;
 }): string {
-  const { date, topUsers, hasForwardedMessages, messageCount } = params;
+  const { date, topUsers, messageCount } = params;
   const today = todayDateStr();
   const yesterday = yesterdayDateStr();
   const [, month, day] = date.split("-").map((part) => Number(part));
   const titleDate = Number.isFinite(month) && Number.isFinite(day) ? `${month}月${day}日` : date;
+  const shortDate = date === today ? "今天" : date === yesterday ? "昨天" : titleDate;
   const introLine =
     date === today
       ? "来看看大哥哥们今天都在聊什么喵~"
@@ -483,11 +657,11 @@ function buildCaption(params: {
         ? "昨日活跃用户排行榜："
         : `${titleDate} 活跃用户排行榜：`;
   const lines = [
-    `${titleDate}的热门话题 ${date === yesterday ? "🐾" : "✨"}`,
+    `${shortDate}的热门话题 ${date === yesterday ? "🐾" : "✨"}`,
     "",
     introLine,
     "",
-    `${date === yesterday ? "昨天" : titleDate}一共有${messageCount}条发言 💬`,
+    `${shortDate}一共有${messageCount}条发言 💬`,
     "",
     "看看有没有你感兴趣的关键词喵 ฅ^•ω•^ฅ",
     "",
@@ -499,12 +673,21 @@ function buildCaption(params: {
     lines.push("那天没有可统计的活人聊天记录喵。", "姬器人有点寂寞地蜷起来了喵。");
     return lines.join("\n");
   }
+  const rankBadges = ["🥇", "🥈", "🥉", "🏅", "🎖️"] as const;
+  const maxNameWidth = topUsers.reduce(
+    (max, user) => Math.max(max, getDisplayWidth(user.displayName)),
+    0,
+  );
+  const maxCountWidth = topUsers.reduce(
+    (max, user) => Math.max(max, String(user.messageCount).length),
+    0,
+  );
   topUsers.forEach((user, index) => {
-    lines.push(`${index + 1}. ${user.displayName} ${user.messageCount}条`);
+    const badge = rankBadges[index] ?? `${index + 1}.`;
+    const name = padToDisplayWidth(user.displayName, maxNameWidth);
+    const count = String(user.messageCount).padStart(maxCountWidth, " ");
+    lines.push(`${badge} ${name} ${count}条`);
   });
-  if (hasForwardedMessages) {
-    lines.push("", "注：转发消息会计入活跃度，但不会进入词云正文喵。");
-  }
   lines.push("", "感谢大哥哥们的积极发言喵 🐱");
   return lines.join("\n");
 }
