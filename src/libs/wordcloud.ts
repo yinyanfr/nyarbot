@@ -14,12 +14,46 @@ import { logger } from "./logger.js";
 import { now, todayDateStr, yesterdayDateStr } from "./time.js";
 
 const CANVAS_SIZE = 1024;
-const MAX_WORDS = 80;
-const MAX_LAYOUT_ATTEMPTS = 900;
-const MIN_FONT_SIZE = 18;
-const MAX_FONT_SIZE = 144;
-const WORD_PADDING = 12;
-const WORD_SIZE_EXPONENT = 1.35;
+const MAX_WORDS = 50;
+const MAX_LAYOUT_ATTEMPTS = 1800;
+const MIN_FONT_SIZE = 32;
+const MAX_FONT_SIZE = 290;
+const WORD_PADDING = 4;
+const WORD_SIZE_EXPONENT = 0.72;
+const CENTER_CLUSTER_WORDS = 12;
+const OUTER_MARGIN = 22;
+const CORE_LAYOUT_WORDS = 6;
+const CORE_FONT_SCALE = [1.16, 0.94, 0.9, 0.9, 0.86, 0.82] as const;
+const CORE_ANCHORS = [
+  { x: 0, y: 0 },
+  { x: 0, y: -118 },
+  { x: 148, y: -2 },
+  { x: -154, y: 10 },
+  { x: 0, y: 132 },
+  { x: 146, y: 120 },
+] as const;
+const NEGATIVE_WORDS = new Set([
+  "死",
+  "滚",
+  "杀",
+  "傻",
+  "蠢",
+  "烂",
+  "废",
+  "屎",
+  "妈",
+  "操",
+  "艹",
+  "草泥马",
+  "妈的",
+  "傻逼",
+  "傻比",
+  "傻b",
+  "sb",
+  "弱智",
+  "去死",
+]);
+const FUNCTION_WORDS = new Set(["的", "和", "与", "把", "被", "吧", "呢", "吗", "嘛"]);
 const COLORS = [
   "#ff6b9d",
   "#ff8fab",
@@ -50,6 +84,8 @@ const STOP_WORDS = new Set([
   "这",
   "那",
   "也",
+  "和",
+  "与",
   "就",
   "都",
   "很",
@@ -89,6 +125,8 @@ const STOP_WORDS = new Set([
   "什么",
   "怎么",
   "为什么",
+  "把",
+  "被",
   "真的",
   "感觉",
   "可以",
@@ -182,9 +220,13 @@ function normalizeToken(token: string): string | null {
   if (/^\p{Number}+$/u.test(trimmed)) return null;
   if (/^[\p{P}\p{S}]+$/u.test(trimmed)) return null;
   if (STOP_WORDS.has(trimmed)) return null;
+  if (FUNCTION_WORDS.has(trimmed)) return null;
+  if (NEGATIVE_WORDS.has(trimmed)) return null;
   if (/^[a-z0-9_-]+$/u.test(trimmed) && trimmed.length < 2) return null;
   if (isMostlyCjk(trimmed)) {
     if (trimmed.length === 1 && STOP_WORDS.has(trimmed)) return null;
+    if (trimmed.length === 1 && FUNCTION_WORDS.has(trimmed)) return null;
+    if (trimmed.length === 1 && NEGATIVE_WORDS.has(trimmed)) return null;
     if (trimmed.length > 8) return null;
     return trimmed;
   }
@@ -209,7 +251,8 @@ function extractTokens(text: string): string[] {
 }
 
 function shouldUseVerticalLayout(token: string): boolean {
-  return isMostlyCjk(token) && Array.from(token).length >= 2;
+  const chars = Array.from(token);
+  return isMostlyCjk(token) && chars.length >= 2 && chars.length <= 3;
 }
 
 function buildWordFrequencies(texts: string[]): { text: string; weight: number }[] {
@@ -256,10 +299,46 @@ function measureVerticalText(
     const metrics = ctx.measureText(char);
     maxCharWidth = Math.max(maxCharWidth, metrics.width);
   }
-  const lineHeight = Math.max(fontSize, Math.round(fontSize * 1.06));
+  const lineHeight = Math.max(fontSize, Math.round(fontSize * 0.94));
   return {
     width: Math.ceil(maxCharWidth + WORD_PADDING * 2),
     height: Math.ceil(chars.length * lineHeight + WORD_PADDING * 2),
+  };
+}
+
+function buildPlacementCandidate(
+  index: number,
+  attempt: number,
+  width: number,
+  height: number,
+): { x: number; y: number } {
+  if (index < CORE_LAYOUT_WORDS) {
+    const anchor = CORE_ANCHORS[index] ?? CORE_ANCHORS[0];
+    const radius = attempt === 0 ? 0 : 4 + attempt * 5.4;
+    const angle = index * 0.95 + attempt * 0.42;
+    const centerX = CANVAS_SIZE / 2 + anchor.x + Math.cos(angle) * radius;
+    const centerY = CANVAS_SIZE / 2 + anchor.y + Math.sin(angle) * radius * 0.72;
+    return {
+      x: Math.round(centerX - width / 2),
+      y: Math.round(centerY - height / 2),
+    };
+  }
+
+  const isCoreWord = index < 4;
+  const isCenterWord = index < CENTER_CLUSTER_WORDS;
+  const centerBias = isCoreWord ? 0.34 : isCenterWord ? 0.52 : 1;
+  const ringScale = isCoreWord ? 0.26 : isCenterWord ? 0.48 : 1;
+  const baseRadius = 2 + attempt * (isCenterWord ? 1.65 : 2.55) * ringScale;
+  const angleStep = isCoreWord ? 0.15 : isCenterWord ? 0.21 : 0.29;
+  const angleOffset = isCoreWord ? ([-1.05, 0.62, 2.35, 3.82][index] ?? index * 0.7) : index * 0.64;
+  const angle = attempt * angleStep + angleOffset;
+  const ellipticalRadiusX = baseRadius * (isCoreWord ? 1.12 : 1.02) * centerBias;
+  const ellipticalRadiusY = baseRadius * (isCoreWord ? 0.68 : 0.84) * centerBias;
+  const centerX = CANVAS_SIZE / 2 + Math.cos(angle) * ellipticalRadiusX;
+  const centerY = CANVAS_SIZE / 2 + Math.sin(angle) * ellipticalRadiusY;
+  return {
+    x: Math.round(centerX - width / 2),
+    y: Math.round(centerY - height / 2),
   };
 }
 
@@ -275,8 +354,11 @@ function buildPlacements(words: { text: string; weight: number }[]): WordPlaceme
   words.forEach((word, index) => {
     const ratio = maxWeight === minWeight ? 1 : (word.weight - minWeight) / span;
     const scaledRatio = Math.pow(ratio, WORD_SIZE_EXPONENT);
-    const fontSize = Math.round(MIN_FONT_SIZE + scaledRatio * (MAX_FONT_SIZE - MIN_FONT_SIZE));
-    const direction = shouldUseVerticalLayout(word.text) ? "vertical" : "horizontal";
+    const baseFontSize = MIN_FONT_SIZE + scaledRatio * (MAX_FONT_SIZE - MIN_FONT_SIZE);
+    const fontScale = CORE_FONT_SCALE[index] ?? 1;
+    const fontSize = Math.round(baseFontSize * fontScale);
+    const direction =
+      index < 16 || !shouldUseVerticalLayout(word.text) || ratio > 0.34 ? "horizontal" : "vertical";
     ctx.font = `700 ${fontSize}px ${DEFAULT_FONT_FAMILY}`;
     const { width, height } =
       direction === "vertical"
@@ -295,27 +377,24 @@ function buildPlacements(words: { text: string; weight: number }[]): WordPlaceme
           })();
 
     for (let attempt = 0; attempt < MAX_LAYOUT_ATTEMPTS; attempt += 1) {
-      const angle = attempt * 0.37;
-      const radius = 4 + attempt * 3.3;
-      const centerX = CANVAS_SIZE / 2 + Math.cos(angle) * radius;
-      const centerY = CANVAS_SIZE / 2 + Math.sin(angle) * radius;
+      const { x, y } = buildPlacementCandidate(index, attempt, width, height);
       const candidate: WordPlacement = {
         text: word.text,
         weight: word.weight,
         fontSize,
         direction,
-        x: Math.round(centerX - width / 2),
-        y: Math.round(centerY - height / 2),
+        x,
+        y,
         width,
         height,
         color: pickColor(index, word.weight),
       };
 
       if (
-        candidate.x < 18 ||
-        candidate.y < 18 ||
-        candidate.x + candidate.width > CANVAS_SIZE - 18 ||
-        candidate.y + candidate.height > CANVAS_SIZE - 18
+        candidate.x < OUTER_MARGIN ||
+        candidate.y < OUTER_MARGIN ||
+        candidate.x + candidate.width > CANVAS_SIZE - OUTER_MARGIN ||
+        candidate.y + candidate.height > CANVAS_SIZE - OUTER_MARGIN
       ) {
         continue;
       }
@@ -335,12 +414,12 @@ function drawBackground(ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
 
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < 6; i += 1) {
     ctx.beginPath();
-    ctx.fillStyle = i % 2 === 0 ? "rgba(255, 182, 204, 0.16)" : "rgba(173, 216, 255, 0.14)";
-    const radius = 38 + i * 11;
-    const x = 90 + (i % 4) * 250 + (i % 2) * 40;
-    const y = 100 + Math.floor(i / 4) * 290 + (i % 3) * 20;
+    ctx.fillStyle = i % 2 === 0 ? "rgba(255, 182, 204, 0.055)" : "rgba(173, 216, 255, 0.05)";
+    const radius = 52 + i * 10;
+    const x = 150 + (i % 3) * 305 + (i % 2) * 18;
+    const y = 155 + Math.floor(i / 3) * 300 + (i % 3) * 14;
     ctx.arc(x, y, radius, 0, Math.PI * 2);
     ctx.fill();
   }
