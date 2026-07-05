@@ -38,7 +38,7 @@ import {
 } from "../libs/stickers.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
-import { generateWordcloudPreviewForDate } from "../libs/wordcloud.js";
+import { generateWordcloudPreviewForDateWithRetry } from "../libs/wordcloud.js";
 import { todayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
@@ -1398,14 +1398,14 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         const date = privText.replace(/^\/wordcloud(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         await ctx.reply(`正在生成词云 ${date}...`).catch(() => void 0);
         try {
-          const preview = await generateWordcloudPreviewForDate(date);
+          const preview = await generateWordcloudPreviewForDateWithRetry(date);
           if (!preview) {
             await ctx.reply("这一天没有足够的聊天记录可生成词云喵。").catch(() => void 0);
             return;
           }
           await ctx
             .replyWithPhoto(new InputFile(preview.image, `${date}-wordcloud.png`), {
-              caption: `${preview.caption}\n\n词条数: ${preview.wordCount} | 消息数: ${preview.messageCount}`,
+              caption: preview.caption,
             })
             .catch(async () => {
               await ctx.reply(preview.caption).catch(() => void 0);

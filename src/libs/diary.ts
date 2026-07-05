@@ -1,3 +1,4 @@
+import { InputFile } from "grammy";
 import { generateText } from "ai";
 import { flashNoThinkModel, geminiDiaryModel } from "./ai.js";
 import {
@@ -13,6 +14,7 @@ import config from "../configs/env.js";
 import { getPersonaLabel } from "./persona.js";
 import type { HistoryEntryKind } from "./conversation-buffer.js";
 import { lixiaDiaryStyleReference } from "./lixia-style-ref.js";
+import { ensureWordcloudArtifactForDateWithRetry } from "./wordcloud.js";
 import {
   DIARY_PROMPT_VERSION,
   DIARY_STYLE_REFERENCE_VERSION,
@@ -22,6 +24,7 @@ import {
 
 const DIARY_NOTIFICATION_TIMEOUT_MS = 20_000;
 const DIARY_GENERATION_TIMEOUT_MS = 120_000;
+const TELEGRAM_CAPTION_MAX_CHARS = 1024;
 
 function xmlEscape(text: string): string {
   return text
@@ -66,6 +69,7 @@ export interface DiaryCallbacks {
     options?: { inlineKeyboardUrl?: string; inlineKeyboardText?: string },
   ) => Promise<void>;
   sendChannelText: (text: string) => Promise<void>;
+  sendChannelPhoto: (photo: InputFile, caption?: string) => Promise<void>;
 }
 
 let diaryCallbacks: DiaryCallbacks | null = null;
@@ -82,8 +86,12 @@ function buildDiaryUrl(date: string): string | null {
   return `https://${owner}.github.io/${repoName}/${date}-diary/`;
 }
 
-function buildDiaryChannelPost(diary: string): string {
-  return diary;
+function countTelegramCaptionChars(text: string): number {
+  return Array.from(text).length;
+}
+
+function canSendDiaryAsPhotoCaption(diary: string): boolean {
+  return countTelegramCaptionChars(diary) <= TELEGRAM_CAPTION_MAX_CHARS;
 }
 
 function buildDiaryNotificationSummary(diary: string): string {
@@ -303,19 +311,53 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     await writeGeneratedDiary(yesterdayDate, diary);
     logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
 
+    const wordcloudArtifact = await ensureWordcloudArtifactForDateWithRetry(yesterdayDate).catch(
+      (err: unknown) => {
+        logger.warn({ err, yesterdayDate }, "diary: failed to ensure wordcloud artifact");
+        return null;
+      },
+    );
+
     if (diaryCallbacks && config.tgDiaryChannelId) {
-      const channelText = buildDiaryChannelPost(diary);
-      logger.info(
-        { yesterdayDate, chatId: config.tgDiaryChannelId, len: channelText.length },
-        "diary: publishing full diary to telegram channel",
-      );
       try {
-        await diaryCallbacks.sendChannelText(channelText);
+        if (wordcloudArtifact) {
+          const caption = canSendDiaryAsPhotoCaption(diary) ? diary : undefined;
+          logger.info(
+            {
+              yesterdayDate,
+              chatId: config.tgDiaryChannelId,
+              len: diary.length,
+              withCaption: Boolean(caption),
+            },
+            "diary: publishing diary channel photo",
+          );
+          await diaryCallbacks.sendChannelPhoto(
+            new InputFile(wordcloudArtifact.image, wordcloudArtifact.fileName),
+            caption,
+          );
+          if (!caption) {
+            await diaryCallbacks.sendChannelText(diary);
+          }
+        } else {
+          logger.info(
+            { yesterdayDate, chatId: config.tgDiaryChannelId, len: diary.length },
+            "diary: publishing full diary to telegram channel without wordcloud photo",
+          );
+          await diaryCallbacks.sendChannelText(diary);
+        }
       } catch (err) {
         logger.error(
           { err, yesterdayDate, chatId: config.tgDiaryChannelId },
           "diary: channel publish failed",
         );
+        try {
+          await diaryCallbacks.sendChannelText(diary);
+        } catch (fallbackErr) {
+          logger.error(
+            { err: fallbackErr, yesterdayDate, chatId: config.tgDiaryChannelId },
+            "diary: channel text fallback after photo failure also failed",
+          );
+        }
       }
     } else if (!config.tgDiaryChannelId) {
       logger.info(
@@ -328,7 +370,16 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
     let pagesReady = false;
     if (diaryUrl) {
       try {
-        const pushResult = await pushDiaryToGithub(yesterdayDate, diary);
+        const pushResult = await pushDiaryToGithub(yesterdayDate, diary, {
+          ...(wordcloudArtifact
+            ? {
+                imageAsset: {
+                  path: `source/img/diary/${wordcloudArtifact.fileName}`,
+                  content: wordcloudArtifact.image,
+                },
+              }
+            : {}),
+        });
         if (pushResult) {
           const publishStatus = await waitForGithubPagesPublish(pushResult);
           pagesReady = publishStatus.ready;

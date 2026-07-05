@@ -41,6 +41,11 @@ export interface GithubPagesPublishStatus {
   detail?: string;
 }
 
+export interface GithubDiaryImageAsset {
+  path: string;
+  content: Buffer;
+}
+
 const PAGES_POLL_INTERVAL_MS = 15_000;
 const PAGES_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -144,45 +149,27 @@ async function getFileSha(
   return data.sha;
 }
 
-function buildDiaryMarkdown(date: string, content: string): string {
-  return `---
-title: "${date} 猫娘日记"
-date: ${date}T23:59:00+08:00
-tags: [日记]
-slug: diary
----
-
-${content}
-`;
-}
-
-export async function pushDiaryToGithub(
-  date: string,
-  content: string,
-): Promise<GithubDiaryPushResult | null> {
-  const repo = config.githubRepo;
-  const token = config.githubToken;
-  if (!repo || !token) return null;
-
-  const [owner, repoName] = repo.split("/");
-  if (!owner || !repoName) {
-    logger.warn({ repo }, "github: invalid GITHUB_REPO format, expected owner/repo");
-    return null;
-  }
-
-  const path = `source/_posts/${date}-diary.md`;
-  const markdown = buildDiaryMarkdown(date, content);
-  const encoded = Buffer.from(markdown, "utf-8").toString("base64");
-
-  const existingSha = await getFileSha(owner, repoName, path, token);
+async function putRepoFile(
+  owner: string,
+  repo: string,
+  path: string,
+  token: string,
+  content: Buffer | string,
+  message: string,
+): Promise<PutContentResponse> {
+  const existingSha = await getFileSha(owner, repo, path, token);
+  const encoded =
+    typeof content === "string"
+      ? Buffer.from(content, "utf-8").toString("base64")
+      : content.toString("base64");
 
   const body = JSON.stringify({
-    message: `日记: ${date}`,
+    message,
     content: encoded,
     ...(existingSha ? { sha: existingSha } : {}),
   });
 
-  const url = `${API_BASE}/repos/${owner}/${repoName}/contents/${encodeURIComponent(path)}`;
+  const url = `${API_BASE}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
   const res = await fetch(url, {
     method: "PUT",
     headers: {
@@ -198,7 +185,66 @@ export async function pushDiaryToGithub(
     throw new Error(`GitHub PUT ${path} failed: ${res.status} ${await res.text()}`);
   }
 
-  const data = (await res.json()) as PutContentResponse;
+  return (await res.json()) as PutContentResponse;
+}
+
+function buildDiaryMarkdownWithImage(
+  date: string,
+  content: string,
+  options?: { indexImage?: string },
+): string {
+  const body = options?.indexImage ? `![](${options.indexImage})\n\n${content}` : content;
+  return `---
+title: "${date} 猫娘日记"
+date: ${date}T23:59:00+08:00
+tags: [日记]
+slug: diary
+${options?.indexImage ? `index_img: ${options.indexImage}\n` : ""}---
+
+${body}
+`;
+}
+
+function buildGithubRepoAssetUrl(repoName: string, sourcePath: string): string {
+  return `/${repoName}/${sourcePath.replace(/^source\//u, "")}`;
+}
+
+export async function pushDiaryToGithub(
+  date: string,
+  content: string,
+  options?: { imageAsset?: GithubDiaryImageAsset },
+): Promise<GithubDiaryPushResult | null> {
+  const repo = config.githubRepo;
+  const token = config.githubToken;
+  if (!repo || !token) return null;
+
+  const [owner, repoName] = repo.split("/");
+  if (!owner || !repoName) {
+    logger.warn({ repo }, "github: invalid GITHUB_REPO format, expected owner/repo");
+    return null;
+  }
+
+  const path = `source/_posts/${date}-diary.md`;
+  let indexImage: string | undefined;
+  if (options?.imageAsset) {
+    indexImage = buildGithubRepoAssetUrl(repoName, options.imageAsset.path);
+    await putRepoFile(
+      owner,
+      repoName,
+      options.imageAsset.path,
+      token,
+      options.imageAsset.content,
+      `日记词云: ${date}`,
+    );
+  }
+
+  const markdown = buildDiaryMarkdownWithImage(
+    date,
+    content,
+    indexImage ? { indexImage } : undefined,
+  );
+  const data = await putRepoFile(owner, repoName, path, token, markdown, `日记: ${date}`);
+
   const commitSha = data.commit?.sha;
   if (!commitSha) {
     throw new Error("GitHub PUT diary succeeded but commit sha was missing");

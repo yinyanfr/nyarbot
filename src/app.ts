@@ -138,6 +138,20 @@ async function main(): Promise<void> {
         }
       }
     },
+    sendChannelPhoto: async (photo, caption) => {
+      if (!config.tgDiaryChannelId) return;
+      const options = caption ? { caption } : {};
+      try {
+        await bot.api.sendPhoto(config.tgDiaryChannelId, photo, options);
+        logger.info({ chatId: config.tgDiaryChannelId }, "diary: channel photo publish succeeded");
+      } catch (err) {
+        logger.error(
+          { err, chatId: config.tgDiaryChannelId },
+          "diary: channel photo publish failed",
+        );
+        throw err;
+      }
+    },
   });
 
   initWordcloudCallbacks({

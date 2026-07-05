@@ -25,6 +25,11 @@ export interface ActiveUserStat {
   messageCount: number;
 }
 
+export type WordcloudPublicationSlot =
+  | "daily_rollup_yesterday"
+  | "same_day_noon"
+  | "same_day_evening";
+
 const DB_PATH = path.resolve(config.wordcloudDbPath);
 const RETENTION_DAYS = 10;
 
@@ -62,6 +67,13 @@ function db(): SqliteDatabase {
     CREATE TABLE IF NOT EXISTS wordcloud_runs (
       date TEXT PRIMARY KEY,
       published_at INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS wordcloud_publications (
+      date TEXT NOT NULL,
+      slot TEXT NOT NULL,
+      published_at INTEGER NOT NULL,
+      PRIMARY KEY (date, slot)
     ) STRICT;
   `);
   const hasIsForwarded = opened
@@ -224,6 +236,22 @@ export async function hasWordcloudRunForDate(date: string): Promise<boolean> {
   return typeof row?.date === "string";
 }
 
+export async function hasWordcloudPublication(
+  date: string,
+  slot: WordcloudPublicationSlot,
+): Promise<boolean> {
+  const row = db()
+    .prepare(
+      `
+        SELECT date
+        FROM wordcloud_publications
+        WHERE date = ? AND slot = ?
+      `,
+    )
+    .get(date, slot) as Record<string, unknown> | undefined;
+  return typeof row?.date === "string";
+}
+
 export async function markWordcloudRunForDate(
   date: string,
   publishedAt = Date.now(),
@@ -238,6 +266,23 @@ export async function markWordcloudRunForDate(
       `,
     )
     .run(date, publishedAt);
+}
+
+export async function markWordcloudPublication(
+  date: string,
+  slot: WordcloudPublicationSlot,
+  publishedAt = Date.now(),
+): Promise<void> {
+  db()
+    .prepare(
+      `
+        INSERT INTO wordcloud_publications (date, slot, published_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(date, slot) DO UPDATE SET
+          published_at = excluded.published_at
+      `,
+    )
+    .run(date, slot, publishedAt);
 }
 
 export function closeLocalWordcloudStore(): void {

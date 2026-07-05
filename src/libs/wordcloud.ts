@@ -1,19 +1,27 @@
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputFile } from "grammy";
 import { GlobalFonts, createCanvas, type CanvasRenderingContext2D } from "@napi-rs/canvas";
 import nodejieba from "nodejieba";
 import {
   hasWordcloudRunForDate,
+  hasWordcloudPublication,
   listStoredMessagesForDate,
   listTopActiveUsersForDate,
+  markWordcloudPublication,
   markWordcloudRunForDate,
   pruneStoredMessages,
   type ActiveUserStat,
+  type WordcloudPublicationSlot,
 } from "../services/local-wordcloud-store.js";
+import config from "../configs/env.js";
 import { logger } from "./logger.js";
 import { now, todayDateStr, yesterdayDateStr } from "./time.js";
 
 const CANVAS_SIZE = 1024;
+const WORDCLOUD_MAX_RETRY_ATTEMPTS = 3;
+const WORDCLOUD_RETRY_DELAY_MS = 1200;
 const MAX_WORDS = 80;
 const MAX_LAYOUT_ATTEMPTS = 2200;
 const MIN_FONT_SIZE = 36;
@@ -157,6 +165,10 @@ const BUNDLED_CJK_FONT_PATH = fileURLToPath(
 );
 const DEFAULT_FONT_FAMILY =
   '"NyarbotWordcloudCJK", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif';
+const WORDCLOUD_ARTIFACT_DIR = path.resolve(
+  path.dirname(config.wordcloudDbPath),
+  "wordcloud-artifacts",
+);
 const STOP_WORDS = new Set([
   "的",
   "了",
@@ -236,6 +248,24 @@ interface WordcloudCallbacks {
   sendPhoto: (photo: InputFile, caption: string) => Promise<void>;
 }
 
+export interface WordcloudArtifact {
+  date: string;
+  fileName: string;
+  imagePath: string;
+  image: Buffer;
+  caption: string;
+  messageCount: number;
+  wordCount: number;
+}
+
+interface WordcloudArtifactMetadata {
+  date: string;
+  fileName: string;
+  caption: string;
+  messageCount: number;
+  wordCount: number;
+}
+
 interface WordPlacement {
   text: string;
   sizeWeight: number;
@@ -250,9 +280,115 @@ interface WordPlacement {
 
 let callbacks: WordcloudCallbacks | null = null;
 let lastDate: string | null = null;
+const sameDayPublishInFlight = new Set<string>();
 let fontsLoaded = false;
 let jiebaLoaded = false;
 const globalFonts = GlobalFonts as typeof GlobalFonts & { loadSystemFonts?: () => number };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryWordcloudTask<T>(
+  label: string,
+  task: (attempt: number) => Promise<T>,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= WORDCLOUD_MAX_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await task(attempt);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= WORDCLOUD_MAX_RETRY_ATTEMPTS) break;
+      logger.warn(
+        { err, label, attempt, maxAttempts: WORDCLOUD_MAX_RETRY_ATTEMPTS },
+        "wordcloud: task failed, retrying",
+      );
+      await sleep(WORDCLOUD_RETRY_DELAY_MS);
+    }
+  }
+  throw lastErr;
+}
+
+function getWordcloudArtifactFileName(date: string): string {
+  return `${date}-wordcloud.png`;
+}
+
+function getWordcloudArtifactPath(date: string): string {
+  return path.join(WORDCLOUD_ARTIFACT_DIR, getWordcloudArtifactFileName(date));
+}
+
+function getWordcloudArtifactMetadataPath(date: string): string {
+  return path.join(WORDCLOUD_ARTIFACT_DIR, `${date}-wordcloud.json`);
+}
+
+async function readWordcloudArtifact(date: string): Promise<WordcloudArtifact | null> {
+  const imagePath = getWordcloudArtifactPath(date);
+  const metadataPath = getWordcloudArtifactMetadataPath(date);
+  try {
+    await access(imagePath);
+    await access(metadataPath);
+    const [image, rawMetadata] = await Promise.all([
+      readFile(imagePath),
+      readFile(metadataPath, "utf-8"),
+    ]);
+    const metadata = JSON.parse(rawMetadata) as Partial<WordcloudArtifactMetadata>;
+    if (
+      metadata.date !== date ||
+      typeof metadata.fileName !== "string" ||
+      typeof metadata.caption !== "string" ||
+      typeof metadata.messageCount !== "number" ||
+      typeof metadata.wordCount !== "number"
+    ) {
+      return null;
+    }
+    return {
+      date,
+      fileName: metadata.fileName,
+      imagePath,
+      image,
+      caption: metadata.caption,
+      messageCount: metadata.messageCount,
+      wordCount: metadata.wordCount,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeWordcloudArtifact(
+  date: string,
+  preview: { image: Buffer; caption: string; messageCount: number; wordCount: number },
+): Promise<WordcloudArtifact> {
+  await mkdir(WORDCLOUD_ARTIFACT_DIR, { recursive: true });
+  const fileName = getWordcloudArtifactFileName(date);
+  const imagePath = getWordcloudArtifactPath(date);
+  const metadataPath = getWordcloudArtifactMetadataPath(date);
+  const metadata: WordcloudArtifactMetadata = {
+    date,
+    fileName,
+    caption: preview.caption,
+    messageCount: preview.messageCount,
+    wordCount: preview.wordCount,
+  };
+  await Promise.all([
+    writeFile(imagePath, preview.image),
+    writeFile(metadataPath, JSON.stringify(metadata, null, 2) + "\n", "utf-8"),
+  ]);
+  return {
+    date,
+    fileName,
+    imagePath,
+    image: preview.image,
+    caption: preview.caption,
+    messageCount: preview.messageCount,
+    wordCount: preview.wordCount,
+  };
+}
+
+function buildPublicationArtifactDate(date: string, slot: WordcloudPublicationSlot): string {
+  return slot === "daily_rollup_yesterday" ? date : `${date}-${slot}`;
+}
 
 function ensureFontsLoaded(): void {
   if (fontsLoaded) return;
@@ -289,6 +425,13 @@ function ensureJiebaLoaded(): void {
 function hasReachedPublishTime(): boolean {
   const current = now();
   return current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2);
+}
+
+function getCurrentSameDayPublicationSlot(): WordcloudPublicationSlot | null {
+  const hour = now().hour();
+  if (hour >= 20) return "same_day_evening";
+  if (hour >= 12) return "same_day_noon";
+  return null;
 }
 
 function isMostlyCjk(token: string): boolean {
@@ -635,7 +778,6 @@ function renderWordcloudImage(words: { text: string; sizeWeight: number }[]): Bu
 function buildCaption(params: {
   date: string;
   topUsers: ActiveUserStat[];
-  hasForwardedMessages: boolean;
   messageCount: number;
 }): string {
   const { date, topUsers, messageCount } = params;
@@ -697,29 +839,11 @@ async function generateYesterdayWordcloud(date: string): Promise<void> {
     logger.info({ date }, "wordcloud: skipped already-published day");
     return;
   }
-
-  const preview = await generateWordcloudPreviewForDate(date);
-  if (!preview) {
-    const pruned = await pruneStoredMessages();
-    await markWordcloudRunForDate(date);
-    logger.info({ date, pruned }, "wordcloud: skipped empty day");
-    return;
-  }
-
-  const pruned = await pruneStoredMessages();
-  logger.info(
-    {
-      date,
-      messageCount: preview.messageCount,
-      wordCount: preview.wordCount,
-      pruned,
-    },
-    "wordcloud: generated image",
-  );
-
-  if (!callbacks) return;
-  await callbacks.sendPhoto(new InputFile(preview.image, `${date}-wordcloud.png`), preview.caption);
-  await markWordcloudRunForDate(date);
+  await publishWordcloudForDate({
+    date,
+    slot: "daily_rollup_yesterday",
+    markPublished: () => markWordcloudRunForDate(date),
+  });
 }
 
 export async function generateWordcloudPreviewForDate(date: string): Promise<{
@@ -731,7 +855,6 @@ export async function generateWordcloudPreviewForDate(date: string): Promise<{
   const messages = await listStoredMessagesForDate(date);
   const topUsers = await listTopActiveUsersForDate(date, 5);
   const wordcloudMessages = messages.filter((message) => !message.isForwarded);
-  const hasForwardedMessages = wordcloudMessages.length !== messages.length;
   const texts = wordcloudMessages
     .map((message) => message.text)
     .filter((text) => text.trim().length > 0);
@@ -748,10 +871,102 @@ export async function generateWordcloudPreviewForDate(date: string): Promise<{
   const caption = buildCaption({
     date,
     topUsers,
-    hasForwardedMessages,
     messageCount: messages.length,
   });
   return { image, caption, messageCount: messages.length, wordCount: words.length };
+}
+
+export async function generateWordcloudPreviewForDateWithRetry(date: string): Promise<{
+  image: Buffer;
+  caption: string;
+  messageCount: number;
+  wordCount: number;
+} | null> {
+  return retryWordcloudTask("generate wordcloud preview", async () => {
+    return await generateWordcloudPreviewForDate(date);
+  });
+}
+
+export async function ensureWordcloudArtifactForDate(
+  date: string,
+): Promise<WordcloudArtifact | null> {
+  const existing = await readWordcloudArtifact(date);
+  if (existing) return existing;
+  const preview = await generateWordcloudPreviewForDate(date);
+  if (!preview) return null;
+  return writeWordcloudArtifact(date, preview);
+}
+
+export async function ensureWordcloudArtifactForDateWithRetry(
+  date: string,
+): Promise<WordcloudArtifact | null> {
+  return retryWordcloudTask("ensure wordcloud artifact", async () => {
+    return await ensureWordcloudArtifactForDate(date);
+  });
+}
+
+async function ensureWordcloudArtifactForPublication(
+  date: string,
+  slot: WordcloudPublicationSlot,
+): Promise<WordcloudArtifact | null> {
+  if (slot === "daily_rollup_yesterday") {
+    return ensureWordcloudArtifactForDate(date);
+  }
+  const preview = await generateWordcloudPreviewForDate(date);
+  if (!preview) return null;
+  return writeWordcloudArtifact(buildPublicationArtifactDate(date, slot), preview);
+}
+
+async function ensureWordcloudArtifactForPublicationWithRetry(
+  date: string,
+  slot: WordcloudPublicationSlot,
+): Promise<WordcloudArtifact | null> {
+  return retryWordcloudTask(`ensure wordcloud artifact ${slot}`, async () => {
+    return await ensureWordcloudArtifactForPublication(date, slot);
+  });
+}
+
+async function publishWordcloudForDate(params: {
+  date: string;
+  slot: WordcloudPublicationSlot;
+  markPublished: () => Promise<void>;
+}): Promise<void> {
+  const { date, slot, markPublished } = params;
+  const artifact = await ensureWordcloudArtifactForPublicationWithRetry(date, slot);
+  if (!artifact) {
+    if (slot === "daily_rollup_yesterday") {
+      const pruned = await pruneStoredMessages();
+      await markPublished();
+      logger.info({ date, slot, pruned }, "wordcloud: skipped empty publication");
+      return;
+    }
+    await markPublished();
+    logger.info({ date, slot }, "wordcloud: skipped empty same-day publication");
+    return;
+  }
+
+  if (slot === "daily_rollup_yesterday") {
+    const pruned = await pruneStoredMessages();
+    logger.info(
+      { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount, pruned },
+      "wordcloud: generated image",
+    );
+  } else {
+    logger.info(
+      { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount },
+      "wordcloud: generated same-day image",
+    );
+  }
+
+  const currentCallbacks = callbacks;
+  if (!currentCallbacks) return;
+  await retryWordcloudTask(`publish wordcloud photo ${slot}`, async () => {
+    await currentCallbacks.sendPhoto(
+      new InputFile(artifact.image, artifact.fileName),
+      artifact.caption,
+    );
+  });
+  await markPublished();
 }
 
 export function initWordcloudCallbacks(nextCallbacks: WordcloudCallbacks): void {
@@ -767,11 +982,33 @@ export function checkAndGenerateWordcloud(): void {
       generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
         logger.error({ err, yesterdayDate }, "wordcloud: startup catch-up failed");
       });
-      return;
     }
     lastDate = today;
-    return;
   }
+
+  const slot = getCurrentSameDayPublicationSlot();
+  if (slot) {
+    const sameDayCheckKey = `${today}:${slot}`;
+    if (!sameDayPublishInFlight.has(sameDayCheckKey)) {
+      sameDayPublishInFlight.add(sameDayCheckKey);
+      hasWordcloudPublication(today, slot)
+        .then((published) => {
+          if (published) return;
+          return publishWordcloudForDate({
+            date: today,
+            slot,
+            markPublished: () => markWordcloudPublication(today, slot),
+          });
+        })
+        .catch((err: unknown) => {
+          logger.error({ err, today, slot }, "wordcloud: same-day publish failed");
+        })
+        .finally(() => {
+          sameDayPublishInFlight.delete(sameDayCheckKey);
+        });
+    }
+  }
+
   if (lastDate === today) return;
   if (!hasReachedPublishTime()) return;
 
