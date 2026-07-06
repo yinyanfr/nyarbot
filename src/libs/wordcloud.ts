@@ -27,6 +27,8 @@ const MAX_LAYOUT_ATTEMPTS = 2200;
 const MIN_FONT_SIZE = 36;
 const MAX_FONT_SIZE = 190;
 const MIN_PLACEMENT_FONT_SIZE = 22;
+const HORIZONTAL_PRIORITY_WORDS = 18;
+const VERTICAL_LAYOUT_TARGET_RATIO = 0.4;
 const WORD_PADDING = 4;
 const WORD_SIZE_EXPONENT = 0.52;
 const MAX_CORE_WORD_WIDTH_RATIO = 0.55;
@@ -506,6 +508,39 @@ function shouldUseVerticalLayout(token: string): boolean {
   return isMostlyCjk(token) && chars.length >= 2 && chars.length <= 3;
 }
 
+function getWordLimit(totalWords: number): number {
+  if (totalWords <= 30) return totalWords;
+  if (totalWords <= 50) return Math.ceil(totalWords * 0.75);
+  return Math.ceil(totalWords * 0.5);
+}
+
+function buildVerticalLayoutIndexSet(words: { text: string; sizeWeight: number }[]): Set<number> {
+  const maxWeight = words[0]?.sizeWeight ?? 1;
+  const minWeight = words[words.length - 1]?.sizeWeight ?? maxWeight;
+  const span = Math.max(1, maxWeight - minWeight);
+  const eligibleIndexes = words
+    .map((word, index) => {
+      const ratio = maxWeight === minWeight ? 1 : (word.sizeWeight - minWeight) / span;
+      const canUseVerticalLayout =
+        index >= HORIZONTAL_PRIORITY_WORDS && shouldUseVerticalLayout(word.text) && ratio <= 0.3;
+      return canUseVerticalLayout ? index : null;
+    })
+    .filter((index): index is number => index !== null);
+
+  const maxVerticalCount = Math.floor(eligibleIndexes.length * VERTICAL_LAYOUT_TARGET_RATIO);
+  if (maxVerticalCount <= 0) return new Set();
+
+  const selected = new Set<number>();
+  eligibleIndexes.forEach((index, candidateIndex) => {
+    if (selected.size >= maxVerticalCount) return;
+    const expectedCount = Math.floor((candidateIndex + 1) * VERTICAL_LAYOUT_TARGET_RATIO);
+    if (expectedCount > selected.size) {
+      selected.add(index);
+    }
+  });
+  return selected;
+}
+
 function buildWordFrequencies(texts: string[]): { text: string; sizeWeight: number }[] {
   const counts = new Map<string, number>();
   for (const text of texts) {
@@ -527,10 +562,12 @@ function buildWordFrequencies(texts: string[]): { text: string; sizeWeight: numb
       if (b.rankWeight !== a.rankWeight) return b.rankWeight - a.rankWeight;
       if (b.count !== a.count) return b.count - a.count;
       return a.text.localeCompare(b.text, "zh-CN");
-    })
-    .slice(0, MAX_WORDS);
+    });
+
+  const wordLimit = Math.min(MAX_WORDS, getWordLimit(ranked.length));
 
   return ranked
+    .slice(0, wordLimit)
     .sort((a, b) => {
       if (b.sizeWeight !== a.sizeWeight) return b.sizeWeight - a.sizeWeight;
       if (b.count !== a.count) return b.count - a.count;
@@ -652,6 +689,7 @@ function buildPlacements(words: { text: string; sizeWeight: number }[]): WordPla
   const minWeight = words[words.length - 1]?.sizeWeight ?? maxWeight;
   const span = Math.max(1, maxWeight - minWeight);
   const placed: WordPlacement[] = [];
+  const verticalLayoutIndexes = buildVerticalLayoutIndexSet(words);
 
   words.forEach((word, index) => {
     const ratio = maxWeight === minWeight ? 1 : (word.sizeWeight - minWeight) / span;
@@ -659,8 +697,7 @@ function buildPlacements(words: { text: string; sizeWeight: number }[]): WordPla
     const baseFontSize = MIN_FONT_SIZE + scaledRatio * (MAX_FONT_SIZE - MIN_FONT_SIZE);
     const fontScale = CORE_FONT_SCALE[index] ?? 1;
     const initialFontSize = Math.round(baseFontSize * fontScale);
-    const direction =
-      index < 18 || !shouldUseVerticalLayout(word.text) || ratio > 0.3 ? "horizontal" : "vertical";
+    const direction = verticalLayoutIndexes.has(index) ? "vertical" : "horizontal";
 
     for (
       let fontSize = initialFontSize;
