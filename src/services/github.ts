@@ -296,8 +296,8 @@ ${body}
 `;
 }
 
-function buildGithubRepoAssetUrl(repoName: string, sourcePath: string): string {
-  return `/${repoName}/${sourcePath.replace(/^source\//u, "")}`;
+function buildGithubRepoAssetUrl(_repoName: string, sourcePath: string): string {
+  return `/${sourcePath.replace(/^source\//u, "")}`;
 }
 
 export async function pushDiaryToGithub(
