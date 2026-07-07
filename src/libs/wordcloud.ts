@@ -431,7 +431,7 @@ function hasReachedPublishTime(): boolean {
 
 function getCurrentSameDayPublicationSlot(): WordcloudPublicationSlot | null {
   const hour = now().hour();
-  if (hour >= 20) return "same_day_evening";
+  if (hour >= 18) return "same_day_evening";
   if (hour >= 12) return "same_day_noon";
   return null;
 }
