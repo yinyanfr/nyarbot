@@ -742,15 +742,11 @@ async function prefetchTurnContext(params: {
   ) {
     const mediaCandidates = new Map<string, { mediaType: string }>();
     for (const ref of mediaRefs ?? []) {
-      if (ref.fileId) mediaCandidates.set(ref.fileId, { mediaType: ref.type });
-      if (ref.type === "sticker") {
-        if (ref.thumbnailFileId) {
-          mediaCandidates.set(ref.thumbnailFileId, { mediaType: `${ref.type} thumbnail` });
-        }
-        continue;
-      }
-      if (ref.thumbnailFileId)
+      if (ref.type === "image" && ref.fileId) {
+        mediaCandidates.set(ref.fileId, { mediaType: ref.type });
+      } else if (ref.thumbnailFileId) {
         mediaCandidates.set(ref.thumbnailFileId, { mediaType: `${ref.type} thumbnail` });
+      }
     }
 
     for (const [fileId, meta] of Array.from(mediaCandidates.entries()).slice(0, 2)) {
@@ -1249,10 +1245,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   const allowedUrlSet = new Set((urls ?? []).map((u) => u.trim()).filter(Boolean));
   const allowedMediaMap = new Map<string, { type: RichMediaType; viaThumbnail: boolean }>();
   for (const ref of mediaRefs ?? []) {
-    if (ref.fileId) {
+    if (ref.type === "image" && ref.fileId) {
       allowedMediaMap.set(ref.fileId, { type: ref.type, viaThumbnail: false });
-    }
-    if (ref.thumbnailFileId) {
+    } else if (ref.thumbnailFileId) {
       allowedMediaMap.set(ref.thumbnailFileId, { type: ref.type, viaThumbnail: true });
     }
   }
