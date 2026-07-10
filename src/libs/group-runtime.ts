@@ -146,6 +146,7 @@ class SingleGroupRuntime {
   private readonly userStats = new Map<string, UserRuntimeStats>();
   private readonly recentRealUserEvents: number[] = [];
   private pendingTurn: ScheduledTurn | null = null;
+  private readonly queuedCommandTurns: ScheduledTurn[] = [];
   private compacting = false;
   private initialized = false;
 
@@ -382,6 +383,16 @@ class SingleGroupRuntime {
     this.scheduleDebounce();
   }
 
+  scheduleCommandTurn(turn: ScheduledTurn): void {
+    this.queuedCommandTurns.push(turn);
+    if (this.state.running) return;
+    if (this.pendingTurn || this.state.debounceTimer !== null || this.state.maxDelayTimer !== null)
+      return;
+    queueMicrotask(() => {
+      void this.runQueuedCommandTurn();
+    });
+  }
+
   canRunProactive(): boolean {
     const now = Date.now();
     return (
@@ -562,6 +573,38 @@ class SingleGroupRuntime {
       if (this.state.dirty && this.pendingTurn) {
         this.state.dirty = false;
         this.scheduleDebounce();
+      } else if (this.queuedCommandTurns.length > 0) {
+        this.state.dirty = false;
+        void this.runQueuedCommandTurn();
+      } else {
+        this.state.dirty = false;
+      }
+    }
+  }
+
+  private async runQueuedCommandTurn(): Promise<void> {
+    if (this.state.running) return;
+    if (this.pendingTurn || this.state.debounceTimer !== null || this.state.maxDelayTimer !== null)
+      return;
+    const turn = this.queuedCommandTurns.shift();
+    if (!turn) return;
+
+    this.state.running = true;
+    try {
+      logger.info({ label: turn.label }, "group runtime starting command turn");
+      await turn.execute();
+    } catch (err) {
+      logger.error({ err, label: turn.label }, "group runtime command turn failed");
+    } finally {
+      this.state.running = false;
+      if (this.state.dirty && this.pendingTurn) {
+        this.state.dirty = false;
+        this.scheduleDebounce();
+      } else if (this.queuedCommandTurns.length > 0) {
+        this.state.dirty = false;
+        queueMicrotask(() => {
+          void this.runQueuedCommandTurn();
+        });
       } else {
         this.state.dirty = false;
       }

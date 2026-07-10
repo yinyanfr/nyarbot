@@ -445,6 +445,57 @@ function parseStrokeCommand(
   return { extraText: remainder };
 }
 
+type RollCommandParseResult =
+  | { kind: "ok"; count: number; sides: number; notation: string }
+  | { kind: "error"; message: string };
+
+function parseRollCommand(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  botUsername: string,
+): RollCommandParseResult | null {
+  const commandEntity = findCommandEntity(entities, text, "/roll", botUsername);
+  if (!commandEntity) return null;
+
+  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
+  if (!remainder) {
+    return { kind: "ok", count: 1, sides: 20, notation: "1d20" };
+  }
+
+  const match = remainder.match(/^(\d+)d(\d+)$/iu);
+  if (!match) {
+    return { kind: "error", message: "用法是 /roll 或 /roll 2d6 这种格式喵~" };
+  }
+
+  const count = Number.parseInt(match[1] ?? "", 10);
+  const sides = Number.parseInt(match[2] ?? "", 10);
+
+  if (!Number.isInteger(count) || count <= 0 || count > 20) {
+    return { kind: "error", message: "骰子数量只能是 1 到 20 的正整数喵~" };
+  }
+  if (!Number.isInteger(sides) || sides < 2 || sides > 99999) {
+    return { kind: "error", message: "骰子面数只能是 2 到 99999 的正整数喵~" };
+  }
+
+  return { kind: "ok", count, sides, notation: `${count}d${sides}` };
+}
+
+function rollDice(params: { count: number; sides: number }): { results: number[]; total: number } {
+  const results = Array.from(
+    { length: params.count },
+    () => Math.floor(Math.random() * params.sides) + 1,
+  );
+  const total = results.reduce((sum, value) => sum + value, 0);
+  return { results, total };
+}
+
+function formatRollResult(params: { notation: string; results: number[]; total: number }): string {
+  if (params.results.length === 1) {
+    return `掷出了 ${params.notation}：${params.results[0]}`;
+  }
+  return `掷出了 ${params.notation}：${params.results.join(" + ")} = ${params.total}`;
+}
+
 function xmlEscape(text: string): string {
   return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
@@ -951,6 +1002,8 @@ async function handleAiTurn(params: {
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
   memoryCandidateHints?: string[];
+  forceReply?: boolean;
+  dismissFallbackMessages?: string[];
 }): Promise<void> {
   const {
     ctx,
@@ -968,6 +1021,8 @@ async function handleAiTurn(params: {
     allowWebSearch,
     allowMediaTools,
     memoryCandidateHints,
+    forceReply,
+    dismissFallbackMessages,
   } = params;
 
   const chatId = ctx.chatId;
@@ -1028,7 +1083,7 @@ async function handleAiTurn(params: {
       "handleAiTurn: applied local AI routing",
     );
   }
-  const isTriggered = isMentioned || isRepliedToBot;
+  const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
 
   try {
     const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
@@ -1124,7 +1179,26 @@ async function handleAiTurn(params: {
         let finalFallbackMessages: string[] = [];
         let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
 
-        if (result.rawText) {
+        if (dismissFallbackMessages?.length) {
+          finalFallbackMessages = dismissFallbackMessages;
+          touchBotActivity();
+          for (const message of dismissFallbackMessages) {
+            pushMessage(
+              config.tgGroupId,
+              "bot",
+              config.botUsername,
+              message.slice(0, MAX_BUFFER_TEXT),
+            );
+          }
+          await groupRuntime.recordBotMessages({ messages: dismissFallbackMessages });
+          await sendAiMessages({
+            ctx,
+            chatId,
+            replyToMessageId,
+            messages: dismissFallbackMessages,
+            stickerFileId: null,
+          });
+        } else if (result.rawText) {
           const rescued = await rescueSendMessagesFromDraft({
             userContext: user,
             userMessage,
@@ -1537,6 +1611,116 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       return;
     }
 
+    const rollArgs = parseRollCommand(entities, rawText, botUsername);
+    if (rollArgs) {
+      let resultText: string;
+      let systemHint: string;
+      let dismissFallbackMessages: string[];
+      if (rollArgs.kind === "ok") {
+        const roll = rollDice({ count: rollArgs.count, sides: rollArgs.sides });
+        resultText = formatRollResult({
+          notation: rollArgs.notation,
+          results: roll.results,
+          total: roll.total,
+        });
+        systemHint = `<system_hint><event>command_roll</event><rule>用户刚刚使用了 /roll，程序已经发送了掷骰结果：${xmlEscape(resultText)}。你现在必须顺着上下文自然接一句，可以吐槽运气、调侃结果或接住话题，但不要机械重复完整结果。</rule></system_hint>`;
+        dismissFallbackMessages = ["这手气看着就很有节目效果，哼。"];
+      } else {
+        resultText = rollArgs.message;
+        systemHint = `<system_hint><event>command_roll_invalid</event><rule>用户刚刚使用了格式或范围错误的 /roll，程序已经发送了错误提示：${xmlEscape(resultText)}。你现在必须顺着上下文自然吐槽一下这次错误输入，语气可以调侃一点，但不要和程序提示完全重复。</rule></system_hint>`;
+        dismissFallbackMessages = ["连骰子格式都能写歪，你是想先把我绕晕吗喵。"];
+      }
+
+      await replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
+
+      void (async () => {
+        const user = await getOrCreateUser(from.id.toString(), from.first_name);
+        const displayName = user.nickname || from.first_name || "大哥哥";
+        const replyTo = msg.reply_to_message;
+        const isRepliedToBot =
+          replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
+          replyTo?.from?.id === botId;
+        const isMentioned = entities.some((e) => {
+          if (e.type !== "mention") return false;
+          const mention = rawText.slice(e.offset, e.offset + e.length);
+          return (
+            mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
+            mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
+          );
+        });
+        const extracted = await extractContent(ctx, msg, { rawText, entities });
+        const urls = extracted.urls;
+        const mediaRefs = await attachRecentMediaRefs({
+          groupId: config.tgGroupId,
+          rawText,
+          mediaRefs: extracted.mediaRefs,
+        });
+        const runtimeDecision = await groupRuntime.ingestUserMessage({
+          chatId: config.tgGroupId,
+          messageId: msg.message_id,
+          updateId: ctx.update.update_id,
+          kind: "command",
+          uid: from.id.toString(),
+          name: displayName,
+          ...(from.username ? { username: from.username } : {}),
+          text: rawText,
+          mediaRefs,
+          urls,
+          ...(replyTo && !isRepliedToBot
+            ? {
+                replyTo: {
+                  uid: replyTo.from?.id?.toString() ?? "",
+                  name: replyTo.from?.first_name ?? "某人",
+                  ...(replyTo.from?.username ? { username: replyTo.from.username } : {}),
+                  text: replyTo.text ?? replyTo.caption ?? "",
+                  ...(replyTo.message_id != null ? { messageId: replyTo.message_id } : {}),
+                },
+              }
+            : {}),
+          ts: Date.now(),
+          triggered: true,
+        });
+
+        const userMessage = buildUserMessage({
+          rawText,
+          displayName,
+          mediaRefs,
+          replyTo,
+          isRepliedToBot,
+          isMentioned,
+          urls,
+        });
+
+        groupRuntime.scheduleCommandTurn({
+          label: `roll:${msg.message_id}`,
+          execute: () =>
+            handleAiTurn({
+              ctx,
+              replyToMessageId: msg.message_id,
+              user,
+              userMessage,
+              systemHint,
+              isMentioned,
+              isRepliedToBot,
+              mediaRefs,
+              urls,
+              sourceRefs: [`tg:${config.tgGroupId}:roll:${msg.message_id}`],
+              ...(from.username ? { senderUsername: from.username } : {}),
+              ...(runtimeDecision.lateBindingStatus
+                ? { runtimeStatus: runtimeDecision.lateBindingStatus }
+                : {}),
+              allowWebSearch: runtimeDecision.allowWebSearch,
+              allowMediaTools: runtimeDecision.allowMediaTools,
+              forceReply: true,
+              dismissFallbackMessages,
+            }),
+        });
+      })().catch((err: unknown) => {
+        logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
+      });
+      return;
+    }
+
     // 2. Resolve user
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
@@ -1643,6 +1827,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
+• /roll [1d20|2d6|3d20] — 掷骰子，我会先报结果再接话
 • /shock [0-200|想说的话] — 电我一下，也可以带强度或顺便说话
 • /stroke [1-200|想说的话] — 撸撸本喵，也可以带力度或边撸边说话
 • /nighty — 跟我说晚安，8小时后我会发早安问候

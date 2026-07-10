@@ -10,6 +10,7 @@ export type HistoryEntryKind =
   | "command_love"
   | "command_shock"
   | "command_stroke"
+  | "command_roll"
   | "command_reset"
   | "command_status"
   | "command_nighty"
