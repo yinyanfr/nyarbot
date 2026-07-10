@@ -1523,14 +1523,25 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const from = msg.from;
     if (!from) return;
 
+    const rawText = msg.text ?? msg.caption ?? "";
+    const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+
+    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
+      const replyName = from.first_name || "大哥哥";
+      await replyAndTrack(ctx, `晚安安 ${replyName}~ 🌙`, msg.message_id, false, "command_nighty");
+      void getOrCreateUser(from.id.toString(), from.first_name)
+        .then((user) => setNightyTimestamp(user.uid, Date.now()))
+        .catch((err: unknown) => {
+          logger.warn({ err, uid: from.id.toString() }, "failed to persist /nighty timestamp");
+        });
+      return;
+    }
+
     // 2. Resolve user
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
     // 3. Extract content references (text, URLs, media file_ids, sticker emoji)
-    const rawText = msg.text ?? msg.caption ?? "";
-    const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
-
     const extracted = await extractContent(ctx, msg, { rawText, entities });
     const urls = extracted.urls;
     const mediaRefs = await attachRecentMediaRefs({
@@ -1686,13 +1697,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         logger.warn({ err }, "group /reset runtime summary clear failed");
       });
       await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
-      return;
-    }
-
-    // 8. Goodnight — /nighty command only
-    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
-      await setNightyTimestamp(user.uid, Date.now());
-      await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id, false, "command_nighty");
       return;
     }
 
