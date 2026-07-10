@@ -71,6 +71,7 @@ export async function extractContent(
         type: "sticker",
         source,
         fileId: m.sticker.file_id,
+        ...(m.sticker.thumbnail?.file_id ? { thumbnailFileId: m.sticker.thumbnail.file_id } : {}),
         emoji: m.sticker.emoji ?? "",
       });
     }

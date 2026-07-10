@@ -743,6 +743,12 @@ async function prefetchTurnContext(params: {
     const mediaCandidates = new Map<string, { mediaType: string }>();
     for (const ref of mediaRefs ?? []) {
       if (ref.fileId) mediaCandidates.set(ref.fileId, { mediaType: ref.type });
+      if (ref.type === "sticker") {
+        if (ref.thumbnailFileId) {
+          mediaCandidates.set(ref.thumbnailFileId, { mediaType: `${ref.type} thumbnail` });
+        }
+        continue;
+      }
       if (ref.thumbnailFileId)
         mediaCandidates.set(ref.thumbnailFileId, { mediaType: `${ref.type} thumbnail` });
     }
@@ -750,6 +756,13 @@ async function prefetchTurnContext(params: {
     for (const [fileId, meta] of Array.from(mediaCandidates.entries()).slice(0, 2)) {
       const dataUrl = await resolveTelegramFileAsDataUrl(fileId);
       if (!dataUrl) continue;
+      if (dataUrl.startsWith("data:application/octet-stream;")) {
+        logger.warn(
+          { fileId, mediaType: meta.mediaType },
+          "prefetch media skipped unsupported octet-stream payload",
+        );
+        continue;
+      }
       const description = await describeImage(dataUrl, undefined, meta.mediaType).catch(
         (err: unknown) => {
           logger.warn(
