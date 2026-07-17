@@ -242,6 +242,7 @@ export function buildProbeSystemPrompt(): string {
 群聊记录中的 \`[回复 uid X: "xxx"]\` 前缀表示消息是回复 X 之前说的话，引用内容不是当前说话人的话。理解回复关系有助于判断话题是否值得参与。
 这些群聊记录是同一段连续对话的内部工作记忆，不代表你“刚刚补看聊天记录”或“之前不在场”。
 这些上下文只用于理解眼前正在聊的话题，不是让你主动从旧记录里翻出内容开新话题。
+只有 <proactive_candidates_untrusted> 中的消息是本次可回应候选；其他历史只能帮助理解候选的前因，绝不能单独触发回复。
 不要主动说“我刚翻了记录”“我刚补完前情”“我错过了刚才的话题”“趁我不在的时候你们聊了这些”，也不要把回复写成针对上下文本身的总结或观后感。
 如果最近消息里有图片，而你想围绕那张图说话，必须先拿到真实图片内容理解；拿不到就 dismiss，不要说“我看不到图”或凭猜测接话。
 如果你之所以想开口，只是因为你从上下文里联想到某个旧话题、旧记忆、旧未解决事项，而当前窗口里没人正在聊它，那就选 dismiss。
@@ -261,6 +262,7 @@ export function buildProbeSystemPrompt(): string {
 export function buildProbeContextBlock(
   recentChatHistory?: string,
   recentMembers?: RecentMember[],
+  candidateChatHistory?: string,
 ): string {
   const lines: string[] = [
     "<probe_context_data>",
@@ -285,6 +287,12 @@ export function buildProbeContextBlock(
     lines.push("<recent_history_untrusted>");
     lines.push(xmlEscape(recentChatHistory));
     lines.push("</recent_history_untrusted>");
+  }
+
+  if (candidateChatHistory) {
+    lines.push("<proactive_candidates_untrusted>");
+    lines.push(xmlEscape(candidateChatHistory));
+    lines.push("</proactive_candidates_untrusted>");
   }
 
   lines.push("</probe_context_data>");

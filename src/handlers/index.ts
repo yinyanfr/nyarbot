@@ -795,6 +795,14 @@ function maybeAttachRecentMediaRefs(params: {
   for (let i = history.length - 1; i >= 0; i--) {
     const entry = history[i];
     if (!entry || entry.uid === "bot" || entry.uid === "system") continue;
+    if (Array.isArray(entry.mediaRefs)) {
+      const refs = entry.mediaRefs
+        .filter((ref) => ref?.source === "current")
+        .map(mapRuntimeMediaRefToMediaRef)
+        .filter(Boolean) as MediaRef[];
+      if (refs.length > 0) return refs;
+      continue;
+    }
     const refs = parseMediaRefsFromBufferText(entry.text);
     if (refs.length > 0) {
       logger.info(
@@ -829,10 +837,9 @@ function mapRuntimeMediaRefToMediaRef(ref: {
     return null;
   }
 
-  const source = ref.source === "current" || ref.source === "reply_to" ? ref.source : "reply_to";
   return {
     type: ref.type,
-    source,
+    source: "reply_to",
     ...(ref.fileId ? { fileId: ref.fileId } : {}),
     ...(ref.thumbnailFileId ? { thumbnailFileId: ref.thumbnailFileId } : {}),
     ...(ref.emoji ? { emoji: ref.emoji } : {}),
@@ -854,7 +861,10 @@ async function attachRecentMediaRefs(params: {
     for (let i = recentEvents.length - 1; i >= 0; i--) {
       const event = recentEvents[i];
       if (!event || event.uid === "bot" || event.uid === "system") continue;
-      const refs = event.mediaRefs.map(mapRuntimeMediaRefToMediaRef).filter(Boolean) as MediaRef[];
+      const refs = event.mediaRefs
+        .filter((ref) => ref.source === "current")
+        .map(mapRuntimeMediaRefToMediaRef)
+        .filter(Boolean) as MediaRef[];
       if (refs.length > 0) {
         logger.info(
           { matchedText: params.rawText, sourceUid: event.uid, recoveredRefs: refs.length },
@@ -919,8 +929,23 @@ async function sendAiMessages(params: {
   replyToMessageId: number;
   messages: string[];
   stickerFileId: string | null;
-}): Promise<void> {
+}): Promise<{ messages: string[]; stickerFileId: string | null }> {
   const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
+  const sentMessages: string[] = [];
+  let sentStickerFileId: string | null = null;
+
+  const trackText = async (text: string): Promise<void> => {
+    touchBotActivity();
+    pushMessage(config.tgGroupId, "bot", config.botUsername, text.slice(0, MAX_BUFFER_TEXT));
+    await groupRuntime.recordBotMessages({ messages: [text] });
+  };
+
+  const trackSticker = async (fileId: string): Promise<void> => {
+    touchBotActivity();
+    const emoji = getStickerEmojiByFileId(fileId) ?? "🐱";
+    pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸 ${emoji}: ${fileId}]`);
+    await groupRuntime.recordBotMessages({ messages: [], stickerFileId: fileId });
+  };
 
   if (messages.length === 0) {
     // No text messages — if there's a sticker, send it with a reply reference
@@ -932,15 +957,18 @@ async function sendAiMessages(params: {
           stickerFileId,
           replyToMessageId,
         });
+        sentStickerFileId = stickerFileId;
+        await trackSticker(stickerFileId);
       } catch (err) {
         logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
       }
     }
-    return;
+    return { messages: sentMessages, stickerFileId: sentStickerFileId };
   }
 
   // First message replies to the user's message; subsequent messages are
   // sent standalone (like a human typing follow-up lines).
+  let textDispatchFailed = false;
   for (let i = 0; i < messages.length; i++) {
     const text = messages[i]!;
     const formatted = formatForTelegramHtml(text);
@@ -953,8 +981,12 @@ async function sendAiMessages(params: {
         formatted,
         ...(i === 0 ? { replyToMessageId } : {}),
       });
+      sentMessages.push(text);
+      await trackText(text);
     } catch (err) {
       logger.warn({ err, i }, "sendAiMessages: failed to send message");
+      textDispatchFailed = true;
+      break;
     }
 
     // Stagger messages to mimic human typing rhythm, but not after the last one
@@ -964,13 +996,17 @@ async function sendAiMessages(params: {
   }
 
   // Dispatch sticker after all text messages, if any
-  if (stickerFileId) {
+  if (stickerFileId && !textDispatchFailed) {
     try {
       await ctx.api.sendSticker(chatId, stickerFileId);
+      sentStickerFileId = stickerFileId;
+      await trackSticker(stickerFileId);
     } catch (err) {
       logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
     }
   }
+
+  return { messages: sentMessages, stickerFileId: sentStickerFileId };
 }
 
 const MANDATORY_REPLY_HINT =
@@ -1176,22 +1212,14 @@ async function handleAiTurn(params: {
         clearInterval(typingTimer);
         logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
-        let finalFallbackMessages: string[] = [];
         let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
+        let sentFallback: { messages: string[]; stickerFileId: string | null } = {
+          messages: [],
+          stickerFileId: null,
+        };
 
         if (dismissFallbackMessages?.length) {
-          finalFallbackMessages = dismissFallbackMessages;
-          touchBotActivity();
-          for (const message of dismissFallbackMessages) {
-            pushMessage(
-              config.tgGroupId,
-              "bot",
-              config.botUsername,
-              message.slice(0, MAX_BUFFER_TEXT),
-            );
-          }
-          await groupRuntime.recordBotMessages({ messages: dismissFallbackMessages });
-          await sendAiMessages({
+          sentFallback = await sendAiMessages({
             ctx,
             chatId,
             replyToMessageId,
@@ -1208,7 +1236,6 @@ async function handleAiTurn(params: {
             rawDraft: result.rawText,
           });
           const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
-          finalFallbackMessages = fallbackMessages;
           if (rescued?.messages.length) {
             finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
             logger.info(
@@ -1219,17 +1246,7 @@ async function handleAiTurn(params: {
               "handleAiTurn: rescued raw draft via send_message",
             );
           }
-          touchBotActivity();
-          for (const message of fallbackMessages) {
-            pushMessage(
-              config.tgGroupId,
-              "bot",
-              config.botUsername,
-              message.slice(0, MAX_BUFFER_TEXT),
-            );
-          }
-          await groupRuntime.recordBotMessages({ messages: fallbackMessages });
-          await sendAiMessages({
+          sentFallback = await sendAiMessages({
             ctx,
             chatId,
             replyToMessageId,
@@ -1237,31 +1254,18 @@ async function handleAiTurn(params: {
             stickerFileId: rescued?.messages.length ? null : getStickerFileId(fallbackEmoji),
           });
         } else {
-          touchBotActivity();
           const stickerFileId = getStickerFileId(fallbackEmoji);
-          pushMessage(
-            config.tgGroupId,
-            "bot",
-            config.botUsername,
-            `[贴纸 ${fallbackEmoji}: ${stickerFileId || "unknown"}]`,
-          );
-          await groupRuntime.recordBotMessages({
+          sentFallback = await sendAiMessages({
+            ctx,
+            chatId,
+            replyToMessageId,
             messages: [],
             stickerFileId,
           });
-          if (stickerFileId) {
-            try {
-              await sendStickerWithReplyFallback({
-                ctx,
-                chatId,
-                stickerFileId,
-                replyToMessageId,
-              });
-            } catch (err) {
-              logger.warn({ err, emoji: fallbackEmoji }, "handleAiTurn: fallback sticker failed");
-            }
-          }
         }
+
+        const sentFallbackOutput =
+          sentFallback.messages.length > 0 || sentFallback.stickerFileId !== null;
 
         await groupRuntime.recordTurn({
           kind: "passive",
@@ -1271,8 +1275,10 @@ async function handleAiTurn(params: {
           tier,
           needsSearch,
           toolCalls: finalFallbackToolCalls,
-          action: result.rawText ? "send" : "dismiss",
-          messages: finalFallbackMessages,
+          action: sentFallbackOutput ? "send" : "error",
+          messages: sentFallback.messages,
+          stickerFileId: sentFallback.stickerFileId,
+          ...(!sentFallbackOutput ? { error: "telegram fallback dispatch failed" } : {}),
           ...(result.metrics?.inputTokens != null
             ? { inputTokens: result.metrics.inputTokens }
             : {}),
@@ -1315,35 +1321,15 @@ async function handleAiTurn(params: {
 
     // result.action === "send"
     clearInterval(typingTimer);
-    touchBotActivity();
 
-    // Push all messages to the conversation buffer
-    for (const msg of result.messages) {
-      pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
-    }
-    await groupRuntime.recordBotMessages({
-      messages: result.messages,
-      stickerFileId: result.stickerFileId,
-    });
-
-    // Sticker-only: push a sticker marker so the buffer stays coherent
-    if (result.messages.length === 0 && result.stickerFileId) {
-      const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
-      pushMessage(
-        config.tgGroupId,
-        "bot",
-        config.botUsername,
-        `[贴纸 ${emoji}: ${result.stickerFileId}]`,
-      );
-    }
-
-    await sendAiMessages({
+    const sent = await sendAiMessages({
       ctx,
       chatId,
       replyToMessageId,
       messages: result.messages,
       stickerFileId: result.stickerFileId,
     });
+    const sentOutput = sent.messages.length > 0 || sent.stickerFileId !== null;
     await groupRuntime.recordTurn({
       kind: "passive",
       startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
@@ -1352,9 +1338,10 @@ async function handleAiTurn(params: {
       tier,
       needsSearch,
       toolCalls: result.metrics?.toolCalls ?? [],
-      action: "send",
-      messages: result.messages,
-      stickerFileId: result.stickerFileId,
+      action: sentOutput ? "send" : "error",
+      messages: sent.messages,
+      stickerFileId: sent.stickerFileId,
+      ...(!sentOutput ? { error: "telegram dispatch failed" } : {}),
       ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
       ...(result.metrics?.outputTokens != null
         ? { outputTokens: result.metrics.outputTokens }
@@ -1367,9 +1354,7 @@ async function handleAiTurn(params: {
   } catch (err) {
     clearInterval(typingTimer);
     logger.error({ err }, "handleAiTurn: AI turn failed");
-    await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
-      logger.warn({ err: replyErr }, "handleAiTurn: fallback reply failed");
-    });
+    await replyAndTrack(ctx, "呜喵...出了点问题喵...", replyToMessageId);
     await groupRuntime.recordTurn({
       kind: "passive",
       startedAt: Date.now(),
@@ -1421,6 +1406,20 @@ async function buildStatusText(): Promise<string> {
 export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
+
+  bot.use(async (ctx, next) => {
+    const groupUpdate = ctx.update.message ?? ctx.update.edited_message;
+    if (groupUpdate?.chat.id.toString() !== config.tgGroupId) {
+      await next();
+      return;
+    }
+    const release = groupRuntime.beginIncomingActivity();
+    try {
+      await next();
+    } finally {
+      release();
+    }
+  });
 
   bot.on("message", async (ctx) => {
     if (isDuplicateUpdate(ctx.update.update_id)) return;
@@ -1633,6 +1632,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
       await replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
 
+      const releaseRollActivity = groupRuntime.beginIncomingActivity();
       void (async () => {
         const user = await getOrCreateUser(from.id.toString(), from.first_name);
         const displayName = user.nickname || from.first_name || "大哥哥";
@@ -1715,9 +1715,11 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
               dismissFallbackMessages,
             }),
         });
-      })().catch((err: unknown) => {
-        logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
-      });
+      })()
+        .catch((err: unknown) => {
+          logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
+        })
+        .finally(releaseRollActivity);
       return;
     }
 
@@ -1816,6 +1818,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         bufferLine,
         from.username ?? undefined,
+        "normal",
+        mediaRefs,
       );
     }
 
@@ -2106,6 +2110,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         editedBuffer.slice(0, MAX_BUFFER_TEXT),
         from.username ?? undefined,
+        "normal",
+        mediaRefs,
       );
     }
 

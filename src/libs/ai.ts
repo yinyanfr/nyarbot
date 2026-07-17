@@ -1688,6 +1688,7 @@ ${xmlEscape(params.turnText || "（暂无）")}
 
 export interface ProbeGateOptions {
   recentConversation: string;
+  candidateConversation: string;
   recentMembers: { uid: string; name: string; username?: string }[];
 }
 
@@ -1697,10 +1698,14 @@ export interface ProbeGateOptions {
  * should stay silent.
  */
 export async function probeGate(opts: ProbeGateOptions): Promise<boolean> {
-  const { recentConversation, recentMembers } = opts;
+  const { recentConversation, candidateConversation, recentMembers } = opts;
 
   const systemPrompt = buildProbeSystemPrompt();
-  const probeContext = buildProbeContextBlock(recentConversation, recentMembers);
+  const probeContext = buildProbeContextBlock(
+    recentConversation,
+    recentMembers,
+    candidateConversation,
+  );
 
   // Lightweight version of the late-binding prompt for probe context
   const lateBinding =

@@ -148,6 +148,8 @@ class SingleGroupRuntime {
   private pendingTurn: ScheduledTurn | null = null;
   private readonly queuedCommandTurns: ScheduledTurn[] = [];
   private compacting = false;
+  private activityRevision = 0;
+  private activeIngestions = 0;
   private initialized = false;
 
   async init(): Promise<void> {
@@ -198,6 +200,16 @@ class SingleGroupRuntime {
   }
 
   async ingestUserMessage(input: IngestMessageInput): Promise<IngestDecision> {
+    this.activeIngestions++;
+    this.activityRevision++;
+    try {
+      return await this.ingestUserMessageInternal(input);
+    } finally {
+      this.activeIngestions--;
+    }
+  }
+
+  private async ingestUserMessageInternal(input: IngestMessageInput): Promise<IngestDecision> {
     await this.init();
     const now = input.ts ?? Date.now();
     const messageKey = `${input.chatId}:${input.messageId ?? "none"}:${input.editDate ?? "none"}`;
@@ -399,8 +411,25 @@ class SingleGroupRuntime {
       !this.state.running &&
       this.state.debounceTimer === null &&
       this.state.maxDelayTimer === null &&
+      this.queuedCommandTurns.length === 0 &&
+      this.activeIngestions === 0 &&
       this.state.quietUntilMs <= now
     );
+  }
+
+  getActivityRevision(): number {
+    return this.activityRevision;
+  }
+
+  beginIncomingActivity(): () => void {
+    this.activeIngestions++;
+    this.activityRevision++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeIngestions--;
+    };
   }
 
   async runProactiveTurn(execute: () => Promise<void>): Promise<boolean> {
@@ -414,6 +443,13 @@ class SingleGroupRuntime {
       if (this.state.dirty && this.pendingTurn) {
         this.state.dirty = false;
         this.scheduleDebounce();
+      } else if (this.queuedCommandTurns.length > 0) {
+        this.state.dirty = false;
+        queueMicrotask(() => {
+          void this.runQueuedCommandTurn();
+        });
+      } else {
+        this.state.dirty = false;
       }
     }
   }

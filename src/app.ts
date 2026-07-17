@@ -54,15 +54,24 @@ async function main(): Promise<void> {
       const formatted = formatForTelegramHtml(text);
       try {
         await bot.api.sendMessage(config.tgGroupId, formatted, { parse_mode: "HTML" });
+        return true;
       } catch {
-        await bot.api.sendMessage(config.tgGroupId, text);
+        try {
+          await bot.api.sendMessage(config.tgGroupId, text);
+          return true;
+        } catch (err) {
+          logger.warn({ err }, "proactive: text dispatch failed");
+          return false;
+        }
       }
     },
     sendSticker: async (stickerFileId: string) => {
       try {
         await bot.api.sendSticker(config.tgGroupId, stickerFileId);
+        return true;
       } catch (err) {
         logger.warn({ err, stickerFileId }, "proactive: sticker dispatch failed");
+        return false;
       }
     },
     sendChatAction: async (action) => {
