@@ -11,7 +11,7 @@ A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai), backed by DeepSeek for language, Gemini for vision (via Cloudflare AI Gateway), and Firestore for persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
+Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, Gemini handles vision, diary generation, and diary notices through Cloudflare AI Gateway, and Firestore provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
 
 ## Overview
 
@@ -19,7 +19,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - **Tool-call architecture**: speaking, dismissing, stickers, search, media inspection, and diary writing are all explicit tools
 - **Long-lived context**: nicknames, memories, rolling chat history, proactive replies, and daily diary generation
 - **Local routing for speed**: short chats, technical questions, detailed requests, and current-fact queries are routed locally first, then escalated to the classifier / advisor when needed
-- **Publishing pipeline**: midnight diary generation can publish to Hexo/GitHub and Telegram channels, and yesterday's wordcloud can be posted to the group automatically
+- **Publishing pipeline**: while running, wordclouds publish at noon, in the evening, and after rollover; midnight diaries can reuse the final cloud for Hexo/GitHub and Telegram channels
 - **Security-conscious prompt design**: dedicated guardrails for prompt injection, memory poisoning, and external-content replay
 
 ## Highlights
@@ -29,10 +29,10 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 | Natural group chat | Triggered by mention/reply, optimized for short-form chat rhythm rather than essay-style responses |
 | Serious mode       | Programming, math, and technical questions automatically suppress the stronger persona layer       |
 | On-demand tools    | Media and URL tools are only used when actually needed, not eagerly preprocessed                   |
-| Proactive chatter  | Cheap probe first, full generation only when the topic is worth joining                            |
+| Proactive chatter  | Cheap probe first; only new candidates are answerable and stale generations are cancelled          |
 | Memory system      | Nicknames, user memories, affection scoring, and morning/night routines                            |
 | Diary system       | Observations become a daily catgirl diary, ready for blog/channel distribution                     |
-| Wordcloud system   | Recent local group messages become a colorful square wordcloud with a top-5 activity leaderboard   |
+| Wordcloud system   | Recent local messages become timed daily clouds with a top-5 leaderboard while the bot is running  |
 
 ## Features
 
@@ -44,9 +44,10 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 - 🌅 **Morning Greetings**: `/nighty` schedules a personalized morning greeting on the next message after 8+ hours
 - 💔 **Affection Scoring**: `/love` and confession-style messages trigger memory-based scoring and a persona-consistent response
 - ⚡ **Shock Reactions**: `/shock` supports intensity and optional extra text for different frazzled reactions
+- 🎲 **Dice Rolls**: `/roll` defaults to `1d20` and accepts `NdM`; the numeric result is immediate, followed by a queued AI reaction
 - 🏷️ **Nicknames & Memory**: users can naturally teach the bot how to address them or what to remember
 - 📔 **Diary System**: observations are recorded during chat and turned into a daily diary entry
-- ☁️ **Wordcloud System**: yesterday's chat can become a local wordcloud image with active-user ranking; bundled Source Han Sans keeps CJK text readable
+- ☁️ **Wordcloud System**: while running, chat becomes noon, evening, and final daily wordclouds with active-user ranking; bundled Source Han Sans keeps CJK text readable
 - 🎨 **Sticker Replies**: emoji-routed hardcoded sticker responses, optionally alongside text
 - 🔄 **Dismiss Retry**: if the model chooses silence after an explicit trigger, the bot retries with stronger reply hints
 
@@ -56,7 +57,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 | ------------------- | -------------------------------------------------- |
 | Telegram Bot        | `grammy` v1                                        |
 | AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4              |
-| Vision              | Gemini 2.5 Flash via Cloudflare AI Gateway         |
+| Gemini              | Gemini 3.1 Flash Lite / Pro Preview via AI Gateway |
 | Search / Extraction | `@tavily/ai-sdk`                                   |
 | Database            | `firebase-admin` (Firestore)                       |
 | Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas` |
@@ -125,17 +126,23 @@ node dist/app.js
 
 See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 
-| Command             | Description                                                            |
-| ------------------- | ---------------------------------------------------------------------- |
-| `/help`             | Show help text                                                         |
-| `/love`             | Trigger affection scoring + tsundere reply                             |
-| `/shock`            | Zap the bot; supports intensity and extra text                         |
-| `/stroke`           | Pet the bot; supports intensity and extra text                         |
-| `/nighty`           | Schedule a morning greeting 8+ hours later                             |
-| `/status`           | Show bot runtime status (admin only)                                   |
-| `/reset`            | Clear conversation buffer and runtime summary (admin only)             |
-| `/diary`            | Generate today's diary preview (admin only, DM only)                   |
-| `/wordcloud [date]` | Generate a wordcloud preview for a specific date (admin only, DM only) |
+| Command                       | Description                                                            |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| `/help`                       | Show help text                                                         |
+| `/love`                       | Trigger affection scoring + tsundere reply                             |
+| `/shock`                      | Zap the bot; supports intensity and extra text                         |
+| `/stroke`                     | Pet the bot; supports intensity and extra text                         |
+| `/roll [NdM]`                 | Roll dice; defaults to `1d20`, supports 1–20 dice and 2–99999 sides    |
+| `/nighty`                     | Schedule a morning greeting 8+ hours later                             |
+| `/status`                     | Show bot runtime status (admin only)                                   |
+| `/reset`                      | Clear conversation buffer and runtime summary (admin only)             |
+| `/diary`                      | Generate today's diary preview (admin only, DM only)                   |
+| `/wordcloud [date]`           | Generate a wordcloud preview for a specific date (admin only, DM only) |
+| `/diaryobs [date]`            | List structured diary observations (admin only, DM only)               |
+| `/diaryshow <id>`             | Show one diary observation (admin only, DM only)                       |
+| `/diaryedit <id> <json>`      | Patch a diary observation (admin only, DM only)                        |
+| `/diaryretract <id> [reason]` | Retract a diary observation (admin only, DM only)                      |
+| `/diaryregen [date]`          | Regenerate a preview without saving/publishing (admin only, DM only)   |
 
 | Scenario     | Trigger                                                            |
 | ------------ | ------------------------------------------------------------------ |
@@ -151,24 +158,24 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 
 See [Configuration Docs](docs/configuration.md).
 
-| Variable                      | Required | Description                                                                     |
-| ----------------------------- | -------- | ------------------------------------------------------------------------------- |
-| `BOT_API_KEY`                 | ✅       | Telegram bot token                                                              |
-| `BOT_USERNAME`                | ✅       | Bot username (must match Telegram)                                              |
-| `TG_GROUP_ID`                 | ✅       | Target group ID                                                                 |
-| `TG_ADMIN_UID`                | ✅       | Admin Telegram user ID                                                          |
-| `DEEPSEEK_API_KEY`            | ✅       | DeepSeek API key                                                                |
-| `TAVILY_API_KEY`              | ✅       | Tavily API key                                                                  |
-| `CF_AIG_TOKEN`                | ✅       | Cloudflare AI Gateway token                                                     |
-| `CF_ACCOUNT_ID`               | ✅       | Cloudflare account ID                                                           |
-| `BOT_PERSONA_NAME`            | ❌       | Persona display name                                                            |
-| `BOT_PERSONA_FULL_NAME`       | ❌       | Persona full name                                                               |
-| `BOT_PERSONA_READING`         | ❌       | Persona reading                                                                 |
-| `GITHUB_TOKEN`                | ❌       | GitHub PAT for Hexo diary publishing                                            |
-| `GITHUB_REPO`                 | ❌       | GitHub repo in `owner/repo` form                                                |
-| `TG_DIARY_CHANNEL_ID`         | ❌       | Telegram channel ID for full diary publishing                                   |
-| `WORDCLOUD_DB_PATH`           | ❌       | Local SQLite path for wordcloud storage (default `data/wordcloud.sqlite`)       |
-| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌       | Midnight/day-rollover check interval for wordcloud generation (default `60000`) |
+| Variable                      | Required | Description                                                               |
+| ----------------------------- | -------- | ------------------------------------------------------------------------- |
+| `BOT_API_KEY`                 | ✅       | Telegram bot token                                                        |
+| `BOT_USERNAME`                | ✅       | Bot username (must match Telegram)                                        |
+| `TG_GROUP_ID`                 | ✅       | Target group ID                                                           |
+| `TG_ADMIN_UID`                | ✅       | Admin Telegram user ID                                                    |
+| `DEEPSEEK_API_KEY`            | ✅       | DeepSeek API key                                                          |
+| `TAVILY_API_KEY`              | ✅       | Tavily API key                                                            |
+| `CF_AIG_TOKEN`                | ✅       | Cloudflare AI Gateway token                                               |
+| `CF_ACCOUNT_ID`               | ✅       | Cloudflare account ID                                                     |
+| `BOT_PERSONA_NAME`            | ❌       | Persona display name                                                      |
+| `BOT_PERSONA_FULL_NAME`       | ❌       | Persona full name                                                         |
+| `BOT_PERSONA_READING`         | ❌       | Persona reading                                                           |
+| `GITHUB_TOKEN`                | ❌       | GitHub PAT for Hexo diary publishing                                      |
+| `GITHUB_REPO`                 | ❌       | GitHub repo in `owner/repo` form                                          |
+| `TG_DIARY_CHANNEL_ID`         | ❌       | Telegram channel ID for full diary publishing                             |
+| `WORDCLOUD_DB_PATH`           | ❌       | Local SQLite path for wordcloud storage (default `data/wordcloud.sqlite`) |
+| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌       | Wordcloud publication-slot check interval (default `60000`)               |
 
 ## Wordcloud Notes
 
@@ -176,7 +183,9 @@ See [Configuration Docs](docs/configuration.md).
 - Only human users count. The bot itself and other bots are excluded from both the cloud and the activity leaderboard.
 - Command messages are excluded. If a normal message is later edited into a command, it is removed from the local wordcloud store.
 - Edited messages overwrite by the same `message_id`, so the cloud uses the final text.
-- Forwarded messages still count toward the activity leaderboard and `messageCount`, but are excluded from the wordcloud body; preview captions call this out explicitly.
+- Forwarded messages still count toward the activity leaderboard and `messageCount`, but are excluded from the wordcloud body.
+- While running, the noon slot is attempted from 12:00–17:59 and the evening slot after 18:00; missed noon slots are not backfilled. The previous day's final cloud publishes after 00:02 with restart catch-up.
+- The final cloud is reused for the diary channel image and blog `index_img`; image and Markdown are sent in one Git Data API commit.
 - Repeated words inside the same message count once.
 - Rendering uses a bundled full Source Han Sans variable font so Simplified Chinese, Traditional Chinese, Japanese, and Korean do not fall back to tofu squares.
 - The default layout is center-heavy: high-frequency words form the core cluster first, short Chinese words may occasionally go vertical to fill gaps, and obvious negative tokens plus common filler/function words are filtered out.
@@ -212,7 +221,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 ## Release Notes
 
 - Current release: [`1.0.0`](CHANGELOG.md)
-- Recent updates: local routing now prioritizes short chats, technical questions, detailed requests, and current-fact queries; `saveMemory` now targets reusable user facts instead of only permanent traits; `writeDiary` is more candidate-first; successful prefetch now counts as having searched; dismissed raw drafts are rescued through real `send_message` when possible; `/stroke` has been added; `memoryCandidateHints` are narrower and softer; the local SQLite wordcloud pipeline also gained restart catch-up, forwarded-message filtering, bundled CJK font rendering, and tighter center-heavy layout/filtering
+- Recent updates: added `/roll` and a fast `/nighty` path; proactive turns now use candidate windows and activity revisions to prevent duplicate or stale replies; Telegram media is MIME-sniffed and animated stickers use safe thumbnails; wordclouds gained noon/evening slots and diary reuse; blog publishing batches image and Markdown; Gemini 3.1 Pro Preview writes diaries while Flash Lite reads the full diary for restrained update copy
 
 ## Disclaimer
 

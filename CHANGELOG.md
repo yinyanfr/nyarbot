@@ -8,6 +8,10 @@
 - **`/stroke` command** (`src/handlers/index.ts`, docs): added a dedicated petting reaction flow parallel to `/shock`.
 - **Fallback rescue send path** (`src/libs/ai.ts`, `src/handlers/index.ts`): dismissed raw drafts are now retried through a real `send_message` rescue flow before sticker-only fallback, so visible replies stay closer to the model's intended output.
 - **Daily local wordcloud pipeline** (`src/services/local-wordcloud-store.ts`, `src/libs/wordcloud.ts`, `src/app.ts`, `src/handlers/index.ts`, `src/configs/env.ts`, `package.json`): the bot now stores recent human group messages in local SQLite, generates a colorful square wordcloud for yesterday after midnight, posts it to the group with top-5 active users, and supports admin DM preview via `/wordcloud [date]`.
+- **`/roll` command** (`src/handlers/index.ts`, `src/libs/group-runtime.ts`): added `1d20` default and `NdM` notation with 1–20 dice / 2–99999 sides, immediate random results, validation errors, and a serialized AI reaction.
+- **Same-day wordcloud slots and diary assets** (`src/libs/wordcloud.ts`, `src/libs/diary.ts`): while the bot is running, wordclouds attempt a noon slot before 18:00 and an evening slot after 18:00, retain reusable PNG artifacts, and provide the previous-day image to Telegram channel and blog diary publishing.
+- **Diary observation subject identity** (`src/global.d.ts`, `src/services/firestore.ts`): structured observations can carry stable subject uid/name/username snapshots, with uid-aware deduplication.
+- **Structured diary administration** (`src/handlers/index.ts`, `src/services/firestore.ts`): added `DiaryObservationV2` create/update/supersede/retract storage, generation records, and private admin `/diaryobs`, `/diaryshow`, `/diaryedit`, `/diaryretract`, and `/diaryregen` commands.
 
 ### Changed
 
@@ -19,13 +23,22 @@
 - **Search prefetch policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search for the current turn, and mandatory search hints no longer conflict with the prefetch flow.
 - **Memory and diary heuristics** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/handlers/index.ts`): `saveMemory` now prefers reusable user facts, `writeDiary` is more candidate-first, and `memoryCandidateHints` are narrower to reduce false positives.
 - **Wordcloud rendering and filtering** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`, `src/handlers/index.ts`): the wordcloud now uses a bundled full Source Han Sans variable font for CJK text, records forwarded-message state, excludes forwarded text from the cloud body while still counting it in activity stats, removes messages edited into commands, deduplicates repeated tokens within a single message, and uses a tighter center-heavy layout with filler/negative token filtering.
+- **Diary generation and notification models** (`src/libs/diary.ts`, `src/libs/ai.ts`): Gemini 3.1 Pro Preview now generates diaries; Gemini 3.1 Flash Lite reads the complete diary and produces a restrained 1–2 sentence group introduction, while link readiness and challenge copy are appended deterministically.
+- **Proactive candidate handling** (`src/libs/proactive.ts`, `src/libs/group-runtime.ts`): only messages after the latest bot output are reply candidates, and activity revisions cancel stale probe/generation output before or between dispatches.
+- **Fast `/nighty` handling** (`src/handlers/index.ts`): goodnight acknowledgements now bypass normal user/media processing and persist the timestamp in the background.
+- **Batched GitHub diary publishing** (`src/services/github.ts`, `src/libs/diary.ts`): diary Markdown and optional wordcloud images are committed together through Git blobs/tree/commit and a non-force branch update.
+- **Stroke response tone** (`src/libs/ai.ts`): normal petting reactions are more openly affectionate instead of being forced into frazzled tsundere behavior.
 
 ### Fixed
 
 - **Retry-side diary duplication** (`src/libs/ai.ts`, `src/handlers/index.ts`, `src/services/firestore.ts`): retry turns no longer duplicate persistent diary writes or other side effects.
 - **Image-trigger reply policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): when a message needs image understanding, the bot now requires it before speaking, instead of bluffing around the image.
 - **Turn metrics consistency** (`src/handlers/index.ts`): rescue-generated `send_message` calls are now reflected in turn tool-call records and logs.
-- **Wordcloud startup catch-up and preview wording** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`): restarts after midnight no longer skip yesterday's wordcloud, preview captions now use the requested date instead of hard-coded “yesterday”, and captions explicitly document the forwarded-message counting rule.
+- **Wordcloud startup catch-up and preview wording** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`): restarts after midnight no longer skip yesterday's wordcloud, and preview captions now use the requested date instead of hard-coded “yesterday”.
+- **Telegram image MIME detection** (`src/libs/telegram-image.ts`): known image byte signatures take precedence; an `image/*` response header is accepted as fallback, and payloads with neither are rejected.
+- **Animated sticker vision prefetch** (`src/handlers/extract-content.ts`, `src/libs/ai.ts`): sticker thumbnails are retained for safe inspection without passing animated/non-image sticker payloads to vision.
+- **Diary asset URLs** (`src/services/github.ts`): generated Markdown now uses root-relative `/img/diary/...` paths.
+- **Proactive dispatch accounting** (`src/libs/proactive.ts`): only successfully dispatched Telegram text/stickers are recorded, while failed sends mark the turn as errored.
 
 ### Docs
 

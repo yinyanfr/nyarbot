@@ -1,10 +1,10 @@
 # Architecture
 
-nyarbot is a single-group Telegram bot written in TypeScript (ESM) with a configurable catgirl persona.
+nyarbot is a Telegram bot written in TypeScript (ESM) with one configured group runtime, a configurable catgirl persona, and a separate private-admin command path.
 
 ## Single-Group Runtime
 
-nyarbot still serves only `TG_GROUP_ID`, but AI scheduling no longer starts directly from the handler. `src/libs/group-runtime.ts` is the single runtime for the group:
+Group interactions are scoped to `TG_GROUP_ID`; supported private admin commands are handled separately. AI scheduling no longer starts directly from the handler. `src/libs/group-runtime.ts` is the single runtime for the group:
 
 - message-level dedup by `chatId + messageId + editDate`
 - abuse gates for repeated text, per-user bursts, URL flood, and media flood
@@ -25,42 +25,27 @@ app.ts (entry: init Firebase, create Bot, register handlers, start proactive che
 handlers/index.ts (setupHandlers)
     │
     ├─ Update dedup (update-dedup.ts)
-    ├─ Group filter (tgGroupId)
+    ├─ Private admin DM branch
+    │     ├─ /status, /reset, /diary, /wordcloud
+    │     └─ /diaryobs, /diaryshow, /diaryedit, /diaryretract, /diaryregen
+    ├─ Target-group filter (tgGroupId)
+    ├─ Fast group commands
+    │     ├─ /nighty → immediate acknowledgement + background timestamp write
+    │     └─ /roll → immediate result; background extraction + scheduleCommandTurn()
     ├─ User resolution (firestore.ts → 60s in-process cache)
     ├─ Content extraction (extract-content.ts)
     │     ├─ URL detection (entity + regex fallback)
-    │     ├─ Image: cache lookup → download → Gemini description
-    │     │     (includes reply-to images: msg.reply_to_message.photo)
-    │     ├─ Media thumbnails: video/animation/video_note/document/audio
-    │     │     → cache lookup (thumbnail file_id) → download thumbnail
-    │     │     → Gemini description (shared image cache)
-    │     │     (includes reply-to media; no ffmpeg — Telegram pre-generates thumbnails)
-    │     └─ Sticker: hardcoded emoji lookup → send file_id directly
+    │     └─ Raw file_id / thumbnail_file_id / sticker emoji references
     ├─ Local wordcloud persistence (local-wordcloud-store.ts)
     │     ├─ target-group human messages only
     │     ├─ command messages skipped; edited-to-command messages deleted from store
     │     ├─ edited messages overwrite by the same message_id
     │     └─ forwarded messages tagged for leaderboard-only counting
-    ├─ Buffer push (conversation-buffer.ts)
-    │     └─ Images: push inline descriptions ("[图片: desc]" not just "[图片]")
-    │     └─ Media: push type-tagged descriptions ("[视频: desc]", "[GIF动画: desc]", etc.)
-    ├─ Image caching (firestore.ts) — cache ALL images immediately after Gemini describes them
+    ├─ Buffer push (conversation-buffer.ts; raw media/link markers)
     ├─ Command routing (match-command.ts)
-    │     ├─ /help
-    │     ├─ /love → generateLoveResponse()
-    │     ├─ /status (admin)
-    │     └─ /reset (admin)
-    ├─ Nighty detection → setNightyTimestamp()
+    │     └─ /help, /love, /shock, /stroke
     ├─ Morning greeting logic → generateMorningGreeting()
     ├─ Trigger detection (@mention / reply-to-bot)
-    ├─ Await URL content (ai.ts → fetchUrlContent)
-    │     ├─ Twitter/X status links → fxtwitter API (free) → Gemini photo descriptions
-    │     ├─ Other links → direct fetch (extract <title> + <meta description>)
-    │     └─ Fallback → Tavily Extract (ai-powered summarization)
-    ├─ URL content buffer push
-    │     ├─ Successful fetches → pushed as system entries ("[推文]" or "[链接]")
-    │     └─ Failed fetches → silently ignored (no buffer entry, no proactive noise)
-    ├─ Fresh image description (ai.ts → Gemini)
     ├─ Local routing (short chat / tech / current-fact)
     ├─ AI classification (classifyMessage)
     │     └─ simple → flashNoThinkModel
@@ -75,6 +60,9 @@ handlers/index.ts (setupHandlers)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, startSubagent
+    │     ├─ Rich content on demand; session-only cache, no Firestore image cache
+    │     │     ├─ Photos use full file; other media/stickers prefer thumbnails
+    │     │     └─ Known signatures win; image/* headers are accepted as fallback
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search
     │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
     │     ├─ Dismiss retry (simple/complex 1×, tech 0×)
@@ -82,9 +70,10 @@ handlers/index.ts (setupHandlers)
     │     ├─ Format output (formatForTelegramHtml: Markdown → Telegram HTML)
     │     └─ Send via sendAiMessages (typing indicator, stagger delay, sticker dispatch)
 └─ Proactive checker (proactive.ts, env-configurable interval)
+          ├─ Candidate window starts after the latest bot output
           ├─ Phase 1: probeGate() — cheap model checks topic relevance
-          └─ Phase 2: generateAiTurn() — full model generates reply
-                └─ ProactiveCallbacks: sendText, sendSticker, sendChatAction
+          ├─ Phase 2: generateAiTurn() — full model generates reply
+          └─ Activity-revision checks cancel stale output before/between sends
 ```
 
 ## Tool-Call Architecture
@@ -93,19 +82,19 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 
 ### Available Tools
 
-| Tool                    | Purpose                                                                                                          |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `send_message`          | Send a message to the group (required to speak; can be called multiple times)                                    |
-| `dismiss`               | Choose not to reply (binary speak/silence choice)                                                                |
-| `saveMemory`            | Record a memory about a group member (uid validated against recent members)                                      |
-| `setNickname`           | Set/update a group member's preferred nickname                                                                   |
-| `deleteMemory`          | Remove a specific memory about a group member                                                                    |
-| `sendSticker`           | Select a sticker by emoji from the hardcoded pack. Invalid emoji cancels sticker sending.                        |
-| `describeTelegramMedia` | On-demand media description by Telegram `file_id` / `thumbnail_file_id` (passive-triggered turns only).          |
-| `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive-triggered turns only).                 |
-| `writeDiary`            | Record a diary observation about the conversation in natural language. Stored in Firestore `diary/{YYYY-MM-DD}`. |
-| `webSearch`             | Tavily search. Tool schema stays stable; when flood protection disables search, the tool returns the reason.     |
-| `startSubagent`         | One-shot helper for URL/media/technical research. It returns a short summary and cannot send group messages.     |
+| Tool                    | Purpose                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `send_message`          | Send a message to the group (required to speak; can be called multiple times)                                |
+| `dismiss`               | Choose not to reply (binary speak/silence choice)                                                            |
+| `saveMemory`            | Record a memory about a group member (uid validated against recent members)                                  |
+| `setNickname`           | Set/update a group member's preferred nickname                                                               |
+| `deleteMemory`          | Remove a specific memory about a group member                                                                |
+| `sendSticker`           | Select a sticker by emoji from the hardcoded pack. Invalid emoji cancels sticker sending.                    |
+| `describeTelegramMedia` | On-demand media description for triggered turns, plus selected newest-candidate images in proactive turns.   |
+| `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive-triggered turns only).             |
+| `writeDiary`            | Create/update/retract a structured observation in Firestore `diaryObservations`.                             |
+| `webSearch`             | Tavily search. Tool schema stays stable; when flood protection disables search, the tool returns the reason. |
+| `startSubagent`         | One-shot helper for URL/media/technical research. It returns a short summary and cannot send group messages. |
 
 ### AiTurnResult
 
@@ -126,48 +115,24 @@ When the bot is triggered (@mention or reply) but the model chooses `dismiss`, t
 
 If all retries still dismiss:
 
-- If `rawText` exists → send it as a single message + random sticker
+- If `rawText` exists → first rescue it into real `send_message` output; successful rescue sends those messages without a sticker
+- If rescue fails → send the raw draft as one message + random sticker
 - If `rawText` is empty → send just a random sticker (as reply)
 
 ## AI Model Routing
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  DeepSeek API                           │
-│  ┌──────────────────┐  ┌─────────────────────────────┐ │
-│  │  deepseek-v4-flash                               │ │
-│  │  ┌──────────────┐ │  ┌──────────────────────────┐ │ │
-│  │  │ No-think     │ │  │ Think (enabled)          │ │ │
-│  │  │ (disabled)   │ │  │                          │ │ │
-│  │  │              │ │  │                          │ │ │
-│  │  │ • classify   │ │  │ • complex conversations  │ │ │
-│  │  │ • good-morn  │ │  │ • tool-calling responses │ │ │
-│  │  │ • love-rej   │ │  │   (send_message, dismiss │ │ │
-│  │  │ • image desc │ │  │    saveMemory, etc.)     │ │ │
-│  │  │ • URL desc   │ │  │                          │ │ │
-│  │  │ • probe gate │ │  │                          │ │ │
-│  │  └──────────────┘ │  └──────────────────────────┘ │ │
-│  └──────────────────┘                                │ │
-│  ┌──────────────────┐                                │ │
-│  │  deepseek-v4-pro  │                                │ │
-│  │  Think (enabled)  │                                │ │
-│  │                    │                                │ │
-│  │  • tech questions  │                                │ │
-│  └──────────────────┘                                │ │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│  Cloudflare AI Gateway → Gemini 3 Flash Preview         │
-│                                                          │
-│  • describeImage() — vision descriptions for DeepSeek    │
-│  • describeTweetPhotos() — tweet photo descriptions      │
-└─────────────────────────────────────────────────────────┘
-```
+| Provider/model                                   | Usage                                                                            |
+| ------------------------------------------------ | -------------------------------------------------------------------------------- |
+| DeepSeek v4 Flash, thinking disabled             | Classification, short chat, greetings, affection/reaction flows, proactive probe |
+| DeepSeek v4 Flash, thinking enabled              | Complex conversations and tool-calling turns                                     |
+| DeepSeek v4 Pro, thinking enabled                | Technical questions and advisor-heavy turns                                      |
+| Gemini 3.1 Flash Lite via Cloudflare AI Gateway  | Telegram/tweet vision and full-diary notification copy                           |
+| Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                            |
 
 ### Why two providers?
 
 - **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
-- **Gemini 3 Flash Preview** handles image understanding via the Cloudflare AI Gateway. Descriptions are generated at request time and injected as `[图片: description]` text into DeepSeek's prompt.
+- **Gemini 3.1 Flash Lite** handles image understanding and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
 
 ## Local Routing
 
@@ -206,7 +171,9 @@ This prevents the model from skipping the search tool call.
 
 - `src/services/local-wordcloud-store.ts` keeps the most recent 10 days of group messages plus per-day publish markers in SQLite.
 - `src/libs/wordcloud.ts` handles tokenization, frequency counting, layout, rendering, preview captions, and publishing.
-- After midnight, the runtime checks whether yesterday already has a publish marker; if not, it can catch up after restart instead of permanently skipping that day.
+- While running, the noon slot is attempted from 12:00–17:59 and the evening slot after 18:00, tracked by SQLite markers. A missed noon slot is not backfilled.
+- After 00:02, the runtime publishes yesterday's final rollup and can catch up after restart.
+- Rendered PNG artifacts are retained under `wordcloud-artifacts/` beside the SQLite database and retried up to three times; the final artifact is reused by diary publishing.
 - Repeated tokens inside a single message are deduplicated before counting.
 - The wordcloud body filters forwarded text, obvious negative tokens, and common filler/function words, while the activity leaderboard still counts forwarded messages.
 - Rendering bundles the full Source Han Sans variable font so Simplified Chinese, Traditional Chinese, Japanese, and Korean stay readable.
@@ -246,7 +213,7 @@ A lean variant for the proactive probe gate — persona only, no per-user memori
 ## Message Output Pipeline
 
 1. **`generateAiTurn()`** returns `AiTurnResult` (`send` or `dismiss`)
-2. **Dismiss retry** (triggered path only): up to 3 retries with escalating hints
+2. **Dismiss retry** (triggered path only): simple/complex once, tech never
 3. **`sendAiMessages()`**:
    - Formats each message via `formatForTelegramHtml()` (Markdown → Telegram HTML, LaTeX → Unicode)
    - First message replies to the user's message; subsequent messages are standalone
@@ -265,10 +232,10 @@ A lean variant for the proactive probe gate — persona only, no per-user memori
 | Medium (3-6)   | 3-6                  | 180 seconds |
 | Low (1-2)      | 1-2                  | 360 seconds |
 
-If cooldown has elapsed:
+If cooldown has elapsed, the checker finds the latest bot output and treats only later user messages as reply candidates. Older messages remain reference context. It refuses to run while ingestion or command turns are active, snapshots the runtime activity revision, and rechecks it after the probe, before sending, and between multiple messages.
 
-1. **Phase 1 — Probe**: `probeGate()` runs the cheap model (`flashNoThink`) with `buildProbeSystemPrompt()` and lightweight `dismiss`/`send_message` tools. If probe dismisses, stop here.
-2. **Phase 2 — Full model**: If probe activates, `generateAiTurn()` runs the full model with all tools, `tier: "simple"` and `systemHint: null`.
+1. **Phase 1 — Probe**: `probeGate()` runs the cheap model (`flashNoThink`) with `buildProbeSystemPrompt()` and lightweight `dismiss`/`send_message` tools. If probe dismisses or activity changes, stop here.
+2. **Phase 2 — Full model**: If probe activates, `generateAiTurn()` runs with persistent tools disabled and candidate-image understanding conditionally available. Any new user or bot activity invalidates the result.
 
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.
 
@@ -276,36 +243,39 @@ The proactive checker stops after env-configurable consecutive failures (default
 
 ## Diary System
 
-The bot records conversational observations via the `writeDiary` AI tool. The model decides what's worth recording — no frequency limits, no rule-based extraction.
+The bot records structured conversational observations via the `writeDiary` AI tool. Compaction remains separate working memory and never substitutes for the diary archive.
 
 ### Observation Recording
 
-- `writeDiary` tool writes a natural-language observation to Firestore `diary/{YYYY-MM-DD}` using `arrayUnion`.
-- Each observation has a `ts` (millisecond timestamp) and `content` (the observation text).
-- Observations accumulate in a single document per date.
+- `writeDiary` creates, updates, supersedes, or retracts `DiaryObservationV2` documents in `diaryObservations`.
+- Records include event/reaction/interpretation fields, confidence, salience, status, and optional stable subject uid/name/username snapshots.
+- Subject uid participates in deduplication so observations about different people are not merged accidentally.
 
 ### Midnight Generation
 
-An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) detects date changes based on `APP_TIMEZONE`:
+An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) detects date changes based on `APP_TIMEZONE`. Generation requires the process to observe rollover; unlike the wordcloud final rollup, it has no startup catch-up:
 
-1. When the date rolls over, it fetches yesterday's diary entries from Firestore.
-2. If entries exist, it calls DeepSeek v4 Pro (`proThinkModel`) with a system prompt to compose a natural first-person catgirl diary.
-3. The generated diary is saved to Firestore (`diary` field + `generatedAt` timestamp).
-4. If `GITHUB_TOKEN` and `GITHUB_REPO` are configured, the diary is pushed to the target Hexo blog repo via GitHub Content API (`src/services/github.ts`).
-5. The GitHub push triggers a GitHub Actions workflow that builds and deploys to GitHub Pages.
+1. After 00:02, it selects up to 12 active observations for yesterday; legacy `diary/{date}.entries` are fallback input only.
+2. Gemini 3.1 Pro Preview composes the diary. The text and a generation record (model, prompt/style versions, observation ids, usage/status) are saved to Firestore.
+3. The previous-day wordcloud artifact is generated or reused. Telegram channel publishing sends it as the photo caption when the diary fits 1024 characters, otherwise it sends the diary as following text.
+4. GitHub publishing creates blobs, a tree, and one commit containing the Markdown and optional `source/img/diary/` image, then non-force updates `main`. Markdown uses root-relative `/img/diary/...` URLs.
+5. If configured GitHub publishing succeeds, the bot polls Pages readiness. Gemini 3.1 Flash Lite then reads the full diary and writes a restrained 1–2 sentence group notice regardless of GitHub availability; link state and challenge copy are appended deterministically.
 
-### Admin /diary Command
+### Admin Diary Commands
 
-The `/diary` command (private chat, admin only) generates a diary from today's entries on demand using the same `generateDiaryForDate()` function. This is a preview only — no save to Firestore, no GitHub push.
+Private admin DMs provide `/diary` and `/diaryregen [date]` previews plus `/diaryobs`, `/diaryshow`, `/diaryedit`, and `/diaryretract` observation management. Preview/regeneration commands do not save or publish the generated diary.
 
 ### Firestore Schema
 
 ```
 diary/{YYYY-MM-DD}
-  ├── date: string (e.g., "2026-05-13")
-  ├── entries: DiaryEntry[]  (via arrayUnion)
-  ├── diary?: string         (generated diary text)
-  └── generatedAt?: number   (timestamp)
+  ├── entries?: DiaryEntry[]              (legacy fallback)
+  ├── diary?: string
+  ├── generatedAt?: number
+  └── generationRecords?: DiaryGenerationRecord[]
+
+diaryObservations/{id}
+  └── DiaryObservationV2
 ```
 
 ### Timezone

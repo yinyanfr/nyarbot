@@ -2,17 +2,23 @@
 
 ## Slash Commands
 
-| Command             | Who        | Description                                                          |
-| ------------------- | ---------- | -------------------------------------------------------------------- |
-| `/help`             | Anyone     | Show help text                                                       |
-| `/love`             | Anyone     | Get affection scoring breakdown + tsundere response                  |
-| `/shock`            | Anyone     | Zap the bot and trigger a shocked / frazzled reaction                |
-| `/stroke`           | Anyone     | Pet the bot and trigger a frazzled reaction                          |
-| `/nighty`           | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later           |
-| `/status`           | Admin only | Show uptime, buffer size, memory user count                          |
-| `/reset`            | Admin only | Clear the conversation buffer and runtime summary                    |
-| `/diary`            | Admin only | Generate today's diary preview (private chat only)                   |
-| `/wordcloud [date]` | Admin only | Generate a wordcloud preview for a specific date (private chat only) |
+| Command                       | Who        | Description                                                            |
+| ----------------------------- | ---------- | ---------------------------------------------------------------------- |
+| `/help`                       | Anyone     | Show help text                                                         |
+| `/love`                       | Anyone     | Get affection scoring breakdown + tsundere response                    |
+| `/shock`                      | Anyone     | Zap the bot and trigger a shocked / frazzled reaction                  |
+| `/stroke`                     | Anyone     | Pet the bot; normal intensity is affectionate, excess may draw protest |
+| `/roll [NdM]`                 | Anyone     | Roll dice immediately, then queue a short AI reaction                  |
+| `/nighty`                     | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later             |
+| `/status`                     | Admin only | Show uptime, buffer size, memory user count                            |
+| `/reset`                      | Admin only | Clear the conversation buffer and runtime summary                      |
+| `/diary`                      | Admin only | Generate today's diary preview (private chat only)                     |
+| `/wordcloud [date]`           | Admin only | Generate a wordcloud preview for a specific date (private chat only)   |
+| `/diaryobs [date]`            | Admin only | List structured diary observations (private chat only)                 |
+| `/diaryshow <id>`             | Admin only | Show one structured diary observation (private chat only)              |
+| `/diaryedit <id> <json>`      | Admin only | Patch an observation with JSON (private chat only)                     |
+| `/diaryretract <id> [reason]` | Admin only | Retract an observation (private chat only)                             |
+| `/diaryregen [date]`          | Admin only | Regenerate a preview without saving or publishing (private chat)       |
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 
@@ -25,14 +31,14 @@ When a user @mentions the bot or replies to one of its messages, the full AI pip
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
 2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
-4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, retries up to 3 times with escalating reply hints. Falls back to raw text or sticker if all retries fail; if there is a raw draft, the handler first tries to rescue it into real `send_message` output.
+4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, simple/complex turns retry once; tech turns do not retry. The handler then tries to rescue a raw draft into real `send_message` output before falling back to a sticker.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
 
 Before classification, the handler runs a lightweight local route so short chats, technical questions, detailed requests, and current-fact queries can be fast-pathed without always invoking `classifyMessage()`.
 
 ### Special Context Records
 
-- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/stroke`, `/reset`, standalone morning greetings, and daily diary notifications.
+- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/stroke`, `/roll`, `/reset`, standalone morning greetings, and daily diary notifications.
 - In XML history, these entries carry a `kind="..."` attribute so the model can treat them as real prior events rather than ordinary user chat lines.
 
 ### Images & Media
@@ -40,7 +46,8 @@ Before classification, the handler runs a lightweight local route so short chats
 - The handler no longer pre-downloads or pre-describes media.
 - Context now includes raw Telegram references only (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media.
 - During **passive replies** (@mention/reply), the model can call `describeTelegramMedia` on demand when media content is actually needed.
-- During **proactive replies**, media/link tools are disabled to avoid unconditional fetches.
+- During **proactive replies**, URL fetching remains disabled. Images attached to the newest response candidates may be prefetched and must be understood before the bot comments on them; older media is context-only.
+- Telegram downloads prefer known JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, and HEIC byte signatures. If none matches, an `image/*` response header is accepted as fallback; payloads with neither are rejected.
 
 ### URLs
 
@@ -55,7 +62,7 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Stickers
 
-Stickers are no longer described or cached. The bot only reads the emoji on incoming stickers for lightweight context and can send hardcoded stickers by emoji when responding.
+Incoming sticker emoji remains the lightweight default context and sticker descriptions are not persisted. On a triggered turn, the bot may safely inspect a sticker thumbnail; it never passes an animated WebM sticker payload to the vision model, and unsupported payloads are skipped.
 
 When answering, the LLM can respond with:
 
@@ -70,7 +77,12 @@ The `sendSticker` tool exposes the hardcoded emoji list. The LLM selects by prov
 - `/wordcloud [date]` is available only in admin DMs; without an explicit date it previews today.
 - Preview captions adapt to the requested date and say “today”, “yesterday”, or the explicit date instead of hard-coding “yesterday”.
 - Forwarded messages still count toward the activity leaderboard and `messageCount`, but their forwarded text is excluded from the wordcloud body.
-- When forwarded messages are present for that day, the caption explicitly calls out that counting rule.
+
+### Dice Rolls
+
+- `/roll` defaults to `1d20`; `/roll 2d6` rolls two six-sided dice.
+- Valid ranges are 1–20 dice and 2–99999 sides.
+- The program sends the result or validation error immediately, then schedules a forced short AI follow-up through the single-group runtime.
 
 ### Videos, GIFs, Video Messages, Documents, and Audio
 
@@ -80,7 +92,7 @@ The `sendSticker` tool exposes the hardcoded emoji list. The LLM selects by prov
 
 ### Goodnight / Good Morning
 
-- **Goodnight**: `/nighty` command only → stores a `nightyTimestamp` in Firestore.
+- **Goodnight**: `/nighty` command only → immediately acknowledges with Telegram `first_name`, then persists `nightyTimestamp` in the background without waiting for user lookup, media extraction, or a model call.
 - **Good morning**: If a user with a `nightyTimestamp` ≥8 hours old sends a message:
   - If they also @mention/reply to the bot → a system hint is injected so the reply naturally opens with a wake-up greeting.
   - If not → a standalone morning greeting is generated and sent.
@@ -93,18 +105,19 @@ Text matching `LOVE_REGEX` (我爱你, 喜欢你, 嫁给我, love, etc.) trigger
 
 The `generateAiTurn()` function exposes these tools to the model:
 
-| Tool                    | Description                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| `send_message`          | Send a message to the group — the only way to speak; can be called multiple times |
-| `dismiss`               | Choose not to reply (binary speak/silence choice)                                 |
-| `saveMemory`            | Record a memory about a group member (uid must be from the recent members list)   |
-| `setNickname`           | Set/update a group member's preferred nickname                                    |
-| `deleteMemory`          | Remove a specific memory about a group member                                     |
-| `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending  |
-| `describeTelegramMedia` | On-demand media description by `file_id` / `thumbnail_file_id` (passive only)     |
-| `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)   |
-| `writeDiary`            | Record a diary observation about the current conversation                         |
-| `webSearch`             | Tavily search (only attached when `needsSearch=true` from classification)         |
+| Tool                    | Description                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| `send_message`          | Send a message to the group — the only way to speak; can be called multiple times      |
+| `dismiss`               | Choose not to reply (binary speak/silence choice)                                      |
+| `saveMemory`            | Record a memory about a group member (uid must be from the recent members list)        |
+| `setNickname`           | Set/update a group member's preferred nickname                                         |
+| `deleteMemory`          | Remove a specific memory about a group member                                          |
+| `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending       |
+| `describeTelegramMedia` | On-demand media description; proactive access is limited to candidate images           |
+| `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)        |
+| `writeDiary`            | Create, update, supersede, or retract a structured diary observation                   |
+| `webSearch`             | Tavily search; stable schema, returns a reason when runtime flood protection blocks it |
+| `startSubagent`         | One-shot URL/media/technical research helper; cannot send group messages               |
 
 If a web search already succeeded during prefetch before generation, that counts as the turn's required search; the model only needs to call `webSearch` again when the prefetched result is still insufficient.
 
@@ -121,8 +134,11 @@ User message → classifyMessage() → generateAiTurn()
                                         ├─ Model calls setNickname → Firestore write
                                         ├─ Model calls deleteMemory → Firestore delete
                                          ├─ Model calls sendSticker → file_id selected for dispatch
-                                         ├─ Model calls writeDiary → Firestore diary write
+                                         ├─ Model calls describeTelegramMedia → on-demand media description
+                                         ├─ Model calls fetchUrlContent → on-demand URL summary
+                                         ├─ Model calls writeDiary → structured observation mutation
                                          ├─ Model calls webSearch → Tavily search executed
+                                         ├─ Model calls startSubagent → one-shot research summary
                                         │
                                         ▼
                                  AiTurnResult
@@ -134,16 +150,17 @@ User message → classifyMessage() → generateAiTurn()
 
 When the user explicitly @mentions or replies to the bot and the model chooses `dismiss`:
 
-1. Retry up to 3 times, each time appending `[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]` to `systemHint`.
-2. After all retries, if still `dismiss`:
-   - If `rawText` exists (model produced inner monologue) → send `rawText` as message + random sticker as fallback.
+1. Retry simple/complex turns once with `[系统提示：用户明确@了你或回复了你，你必须回复，不要选择沉默。]`; tech turns do not retry.
+2. If the turn still returns `dismiss`:
+   - If `rawText` exists → try to rescue it into real `send_message` output; successful rescue sends those messages without a sticker.
+   - If rescue fails → send the raw draft as one message + random sticker.
    - If `rawText` is empty → send only a random sticker (with reply reference).
 
 Proactive messages are NOT retried — silence is a valid and expected outcome when the bot speaks unprompted.
 
 ## Message Formatting
 
-All bot output is processed through `formatForTelegramHtml()` before sending:
+AI text and other Markdown-enabled reply paths are processed through `formatForTelegramHtml()` before sending. Deterministic command replies and some captions are sent directly.
 
 - **Code blocks**: ` ```code``` ` → `<pre><code>`
 - **Inline code**: `` `code` `` → `<code>`

@@ -10,15 +10,16 @@
 | `BOT_PERSONA_NAME`      | ❌   | 人设显示名（用于提示词/帮助文案，默认：`にゃる`）                           |
 | `BOT_PERSONA_FULL_NAME` | ❌   | 人设全名（默认：`晴海猫月`）                                                |
 | `BOT_PERSONA_READING`   | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
-| `TG_ADMIN_UID`          | ✅   | 你的 Telegram 用户 ID（用于 `/status` 和 `/reset` 权限控制）                |
-| `TG_GROUP_ID`           | ✅   | 目标群组 ID — bot 忽略所有其他聊天/私聊的消息                               |
+| `TG_ADMIN_UID`          | ✅   | 管理员 ID，用于私聊状态/重置、日记观察管理和词云命令                        |
+| `TG_GROUP_ID`           | ✅   | 目标群组 ID；其他聊天被忽略，但支持的管理员私聊命令除外                     |
 | `DEEPSEEK_API_KEY`      | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
 | `TAVILY_API_KEY`        | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
-| `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway token，用于 Gemini 图片识别调用                       |
+| `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
 | `CF_ACCOUNT_ID`         | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
 | `BOT_USERNAME`          | ✅   | Telegram bot 用户名（必填，用于 @提及匹配）                                 |
 | `GITHUB_TOKEN`          | ❌   | GitHub PAT，用于推送日记到 Hexo 博客（格式 `ghp_...`）                      |
 | `GITHUB_REPO`           | ❌   | GitHub 仓库名，格式 `owner/repo`（如 `yinyanfr/nyarbot-diary`）             |
+| `TG_DIARY_CHANNEL_ID`   | ❌   | 完整日记推送频道 ID；有词云时会一并发送                                     |
 | `LOG_LEVEL`             | ❌   | Pino 日志级别（默认：`info`）                                               |
 | `PORT`                  | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
 
@@ -55,10 +56,14 @@
 - `WORDCLOUD_DB_PATH`（`data/wordcloud.sqlite`）
 - `WORDCLOUD_CHECK_INTERVAL_MS`（`60000`）
 
+当前 `.env.example` 未列出词云变量；它们仍是可选项，并使用上述默认值。
+
 ## 本地词云存储
 
 - 词云使用本地 SQLite，不上传 Firestore。
 - 默认数据库路径由 `WORDCLOUD_DB_PATH` 控制，默认 `data/wordcloud.sqlite`。
+- 生成的 PNG 保存在 SQLite 同目录的 `wordcloud-artifacts/`。
+- `WORDCLOUD_CHECK_INTERVAL_MS` 同时驱动中午、晚间和跨天发布检查，不只是午夜生成。
 - 只保留最近 10 天消息。
 - 仅统计活人；bot 自身和其他 bot 都会被排除。
 - 命令消息不会进入词云；如果普通消息后来被编辑成命令，会从本地词云库删除。
@@ -76,34 +81,36 @@
 
 使用的 Firestore 集合：
 
-| 集合                   | 文档 ID          | 字段                                                                        |
-| ---------------------- | ---------------- | --------------------------------------------------------------------------- |
-| `users/{uid}`          | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?`    |
-| `images/{fileId}`      | Telegram file_id | `fileId`、`description`、`cachedAt`                                         |
-| `diary/{date}`         | 日期 YYYY-MM-DD  | `date`、`entries[]`、`diary?`、`generatedAt?`                               |
-| `runtime/group`        | 固定文档         | `summary`、`summaryCursorTs`、`lastProcessedMessageId?`、`lastCompactedAt?` |
-| `events/{autoId}`      | 自动 ID          | append-only 群聊事件、bot 输出、忽略原因、URL/媒体引用                      |
-| `turns/{autoId}`       | 自动 ID          | AI turn 的模型、工具调用、action、token/cache usage、latency、错误          |
-| `compactions/{autoId}` | 自动 ID          | 工作记忆摘要快照与 cursor/token usage                                       |
+| 集合                     | 文档 ID          | 字段                                                                        |
+| ------------------------ | ---------------- | --------------------------------------------------------------------------- |
+| `users/{uid}`            | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?`    |
+| `diary/{date}`           | 日期 YYYY-MM-DD  | 旧 `entries[]`、`diary?`、`generatedAt?`、`generationRecords[]`             |
+| `diaryObservations/{id}` | 观察 ID          | 结构化事件/反应、subject identity、confidence/status                        |
+| `runtime/group`          | 固定文档         | `summary`、`summaryCursorTs`、`lastProcessedMessageId?`、`lastCompactedAt?` |
+| `events/{autoId}`        | 自动 ID          | append-only 群聊事件、bot 输出、忽略原因、URL/媒体引用                      |
+| `turns/{autoId}`         | 自动 ID          | AI turn 的模型、工具调用、action、token/cache usage、latency、错误          |
+| `compactions/{autoId}`   | 自动 ID          | 工作记忆摘要快照与 cursor/token usage                                       |
 
 ## DeepSeek 模型
 
-Bot 使用两个模型，各有两种思考模式变体：
+Bot 使用两个 DeepSeek model ID，共配置三种变体：
 
 | 模型                | 思考模式                               | 用途                                                         |
 | ------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、告白好感度评分回应、探测门、URL/图片描述     |
+| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、告白/互动反应、主动探测                      |
 | `deepseek-v4-flash` | 启用（`thinking: {type: "enabled"}`）  | 复杂对话（tier=`complex`），带 send_message/dismiss 工具调用 |
 | `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 技术问题（tier=`tech`），带 send_message/dismiss 工具调用    |
-| `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 日记生成（午夜汇总 / `/diary` 命令）                         |
 
 思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
 
 ## Cloudflare AI Gateway
 
-Gemini 图片识别调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
+Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-使用的模型：`google-ai-studio/gemini-3-flash-preview` — 快速、便宜，且支持视觉输入。也用于 `describeTweetPhotos()` 中的批量推文配图描述。
+- `google-ai-studio/gemini-3.1-flash-lite`：Telegram/推文图片理解、完整日记导读。
+- `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
+
+媒体描述只做当前进程会话缓存，不再使用 Firestore `images` 运行时缓存。
 
 ## 工具调用架构
 
@@ -118,7 +125,7 @@ Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 | `deleteMemory`          | 删除关于群友的指定记忆                                    |
 | `sendSticker`           | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送        |
 | `writeDiary`            | 记录关于当前对话的观察笔记                                |
-| `webSearch`             | Tavily 搜索（仅在分类结果 `needsSearch=true` 时附带）     |
+| `webSearch`             | Tavily 搜索；schema 固定，runtime flood 禁用时返回原因    |
 | `describeTelegramMedia` | 按需查看当前轮 Telegram 媒体；主动/限流场景会返回禁用原因 |
 | `fetchUrlContent`       | 按需抓取当前轮 URL；无 URL 或限流时返回原因               |
 | `startSubagent`         | 一次性 helper，用于 URL/媒体/技术检索，不能直接发群消息   |

@@ -63,7 +63,7 @@ DeepSeek 的 Chat Completions API 不支持 `json_schema` response_format（返�
 
 ### 为什么用两阶段主动探测？
 
-每次主动检查都运行完整模型很昂贵。探测门使用 `flashNoThinkModel`（最便宜最快）配合简化提示词和只有 `dismiss`/`send_message` 工具。如果探测决定话题相关，完整模型才运行所有工具。这平均节省约 80% 的主动计算。
+每次主动检查都运行完整模型很昂贵。探测门使用 `flashNoThinkModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
 
 ### 为什么用 `formatForTelegramHtml`？
 
@@ -87,6 +87,8 @@ Runtime 的默认阈值：
 - 单用户限流：30 秒内超过 8 条非命令消息，冷却 60 秒
 - URL flood：60 秒内超过 3 个 URL，禁用搜索/抓链接触发
 - 媒体 flood：60 秒内超过 5 个媒体，禁用媒体描述 5 分钟
+
+`/roll` 使用 `scheduleCommandTurn()`：程序解析和数值结果保持立即响应，AI 跟进则与 passive/proactive 轮次串行。`/nighty` 也在普通用户/媒体处理之前走快速路径，并在后台持久化时间戳。
 
 ### 为什么静态 system prompt？
 
@@ -114,7 +116,7 @@ Diary 是文学化归档：由 `writeDiary` 和午夜日记流程生成，面向
 
 ### 为什么有日记系统？
 
-Bot 通过 `writeDiary` AI 工具记录对话观察笔记，而非事后提取。模型根据对话上下文判断什么值得记录——无规则触发、无频率限制。午夜（基于 `APP_TIMEZONE`）使用 DeepSeek v4 Pro 带思考模式将观察汇总为自然的猫娘第一人称日记。生成的日记通过 GitHub Content API 推送到 Hexo 博客供公开阅读。
+Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。只有运行中的定时器观察到跨天后，才会在 00:02 后开始生成；目前没有启动补发。Gemini 3.1 Pro Preview 选择 active observations 并生成第一人称日记。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.1 Flash Lite 都会通读全文生成群通知导读。
 
 ### 为什么用 dayjs 处理日期？
 
@@ -138,9 +140,9 @@ Bot 通过 `writeDiary` AI 工具记录对话观察笔记，而非事后提取�
 
 这避免了过去对 `logger.error`/`.warn` 的劫持以及脆弱的 `as unknown as NodeJS.WritableStream` 类型转换。`AdminDmHandler` 返回一个与 pino multistream 兼容的纯 `{ write(msg: string): void }` 适配器。
 
-### 图片缓存时机
+### 按需媒体处理
 
-图片通过 Gemini 描述后立即在主 handler 中缓存到 Firestore——在 `if (!isMentioned && !isRepliedToBot) return` 判断之前。过去缓存被延迟到 `handleAiTurn()` 中，导致非触发图片被描述但从未缓存。现在确保主动插话上下文始终可用。
+Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描述媒体。被动触发轮次按需查看完整图片或缩略图，主动轮次也可预取最新候选图片。下载文件先按字节识别 MIME；动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
 
 ### URL 抓取（三级策略）
 
@@ -150,7 +152,7 @@ Bot 通过 `writeDiary` AI 工具记录对话观察笔记，而非事后提取�
 2. **直接抓取** → HTML title/meta 提取
 3. **Tavily Extract** → 回退
 
-仅成功结果进入对话缓冲区；失败的抓取静默忽略。原始 URL 绝不进入缓冲区以避免主动噪音。
+URL 摘要只做进程内缓存；历史会保留轻量 URL 标记，但主动路径不抓取 URL 内容。
 
 ## Firestore Schema
 
@@ -166,30 +168,41 @@ interface User {
 }
 ```
 
-### `images/{fileId}`
-
-```typescript
-interface CachedImage {
-  fileId: string; // Telegram file_id
-  description: string; // Gemini 生成的中文描述
-  cachedAt: number; // 毫秒时间戳，30 天 TTL
-}
-```
-
-### `diary/{date}`
+### 日记集合
 
 ```typescript
 interface DiaryEntry {
-  ts: number; // 毫秒时间戳
-  content: string; // 自然语言观察
+  ts: number;
+  content: string;
 }
 
-// 文档字段：
-// date: string（如 "2026-05-13"）
-// entries: DiaryEntry[]（via arrayUnion）
+// 省略了部分可选内容/来源字段，完整定义见 src/global.d.ts。
+interface DiaryObservationV2 {
+  schemaVersion: 2;
+  id: string;
+  recordedAt: string;
+  localDate: string;
+  subjectUid?: string;
+  subjectName?: string;
+  subjectUsername?: string;
+  event: string;
+  confidence: "fact" | "inference" | "uncertain";
+  salience: 1 | 2 | 3 | 4 | 5;
+  status: "active" | "superseded" | "retracted";
+}
+
+// diary/{date}
+// entries?: DiaryEntry[]（旧格式回退）
 // diary?: string（生成的日记文本）
 // generatedAt?: number（毫秒时间戳）
+// generationRecords?: DiaryGenerationRecord[]
+
+// diaryObservations/{id}: DiaryObservationV2
 ```
+
+## 词云发布
+
+本地 SQLite 会记录中午、晚间和昨日最终版三个发布 slot。运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场；错过的中午场不补发。生成文件保存在 `wordcloud-artifacts/`，生成/发布最多重试三次；昨日最终图片会被日记频道与 GitHub 发布复用。
 
 ### Runtime collections
 
