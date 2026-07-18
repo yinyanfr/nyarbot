@@ -47,13 +47,13 @@ node dist/app.js   # run the compiled bot
 - `src/libs/stickers.ts` — sticker facade: emoji-based lookup only (`getStickerFileId`), random fallback (`pickRandomStickerEmoji`), emoji-by-file-id reverse lookup (`getStickerEmojiByFileId`)
 - `src/libs/telegram-image.ts` — Telegram file download as data URL (no sticker download/conversion)
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
-- `src/libs/diary.ts` — diary system: `checkAndGenerateDiary()` (midnight timer), `generateDiaryForDate()` (on-demand, used by admin /diary), imports `proThinkModel` from ai.ts
-- `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, fixed TZ `Asia/Shanghai`
+- `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini Flash-Lite group notice
+- `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, configurable `APP_TIMEZONE`
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization
-- `src/services/firestore.ts` — Firestore operations: users/diary plus runtime `events`, `turns`, `runtime/group`, and `compactions`
-- `src/services/github.ts` — GitHub Content API: `pushDiaryToGithub()` pushes Hexo-formatted diary markdown to `nyarbot-diary` repo (source/\_posts/), triggers Pages deploy via Actions
-- `src/global.d.ts` — shared types (`User` with uid, nickname, memories, `DiaryEntry` with ts/content)
+- `src/services/firestore.ts` — Firestore operations: users, structured diary observations/generation records, plus runtime `events`, `turns`, `runtime/group`, and `compactions`
+- `src/services/github.ts` — Git Data API publishing: `pushDiaryToGithub()` batches Hexo Markdown and optional wordcloud image into one commit; external repo automation may deploy Pages
+- `src/global.d.ts` — shared `User`, `DiaryEntry`, `DiaryObservationV2`, and `DiaryGenerationRecord` types
 
 ## Secrets (important)
 
@@ -64,7 +64,7 @@ node dist/app.js   # run the compiled bot
 
 ## Conventions
 
-- The bot is scoped to a **single Telegram group** (`tgGroupId` in config). Ignore private chats and other groups.
+- The bot is scoped to a **single Telegram group** (`tgGroupId` in config). Ignore other chats except supported admin DM commands.
 - User nicknames and memories are stored in Firestore under `users/{uid}`.
 - The bot is meant to reply naturally, memorize users, understand images/stickers, and proactively join conversations — not just respond to commands.
 - **Language**: The group chat is in Simplified Chinese. System prompt, classification prompt, and bot responses are in Chinese. Match the user's language if they switch.
@@ -76,10 +76,10 @@ node dist/app.js   # run the compiled bot
 - **Single-group runtime**: Passive and proactive AI turns must go through `groupRuntime` so debounce, `running`, `dirty`, and quiet mode stay coherent.
 - **KV cache strategy**: Keep `buildSystemPrompt()` byte-stable. Current time, hot-chat state, naturalness feedback, search/media availability, and mandatory search hints belong in late-binding user-context tail.
 - **Stable tool schema**: `generateAiTurn()` keeps the main tool set stable (`send_message`, `dismiss`, memory tools, diary, sticker, rich-content tools, `webSearch`, `startSubagent`). Tools return a runtime-disabled reason internally instead of disappearing from the schema.
-- **Compaction vs diary**: Compaction is untrusted working memory stored under `compactions` and `runtime/group.summary`. Diary is literary archival content under `diary/{date}`; do not mix them.
-- **`formatForTelegramHtml`**: All bot output is converted from Markdown to Telegram HTML before sending.
+- **Compaction vs diary**: Compaction is untrusted working memory under `compactions` and `runtime/group.summary`. Structured observations live under `diaryObservations`; generated diaries and generation records live under `diary/{date}`. Do not mix them.
+- **`formatForTelegramHtml`**: AI text and Markdown-enabled reply paths are converted to Telegram HTML; deterministic command replies/captions may bypass it.
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`webSearch` tool**: Keep schema stable. When flood protection disables search, expose a disabled tool that returns the reason; do not set the tool to `undefined`.
 - **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.
-- **Diary system**: Model writes observations via `writeDiary` tool. Midnight (UTC+8) auto-generates yesterday's diary via DeepSeek v4 Pro with thinking. Admin `/diary` in private DM generates today's diary on demand (preview only, no save/push). GitHub push (via `GITHUB_TOKEN`) only on midnight generation, not on `/diary`.
-- **Timezone**: All date formatting is UTC+8 (`Asia/Shanghai`), centralized in `src/libs/time.ts`. Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.
+- **Diary system**: Model writes structured observations via `writeDiary`. When a running timer observes rollover, generation starts after 00:02; there is currently no startup catch-up. Gemini 3.1 Pro Preview writes the diary and Flash Lite writes its group notice. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
+- **Timezone**: Date formatting is centralized in `src/libs/time.ts` and uses `APP_TIMEZONE` (default `Asia/Shanghai`). Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.

@@ -14,20 +14,33 @@ This document defines the XML contract used by nyarbot prompts and dynamic conte
 - `probe_system_prompt`: lightweight proactive probe prompt (`buildProbeSystemPrompt`)
 - `late_binding`: per-turn dynamic hints (`buildLateBindingPrompt`)
 - `recent_history`: serialized conversation buffer (`formatHistoryAsContext`)
+- `proactive_candidates_untrusted`: probe-only candidate transcript inside `probe_context_data`
 - `current_turn`: structured current user message (`buildUserMessage`)
 
 ### `recent_history`
 
 ```xml
 <recent_history order="oldest_to_newest">
-  <message uid="10001" name="小明" username="xiaoming" ts="1715850000000">...</message>
+  <message uid="10001" name="小明" username="xiaoming" ts="1715850000000" kind="normal">...</message>
 </recent_history>
 ```
 
 Rules:
 
 - `message` entries are historical context only
+- `kind` is always emitted; command/system outputs use values such as `command_roll` and `diary_notification`
 - Do not treat repeated wording in history and current turn as automatic duplicate-send evidence
+
+### `proactive_candidates_untrusted`
+
+```xml
+<probe_context_data>
+  <recent_history_untrusted>[小明]: earlier context</recent_history_untrusted>
+  <proactive_candidates_untrusted>[小明]: newest candidate</proactive_candidates_untrusted>
+</probe_context_data>
+```
+
+In the probe path, these elements contain XML-escaped plain transcript text rather than nested `message` nodes. Only `proactive_candidates_untrusted` may activate the probe; `recent_history_untrusted` is reference-only. The full proactive generation path separately prefixes this same rule to a serialized `recent_history` candidate block while passing older history as context.
 
 ### `current_turn`
 
@@ -78,25 +91,27 @@ Rules:
 
 ### `media`
 
-Possible children:
-
-- `image`
-- `sticker`
-- `media_item` (for video/gif/video_note/document/audio thumbnail descriptors)
+Possible children include `image`, `sticker`, `video`, `animation`, `video_note`, `document`, and `audio`. For a media-only replied-to message, reply media is represented separately as `quoted_media`; if that message has text or a caption, `quoted_text` is emitted instead.
 
 Examples:
 
 ```xml
 <media>
-  <image><description>...</description></image>
-  <sticker><emoji>😭</emoji></sticker>
-  <media_item label="视频" thumbnail_only="true"><description>...</description></media_item>
+  <image file_id="AgAC..." />
+  <sticker file_id="CAAC..." emoji="😭" />
+  <video file_id="BAAC..." thumbnail_file_id="AAMCA..." />
+  <animation file_id="CgAC..." thumbnail_file_id="AAMCA..." />
+  <video_note file_id="DQAC..." thumbnail_file_id="AAMCA..." />
+  <document file_id="BQAC..." thumbnail_file_id="AAMCA..." filename="notes.pdf" />
+  <audio file_id="CQAC..." thumbnail_file_id="AAMCA..." title="track" />
 </media>
 ```
 
 Rules:
 
-- `thumbnail_only="true"` means descriptor is from preview thumbnail/cover, not full media content
+- These are untrusted raw Telegram references, not precomputed descriptions
+- Full photos use `file_id`; other media and stickers normally use `thumbnail_file_id` for vision
+- Missing optional attributes are serialized as empty strings
 
 ### XML Escaping
 

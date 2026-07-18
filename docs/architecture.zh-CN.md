@@ -1,10 +1,10 @@
 # 架构
 
-nyarbot 是一个用 TypeScript (ESM) 编写的单群组 Telegram 机器人，拥有可配置的猫娘人设。
+nyarbot 是一个用 TypeScript (ESM) 编写的 Telegram 机器人，拥有单个目标群 runtime、独立管理员私聊路径和可配置猫娘人设。
 
 ## 单群 Runtime
 
-nyarbot 现在仍然只服务 `TG_GROUP_ID` 一个群，但 AI 调度不再由 handler 直接启动。`src/libs/group-runtime.ts` 是全局单群 runtime，负责：
+群聊交互只服务 `TG_GROUP_ID`，支持的管理员私聊命令独立处理。AI 调度不再由 handler 直接启动；`src/libs/group-runtime.ts` 是单群 runtime，负责：
 
 - message-level dedup：按 `chatId + messageId + editDate` 去重，补足 Telegram `update_id` 去重之外的语义。
 - abuse gates：重复文本、单用户突发刷屏、URL flood、媒体 flood 会被记录为 `ignoredReason`，被限流的消息不会触发模型。
@@ -25,37 +25,28 @@ app.ts（入口：初始化 Firebase、创建 Bot、注册 handler、启动主�
 handlers/index.ts（setupHandlers）
     │
     ├─ 更新去重（update-dedup.ts）
-    ├─ 群组过滤（tgGroupId）
+    ├─ 管理员私聊分支
+    │     ├─ /status、/reset、/diary、/wordcloud
+    │     └─ /diaryobs、/diaryshow、/diaryedit、/diaryretract、/diaryregen
+    ├─ 目标群过滤（tgGroupId）
+    ├─ 群内快速命令
+    │     ├─ /nighty → 立即确认 + 后台写入时间戳
+    │     └─ /roll → 立即报结果；后台提取内容并 scheduleCommandTurn()
     ├─ 用户解析（firestore.ts → 60秒进程内缓存）
     ├─ 内容提取（extract-content.ts）
     │     ├─ URL 检测（entity + 正则回退）
-    │     ├─ 图片：缓存查询 → 下载 → Gemini 描述
-    │     │     （含回复消息中的图片：msg.reply_to_message.photo）
-    │     ├─ 媒体缩略图：视频/动画/视频消息/文件/音频
-    │     │     → 缓存查询（缩略图 file_id）→ 下载缩略图
-    │     │     → Gemini 描述（共享图片缓存）
-    │     │     （含回复中的媒体；无需 ffmpeg — Telegram 预生成缩略图）
-    │     └─ 贴纸：从硬编码 emoji 表查找 → 直接发送 file_id
-    ├─ 缓冲区推送（conversation-buffer.ts）
-    │     └─ 图片：推送行内描述（"[图片: 描述]" 而非 "[图片]"）
-    │     └─ 媒体：推送类型标签描述（"[视频: 描述]"、"[GIF动画: 描述]" 等）
-    ├─ 图片缓存（firestore.ts）—— 所有图片在 Gemini 描述后立即缓存
+    │     └─ 保留原始 file_id / thumbnail_file_id / 贴纸 emoji 引用
+    ├─ 本地词云持久化（local-wordcloud-store.ts）
+    │     ├─ 仅目标群活人消息
+    │     ├─ 命令消息跳过；编辑成命令时删除旧记录
+    │     ├─ 编辑消息按相同 message_id 覆盖
+    │     └─ 转发消息打标，仅参与活跃榜不参与词云正文
+    ├─ 缓冲区推送（conversation-buffer.ts；原始媒体/链接标记）
     ├─ 命令路由（match-command.ts）
-    │     ├─ /help
-    │     ├─ /love → generateLoveResponse()
-    │     ├─ /status（管理员）
-    │     └─ /reset（管理员）
-    ├─ 晚安检测 → setNightyTimestamp()
+    │     └─ /help、/love、/shock、/stroke
     ├─ 早安逻辑 → generateMorningGreeting()
     ├─ 触发检测（@提及 / 回复bot）
-    ├─ 等待 URL 内容（ai.ts → fetchUrlContent）
-    │     ├─ Twitter/X 推文链接 → fxtwitter API（免费）→ Gemini 配图描述
-    │     ├─ 其他链接 → 直接抓取（提取 <title> + <meta description>）
-    │     └─ 回退 → Tavily Extract（AI 摘要）
-    ├─ URL 内容缓冲区推送
-    │     ├─ 成功抓取 → 作为系统条目推送（"[推文]" 或 "[链接]"）
-    │     └─ 抓取失败 → 静默忽略（无缓冲区条目，无主动插话噪音）
-    ├─ 新鲜图片描述（ai.ts → Gemini）
+    ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
     │     └─ simple → flashNoThinkModel
     │     └─ complex → flashThinkModel
@@ -69,6 +60,9 @@ handlers/index.ts（setupHandlers）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
 │     │           describeTelegramMedia、fetchUrlContent、startSubagent
+    │     ├─ 富内容按需读取；只做会话缓存，不写 Firestore 图片缓存
+    │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
+    │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
     │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
     │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
     │     ├─ 沉默重试（simple/complex 1 次；tech 0 次）
@@ -76,9 +70,10 @@ handlers/index.ts（setupHandlers）
     │     ├─ 格式化输出（formatForTelegramHtml：Markdown → Telegram HTML）
     │     └─ 通过 sendAiMessages 发送（打字指示、消息间隔、贴纸分发）
     └─ 主动插话检查器（proactive.ts，间隔可由环境变量配置）
+          ├─ 最新 bot 输出之后才是候选消息窗口
           ├─ 阶段一：probeGate() — 廉价模型判断话题相关性
-          └─ 阶段二：generateAiTurn() — 完整模型生成回复
-                └─ ProactiveCallbacks：sendText、sendSticker、sendChatAction
+          ├─ 阶段二：generateAiTurn() — 完整模型生成回复
+          └─ 发送前及多消息之间检查 activity revision，取消过时输出
 ```
 
 ## 工具调用架构
@@ -87,19 +82,19 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 
 ### 可用工具
 
-| 工具                    | 用途                                                                              |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| `send_message`          | 向群聊发送消息（必须调用才能说话；可多次调用）                                    |
-| `dismiss`               | 选择不回复（二选一：说话/沉默）                                                   |
-| `saveMemory`            | 记录关于群友的记忆（uid 须来自最近群友列表）                                      |
-| `setNickname`           | 设置/更新群友的昵称                                                               |
-| `deleteMemory`          | 删除关于群友的指定记忆                                                            |
-| `sendSticker`           | 通过 emoji 直接选择硬编码贴纸。无效 emoji 会取消贴纸发送，不再回退到智能选择。    |
-| `describeTelegramMedia` | 按需通过 `file_id` / `thumbnail_file_id` 获取媒体描述（仅被动触发轮次可用）。     |
-| `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                               |
-| `writeDiary`            | 以自然语言记录关于当前对话的日记观察笔记。存储于 Firestore `diary/{YYYY-MM-DD}`。 |
-| `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。           |
-| `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。          |
+| 工具                    | 用途                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `send_message`          | 向群聊发送消息（必须调用才能说话；可多次调用）                                 |
+| `dismiss`               | 选择不回复（二选一：说话/沉默）                                                |
+| `saveMemory`            | 记录关于群友的记忆（uid 须来自最近群友列表）                                   |
+| `setNickname`           | 设置/更新群友的昵称                                                            |
+| `deleteMemory`          | 删除关于群友的指定记忆                                                         |
+| `sendSticker`           | 通过 emoji 直接选择硬编码贴纸。无效 emoji 会取消贴纸发送，不再回退到智能选择。 |
+| `describeTelegramMedia` | 被动触发时按需描述媒体；主动路径仅可查看最新候选中选出的图片。                 |
+| `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                            |
+| `writeDiary`            | 在 Firestore `diaryObservations` 创建、更新或撤回结构化观察。                  |
+| `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。        |
+| `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。       |
 
 ### AiTurnResult
 
@@ -120,48 +115,40 @@ type AiTurnResult =
 
 如果所有重试仍然沉默：
 
-- 如果 `rawText` 存在 → 作为单条消息发送 + 随机贴纸
+- 如果 `rawText` 存在 → 先尝试救成真实 `send_message`；成功时只发送救回的消息，不附贴纸
+- 如果 rescue 失败 → 发送原始草稿 + 随机贴纸
 - 如果 `rawText` 为空 → 只发送随机贴纸（作为回复）
 
 ## AI 模型路由
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  DeepSeek API                           │
-│  ┌──────────────────┐  ┌─────────────────────────────┐ │
-│  │  deepseek-v4-flash                               │ │
-│  │  ┌──────────────┐ │  ┌──────────────────────────┐ │ │
-│  │  │ 无思考模式    │ │  │ 思考模式（enabled）        │ │ │
-│  │  │ (disabled)   │ │  │                          │ │ │
-│  │  │              │ │  │                          │ │ │
-│  │  │ • 消息分类   │ │  │ • 复杂对话                │ │ │
-│  │  │ • 早安问候   │ │  │ • 工具调用回复             │ │ │
-│  │  │ • 告白好感度评分 │ │  │   （send_message、dismiss │ │ │
-│  │  │ • 图片描述   │ │  │    saveMemory 等）        │ │ │
-│  │  │ • URL 描述   │ │  │                          │ │ │
-│  │  │ • 探测门     │ │  │                          │ │ │
-│  │  └──────────────┘ │  └──────────────────────────┘ │ │
-│  └──────────────────┘                                │ │
-│  ┌──────────────────┐                                │ │
-│  │  deepseek-v4-pro  │                                │ │
-│  │  思考模式（enabled）│                                │ │
-│  │                    │                                │ │
-│  │  • 技术问题        │                                │ │
-│  └──────────────────┘                                │ │
-└─────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────┐
-│  Cloudflare AI Gateway → Gemini 3 Flash Preview         │
-│                                                          │
-│  • describeImage() — 为 DeepSeek 生成图片描述            │
-│  • describeTweetPhotos() — 推文配图描述                  │
-└─────────────────────────────────────────────────────────┘
-```
+| Provider/model                                  | 用途                                     |
+| ----------------------------------------------- | ---------------------------------------- |
+| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测 |
+| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                   |
+| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次            |
+| Gemini 3.1 Flash Lite（Cloudflare AI Gateway）  | Telegram/推文图片理解、完整日记导读      |
+| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览       |
 
 ### 为什么用两个提供商？
 
 - **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 3 Flash Preview** 通过 Cloudflare AI Gateway 处理图片理解。描述在请求时生成，以 `[图片: 描述]` 文本形式注入到 DeepSeek 的提示词中。
+- **Gemini 3.1 Flash Lite** 经 Cloudflare AI Gateway 处理图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+
+## 本地路由
+
+不是所有触发轮次都先跑 `classifyMessage()`。handler 会先做一层轻量本地判断：
+
+- 短促闲聊会直接路由到 `simple`
+- 技术/数学/学术信号会直接路由到 `tech`
+- 明确要求“认真/详细/解释”的请求会更偏向 `complex` + `preferAdvisor`
+- 当前事实查询会直接标记 `needsSearch`
+- 轻贴纸闲聊会关闭本轮持久化工具，避免无意义写记忆/写日记
+
+`preferAdvisor` 只是提示主轮次先调用 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
+
+## 超时保护
+
+所有关键模型调用都带总超时，避免单轮卡住 `typing` / `running`：主模型、subagent、视觉描述、日记生成和外部 fetch 都有超时兜底。
 
 ### 强制联网搜索
 
@@ -179,6 +166,18 @@ type AiTurnResult =
 - **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
 - **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
 - **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
+
+## 词云流水线
+
+- `src/services/local-wordcloud-store.ts` 用 SQLite 保存最近 10 天群消息和词云发布记录。
+- `src/libs/wordcloud.ts` 负责分词、词频统计、布局、渲染和发布。
+- 运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场，通过 SQLite slot marker 去重；错过的中午场不补发。
+- 00:02 后发布昨日最终版，重启后也会 catch up。
+- PNG 保存在 SQLite 同目录的 `wordcloud-artifacts/`，生成/发布最多重试三次；昨日最终版会复用于日记发布。
+- 词频对单条消息按集合去重，同一条消息里相同词只算 1 次。
+- 正文词云会过滤转发文本、明显负面词和常见虚词；活跃榜仍统计转发消息。
+- 渲染内置完整 Source Han Sans 可变字体，保证简中、繁中、日文、韩文不掉成方块字。
+- 当前默认布局是“中心骨架优先”：高频词先占中间，少量短中文词可竖排补缝。
 
 ## 记忆与日记
 
@@ -214,7 +213,7 @@ type AiTurnResult =
 ## 消息输出管道
 
 1. **`generateAiTurn()`** 返回 `AiTurnResult`（`send` 或 `dismiss`）
-2. **沉默重试**（仅触发路径）：最多 3 次重试，逐级加强提示
+2. **沉默重试**（仅触发路径）：simple/complex 1 次，tech 不重试
 3. **`sendAiMessages()`**：
    - 通过 `formatForTelegramHtml()` 格式化每条消息（Markdown → Telegram HTML，LaTeX → Unicode）
    - 第一条消息回复用户消息；后续消息独立发送
@@ -233,10 +232,10 @@ type AiTurnResult =
 | 中（3-6 条） | 3-6            | 180 秒   |
 | 低（1-2 条） | 1-2            | 360 秒   |
 
-如果冷却时间已过：
+冷却结束后，checker 先找到最近一次 bot 输出，只把其后的用户消息当作可回复候选，之前的历史只能参考。摄取或命令轮次运行时不启动主动回复，并记录 activity revision，在 probe 后、发送前和多消息之间重复校验。
 
-1. **阶段一——探测**：`probeGate()` 使用廉价模型（`flashNoThink`）配合 `buildProbeSystemPrompt()` 和轻量 `dismiss`/`send_message` 工具。如果探测选择沉默，停止。
-2. **阶段二——完整模型**：如果探测激活，`generateAiTurn()` 使用完整模型和所有工具运行，`tier: "simple"`、`systemHint: null`。
+1. **阶段一——探测**：`probeGate()` 使用廉价模型（`flashNoThink`）配合 `buildProbeSystemPrompt()` 和轻量 `dismiss`/`send_message` 工具。若探测沉默或活动已变化，停止。
+2. **阶段二——完整模型**：若探测激活，`generateAiTurn()` 关闭持久化工具，仅按候选图片情况开放视觉理解；任何新的用户或 bot 活动都会使结果失效。
 
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。
 
@@ -244,36 +243,39 @@ type AiTurnResult =
 
 ## 日记系统
 
-Bot 通过 `writeDiary` AI 工具记录对话观察笔记。由模型决定什么值得记录——无频率限制，无规则提取。
+Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终是独立的工作记忆，不会替代日记归档。
 
 ### 观察记录
 
-- `writeDiary` 工具将自然语言观察写入 Firestore `diary/{YYYY-MM-DD}`，使用 `arrayUnion`。
-- 每条观察包含 `ts`（毫秒时间戳）和 `content`（观察文本）。
-- 观察按日期累积在同一文档中。
+- `writeDiary` 在 `diaryObservations` 中创建、更新、取代或撤回 `DiaryObservationV2`。
+- 记录包含事件、即时反应、解释、置信度、显著性、状态，以及可选的稳定 subject uid/name/username 快照。
+- 去重会考虑 subject uid，避免把不同人物的观察误合并。
 
 ### 午夜生成
 
-一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检测日期变化：
+一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检测日期变化。进程必须实际观察到跨天；与词云最终版不同，日记目前没有启动补发：
 
-1. 日期变更时，从 Firestore 获取昨天的日记条目。
-2. 如果有条目，调用 DeepSeek v4 Pro（`proThinkModel`）以系统提示词引导撰写自然的猫娘第一人称日记。
-3. 生成的日记保存到 Firestore（`diary` 字段 + `generatedAt` 时间戳）。
-4. 如果配置了 `GITHUB_TOKEN` 和 `GITHUB_REPO`，日记通过 GitHub Content API（`src/services/github.ts`）推送到目标 Hexo 仓库。
-5. GitHub 推送触发 GitHub Actions 工作流，构建并部署到 GitHub Pages。
+1. 00:02 后选取昨天最多 12 条 active observations；旧的 `diary/{date}.entries` 只作为回退输入。
+2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 Firestore。
+3. 生成或复用昨日词云。推送 Telegram 频道时，日记不超过 1024 字符则作为图片 caption，否则图片后另发正文。
+4. GitHub 发布通过 blobs/tree/commit 一次提交 Markdown 与可选的 `source/img/diary/` 图片，再非 force 更新 `main`；Markdown 使用 `/img/diary/...` 根路径。
+5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.1 Flash Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
 
-### /diary 管理员命令
+### 日记管理员命令
 
-`/diary` 命令（私聊，仅管理员）使用相同的 `generateDiaryForDate()` 函数按需从今天的条目生成日记。仅为预览——不保存到 Firestore，不推送到 GitHub。
+管理员私聊提供 `/diary`、`/diaryregen [date]` 预览，以及 `/diaryobs`、`/diaryshow`、`/diaryedit`、`/diaryretract` 观察管理。预览/重新生成不会保存或发布日记正文。
 
 ### Firestore Schema
 
 ```
 diary/{YYYY-MM-DD}
-  ├── date: string（如 "2026-05-13"）
-  ├── entries: DiaryEntry[]  （via arrayUnion）
-  ├── diary?: string         （生成的日记文本）
-  └── generatedAt?: number   （时间戳）
+  ├── entries?: DiaryEntry[]              （旧格式回退）
+  ├── diary?: string
+  ├── generatedAt?: number
+  └── generationRecords?: DiaryGenerationRecord[]
+
+diaryObservations/{id}
+  └── DiaryObservationV2
 ```
 
 ### 时区

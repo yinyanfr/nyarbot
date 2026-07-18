@@ -63,7 +63,7 @@ DeepSeek's Chat Completions API does not support `json_schema` response_format (
 
 ### Why two-stage proactive probe?
 
-Running the full model for every proactive check is expensive. The probe gate uses `flashNoThinkModel` (cheapest and fastest) with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full model runs with all tools. This saves ~80% of proactive compute on average.
+Running the full model for every proactive check is expensive. The probe gate uses `flashNoThinkModel` with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full model runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels probe/generation output when new user or bot activity arrives.
 
 ### Why `formatForTelegramHtml`?
 
@@ -87,6 +87,8 @@ Runtime defaults:
 - per-user burst limit: more than 8 messages in 30s, then 60s cooldown
 - URL flood: more than 3 URLs in 60s disables search/fetch triggering
 - media flood: more than 5 media items in 60s disables media description for 5 minutes
+
+`/roll` uses `scheduleCommandTurn()`: deterministic parsing and the numeric result stay immediate, while the AI reaction is serialized with passive/proactive turns. `/nighty` also has a fast path before normal user/media processing and persists its timestamp in the background.
 
 ### Why static system prompt?
 
@@ -114,7 +116,7 @@ Diary is literary archive written by `writeDiary` and the midnight diary flow. I
 
 ### Why a diary system?
 
-The bot records conversational observations via the `writeDiary` AI tool rather than post-hoc extraction. The model decides what's worth recording based on the conversation context — no rule-based triggers or frequency limits. At midnight (based on `APP_TIMEZONE`), observations are consolidated into a natural first-person catgirl diary using DeepSeek v4 Pro with thinking. The generated diary is pushed to a Hexo blog via GitHub Content API for public reading.
+The bot records structured `DiaryObservationV2` records via `writeDiary`, including optional stable subject identity. When the running timer observes rollover, generation begins after 00:02; there is currently no startup catch-up. Gemini 3.1 Pro Preview selects and consolidates active observations into a first-person diary. The final wordcloud is reused for Telegram/blog publishing; GitHub blobs, tree, Markdown, and image are batched into one Git Data API commit. Pages is polled only after configured GitHub publishing succeeds; Gemini 3.1 Flash Lite reads the full diary for the group notice regardless of publishing availability.
 
 ### Why dayjs for date handling?
 
@@ -138,9 +140,9 @@ The logger (`src/libs/logger.ts`) uses pino with `pino.multistream()` in both de
 
 This avoids the previous monkey-patching of `logger.error`/`.warn` and the fragile `as unknown as NodeJS.WritableStream` cast. The `AdminDmHandler` returns a plain `{ write(msg: string): void }` adapter compatible with pino's multistream.
 
-### Image caching timing
+### On-demand media handling
 
-Images are described via Gemini and cached to Firestore immediately in the main handler — before the `if (!isMentioned && !isRepliedToBot) return` gate. Previously caching was deferred to `handleAiTurn()`, meaning non-triggered images were described but never cached. This ensures proactive context is always available.
+Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead of eagerly describing media. Triggered turns inspect full photos or thumbnails on demand; candidate images may also be prefetched for proactive turns. Downloads are MIME-sniffed from bytes, animated sticker payloads are never passed as images, and successful descriptions use only a bounded in-process session cache.
 
 ### URL fetching (three-tier)
 
@@ -150,7 +152,7 @@ Images are described via Gemini and cached to Firestore immediately in the main 
 2. **Direct fetch** → HTML title/meta extraction
 3. **Tavily Extract** → fallback
 
-Only successful results enter the conversation buffer; failed fetches are silently ignored. Raw URLs never enter the buffer to avoid proactive noise.
+URL summaries are cached only in-process. Lightweight URL markers remain in history, while proactive URL fetching stays disabled.
 
 ## Firestore Schema
 
@@ -166,30 +168,41 @@ interface User {
 }
 ```
 
-### `images/{fileId}`
-
-```typescript
-interface CachedImage {
-  fileId: string; // Telegram file_id
-  description: string; // Gemini-generated Chinese description
-  cachedAt: number; // ms since epoch, 30-day TTL
-}
-```
-
-### `diary/{date}`
+### Diary collections
 
 ```typescript
 interface DiaryEntry {
-  ts: number; // ms since epoch
-  content: string; // natural-language observation
+  ts: number;
+  content: string;
 }
 
-// Document fields:
-// date: string (e.g., "2026-05-13")
-// entries: DiaryEntry[] (via arrayUnion)
+// Abbreviated; see src/global.d.ts for optional content/source fields.
+interface DiaryObservationV2 {
+  schemaVersion: 2;
+  id: string;
+  recordedAt: string;
+  localDate: string;
+  subjectUid?: string;
+  subjectName?: string;
+  subjectUsername?: string;
+  event: string;
+  confidence: "fact" | "inference" | "uncertain";
+  salience: 1 | 2 | 3 | 4 | 5;
+  status: "active" | "superseded" | "retracted";
+}
+
+// diary/{date}
+// entries?: DiaryEntry[] (legacy fallback)
 // diary?: string (generated diary text)
 // generatedAt?: number (ms since epoch)
+// generationRecords?: DiaryGenerationRecord[]
+
+// diaryObservations/{id}: DiaryObservationV2
 ```
+
+## Wordcloud Publishing
+
+The local SQLite store tracks noon, evening, and final-daily publication slots. While running, noon is attempted from 12:00–17:59 and evening after 18:00; a missed noon slot is not backfilled. Generated artifacts live in `wordcloud-artifacts/`, generation/publishing retries up to three times, and the previous-day final image is reused by diary channel and GitHub publishing.
 
 ### Runtime collections
 

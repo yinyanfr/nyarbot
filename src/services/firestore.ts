@@ -212,6 +212,9 @@ function isValidDiaryObservation(data: unknown): data is DiaryObservationV2 {
     typeof d.id === "string" &&
     typeof d.recordedAt === "string" &&
     typeof d.localDate === "string" &&
+    (d.subjectUid === undefined || typeof d.subjectUid === "string") &&
+    (d.subjectName === undefined || typeof d.subjectName === "string") &&
+    (d.subjectUsername === undefined || typeof d.subjectUsername === "string") &&
     typeof d.event === "string" &&
     (d.occurredAt === undefined || typeof d.occurredAt === "string") &&
     (d.exactQuote === undefined || typeof d.exactQuote === "string") &&
@@ -247,6 +250,15 @@ function mergeObservationFields(
     ...((patch.occurredAt ?? existing.occurredAt)
       ? { occurredAt: patch.occurredAt ?? existing.occurredAt }
       : {}),
+    ...((patch.subjectUid ?? existing.subjectUid)
+      ? { subjectUid: patch.subjectUid ?? existing.subjectUid }
+      : {}),
+    ...((patch.subjectName ?? existing.subjectName)
+      ? { subjectName: patch.subjectName ?? existing.subjectName }
+      : {}),
+    ...((patch.subjectUsername ?? existing.subjectUsername)
+      ? { subjectUsername: patch.subjectUsername ?? existing.subjectUsername }
+      : {}),
     event: patch.event,
     ...((patch.exactQuote ?? existing.exactQuote)
       ? { exactQuote: patch.exactQuote ?? existing.exactQuote }
@@ -281,6 +293,7 @@ function toObservationDoc(observation: DiaryObservationV2): Record<string, unkno
     observation.localDate,
     observation.event,
     observation.sourceRefs ?? [],
+    observation.subjectUid,
   );
   return stripUndefined({ ...observation, fingerprint });
 }
@@ -362,6 +375,9 @@ function shouldMergeObservationBySharedSource(
   candidate: DiaryObservationV2,
   draft: DiaryObservationDraft,
 ): boolean {
+  if (candidate.subjectUid && draft.subjectUid && candidate.subjectUid !== draft.subjectUid) {
+    return false;
+  }
   const candidateRefs = new Set(candidate.sourceRefs ?? []);
   const draftRefs = new Set(draft.sourceRefs ?? []);
   if (candidateRefs.size === 0 || draftRefs.size === 0) return false;
@@ -408,6 +424,15 @@ export async function createDiaryObservation(params: {
       localDate: duplicate.localDate,
       recordedAt: duplicate.recordedAt,
       status: "active",
+      ...(duplicate.subjectUid || sanitized.subjectUid
+        ? { subjectUid: sanitized.subjectUid ?? duplicate.subjectUid }
+        : {}),
+      ...(duplicate.subjectName || sanitized.subjectName
+        ? { subjectName: sanitized.subjectName ?? duplicate.subjectName }
+        : {}),
+      ...(duplicate.subjectUsername || sanitized.subjectUsername
+        ? { subjectUsername: sanitized.subjectUsername ?? duplicate.subjectUsername }
+        : {}),
       ...(duplicate.supersedesId ? { supersedesId: duplicate.supersedesId } : {}),
     };
     await db().collection("diaryObservations").doc(duplicate.id).set(toObservationDoc(next));
@@ -419,6 +444,9 @@ export async function createDiaryObservation(params: {
     id: globalThis.crypto.randomUUID(),
     recordedAt: new Date().toISOString(),
     localDate,
+    ...(sanitized.subjectUid ? { subjectUid: sanitized.subjectUid } : {}),
+    ...(sanitized.subjectName ? { subjectName: sanitized.subjectName } : {}),
+    ...(sanitized.subjectUsername ? { subjectUsername: sanitized.subjectUsername } : {}),
     event: sanitized.event,
     confidence: sanitized.confidence,
     salience: sanitized.salience,
@@ -448,6 +476,15 @@ export async function updateDiaryObservation(
   const base = sanitizeDiaryObservationDraft({
     ...((patch.occurredAt ?? current.occurredAt)
       ? { occurredAt: patch.occurredAt ?? current.occurredAt }
+      : {}),
+    ...((patch.subjectUid ?? current.subjectUid)
+      ? { subjectUid: patch.subjectUid ?? current.subjectUid }
+      : {}),
+    ...((patch.subjectName ?? current.subjectName)
+      ? { subjectName: patch.subjectName ?? current.subjectName }
+      : {}),
+    ...((patch.subjectUsername ?? current.subjectUsername)
+      ? { subjectUsername: patch.subjectUsername ?? current.subjectUsername }
       : {}),
     event: patch.event ?? current.event,
     ...((patch.exactQuote ?? current.exactQuote)
@@ -480,6 +517,9 @@ export async function updateDiaryObservation(
     id: globalThis.crypto.randomUUID(),
     recordedAt: new Date().toISOString(),
     localDate: resolveObservationDate(base.occurredAt),
+    ...(base.subjectUid ? { subjectUid: base.subjectUid } : {}),
+    ...(base.subjectName ? { subjectName: base.subjectName } : {}),
+    ...(base.subjectUsername ? { subjectUsername: base.subjectUsername } : {}),
     event: base.event,
     confidence: base.confidence,
     salience: base.salience,

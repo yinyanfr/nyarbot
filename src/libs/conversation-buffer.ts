@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
+import type { RuntimeMediaRef } from "../services/firestore.js";
 import { sanitizePromptText } from "./prompt-safety.js";
 
 export type HistoryEntryKind =
@@ -10,19 +11,21 @@ export type HistoryEntryKind =
   | "command_love"
   | "command_shock"
   | "command_stroke"
+  | "command_roll"
   | "command_reset"
   | "command_status"
   | "command_nighty"
   | "morning_greeting"
   | "diary_notification";
 
-interface HistoryEntry {
+export interface HistoryEntry {
   uid: string;
   name: string;
   username?: string;
   text: string;
   timestamp: number;
   kind?: HistoryEntryKind;
+  mediaRefs?: RuntimeMediaRef[];
 }
 
 const SAVE_PATH = path.resolve(config.conversationBufferPath);
@@ -48,6 +51,7 @@ export function pushMessage(
   text: string,
   username?: string,
   kind: HistoryEntryKind = "normal",
+  mediaRefs: RuntimeMediaRef[] = [],
 ): void {
   if (!buffers.has(groupId)) {
     buffers.set(groupId, []);
@@ -60,6 +64,7 @@ export function pushMessage(
     text: text.slice(0, MAX_TEXT_LEN),
     timestamp: Date.now(),
     ...(kind !== "normal" ? { kind } : {}),
+    ...(mediaRefs.length > 0 ? { mediaRefs } : {}),
   });
   while (buffer.length > MAX_HISTORY) {
     buffer.shift();

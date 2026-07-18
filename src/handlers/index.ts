@@ -1,5 +1,6 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import type { Message } from "grammy/types";
+import OpenCC from "opencc-js";
 import config from "../configs/env.js";
 import {
   getDiaryObservation,
@@ -13,6 +14,7 @@ import {
   countUsersWithMemories,
   updateDiaryObservation,
 } from "../services/firestore.js";
+import { deleteStoredMessage, upsertGroupMessage } from "../services/local-wordcloud-store.js";
 import {
   classifyMessage,
   generateAiTurn,
@@ -36,6 +38,7 @@ import {
 } from "../libs/stickers.js";
 import { touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
+import { generateWordcloudPreviewForDateWithRetry } from "../libs/wordcloud.js";
 import { todayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
@@ -63,9 +66,199 @@ const RESET_REPLIES = [
   "咳 刚才那段我不记得了喵",
 ] as const;
 
+const SIMPLE_CASUAL_MESSAGE_REGEX =
+  /^(?:在吗|在嘛|早|早安|晚安|午安|下午好|晚上好|哈哈+|哈+|草+|6+|666+|笑死|绷不住|确实|懂了|好耶|好哦|好喔|好吧|谢谢|谢啦|牛|可爱|可爱捏|什么鬼|啥|这啥|真的假的|啊\??|哦+|喵+|？+|\?+|!+|！+|嗯+|呜+|欸+|诶+)$/u;
+const DETAILED_REQUEST_REGEX = /认真|详细|解释(?:一下|清楚|清楚点)?|展开讲|细说|具体说说|说详细点/u;
+const REALTIME_REQUEST_REGEX =
+  /最新|刚刚发生|实时(?:消息|资讯|信息|数据)?|新闻|版本(?:号)?|更新(?:了没|了吗|内容)?|价格|股价|汇率|天气|日期|几点|时间|几号|星期几|发布(?:了没|了吗|时间)?|官网/u;
+const CURRENT_FACT_QUESTION_REGEX =
+  /(?:现在(?:几点|几[号點]|是什么时间|幾點|幾號)|今天(?:几号|星期几|多少号|日期|天氣|天气)|(?:現在|今天).*(?:幾點|几點|幾號|几号|星期幾|星期几|天氣|天气))/u;
+const TECHNICAL_SIGNAL_REGEX =
+  /```|`[^`]+`|\b(?:api|sdk|json|sql|http|https|node|npm|pnpm|yarn|git|docker|typescript|javascript|python|java|rust|go|react|vue|astro|firebase|eslint|prettier|pm2|linux|nginx|redis)\b|(?:报错|报錯|错误|錯誤|异常|例外|堆栈|堆疊|代码|代碼|函数|函數|编译|編譯|语法|語法|类型|類型|接口|介面|实现|實現|性能|架构|原理|命令|脚本|日誌|日志|矩阵|矩陣|微积分|微積分|线代|線代|高数|高數|数学|數學|证明|證明|定理|极限|極限|导数|導數|积分|積分|概率|機率|統計|统计|traceback|exception|stack trace|tsconfig|package\.json|pnpm-lock|npm run|import |export |const |let |var |class )/iu;
+const traditionalToSimplified = OpenCC.Converter({ from: "t", to: "cn" });
+
+interface LocalAiRoute {
+  tier: "simple" | "complex" | "tech";
+  needsSearch: boolean;
+  preferAdvisor: boolean;
+  allowPersistentTools: boolean;
+  usedLocalRoute: boolean;
+  reason: string;
+}
+
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
   return RESET_REPLIES[idx] ?? RESET_REPLIES[0];
+}
+
+function isCommandLikeMessage(
+  entities: { type: string; offset: number; length: number }[],
+): boolean {
+  return entities.some((entity) => entity.type === "bot_command");
+}
+
+function isForwardedMessage(msg: Message): boolean {
+  return msg.forward_origin != null || msg.is_automatic_forward === true;
+}
+
+async function persistWordcloudMessage(params: {
+  chatId: string;
+  messageId: number;
+  userId: string;
+  displayName: string;
+  username?: string;
+  isBot: boolean;
+  isForwarded: boolean;
+  text: string;
+  createdAt: number;
+  editedAt?: number;
+}): Promise<void> {
+  await upsertGroupMessage({
+    chatId: params.chatId,
+    messageId: params.messageId,
+    userId: params.userId,
+    displayName: params.displayName,
+    ...(params.username ? { username: params.username } : {}),
+    isBot: params.isBot,
+    isForwarded: params.isForwarded,
+    text: params.text,
+    createdAt: params.createdAt,
+    ...(params.editedAt ? { editedAt: params.editedAt } : {}),
+  });
+}
+
+function countSentenceLikeSegments(text: string): number {
+  return text
+    .split(/[\n。！？!?]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean).length;
+}
+
+function normalizeLocalRouteText(text: string): string {
+  return traditionalToSimplified(text);
+}
+
+function decideLocalAiRoute(params: {
+  rawText: string;
+  isMentioned: boolean;
+  isRepliedToBot: boolean;
+  urls: string[];
+  mediaRefs: RichMediaRef[];
+}): LocalAiRoute | null {
+  const { rawText, isMentioned, isRepliedToBot, urls, mediaRefs } = params;
+  const normalized = normalizeLocalRouteText(rawText).replace(/\s+/g, " ").trim();
+  const currentMedia = mediaRefs.filter((media) => media.source === "current");
+  const hasCurrentMedia = currentMedia.length > 0;
+  const hasNonStickerMedia = currentMedia.some((media) => media.type !== "sticker");
+  const hasUrls = urls.length > 0;
+  const asksCurrentFact = CURRENT_FACT_QUESTION_REGEX.test(normalized);
+  const needsSearch = hasUrls || REALTIME_REQUEST_REGEX.test(normalized) || asksCurrentFact;
+  const looksTechnical = TECHNICAL_SIGNAL_REGEX.test(normalized);
+  const wantsDetailedAnswer = DETAILED_REQUEST_REGEX.test(normalized);
+  const isTriggered = isMentioned || isRepliedToBot;
+
+  if (looksTechnical) {
+    return {
+      tier: "tech",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "technical_signal",
+    };
+  }
+
+  if (wantsDetailedAnswer) {
+    return {
+      tier: "complex",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "explicit_detailed_request",
+    };
+  }
+
+  if (hasNonStickerMedia) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "current_non_sticker_media_present",
+    };
+  }
+
+  if (hasCurrentMedia && !hasUrls && normalized.length <= 16) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: false,
+      usedLocalRoute: true,
+      reason: "sticker_or_light_media_chat",
+    };
+  }
+
+  const shortLen = normalized.length > 0 && normalized.length <= 24;
+  const mediumLen = normalized.length > 0 && normalized.length <= 48;
+  const shortSentenceCount = countSentenceLikeSegments(normalized) <= 2;
+  const mediumSentenceCount = countSentenceLikeSegments(normalized) <= 3;
+  const looksCasual = SIMPLE_CASUAL_MESSAGE_REGEX.test(normalized);
+  if (
+    isTriggered &&
+    !hasUrls &&
+    !needsSearch &&
+    !hasCurrentMedia &&
+    shortLen &&
+    shortSentenceCount &&
+    looksCasual
+  ) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: false,
+      usedLocalRoute: true,
+      reason: "short_casual_triggered_chat",
+    };
+  }
+
+  if (isTriggered && !hasUrls && !hasCurrentMedia && shortLen && shortSentenceCount) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "short_triggered_chat",
+    };
+  }
+
+  if (isTriggered && !hasUrls && !hasCurrentMedia && mediumLen && mediumSentenceCount) {
+    return {
+      tier: "simple",
+      needsSearch,
+      preferAdvisor: false,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "medium_triggered_chat",
+    };
+  }
+
+  if (needsSearch) {
+    return {
+      tier: "complex",
+      needsSearch: true,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "realtime_or_search_request",
+    };
+  }
+
+  return null;
 }
 
 function isReplyTargetMissingError(err: unknown): boolean {
@@ -168,6 +361,7 @@ function formatDiaryObservationSummary(
         `status=${item.status}`,
         `confidence=${item.confidence}`,
         `salience=${item.salience}`,
+        item.subjectUid ? `subject=${item.subjectUid}` : "",
         item.supersedesId ? `supersedes=${item.supersedesId}` : "",
       ]
         .filter(Boolean)
@@ -249,6 +443,57 @@ function parseStrokeCommand(
   }
 
   return { extraText: remainder };
+}
+
+type RollCommandParseResult =
+  | { kind: "ok"; count: number; sides: number; notation: string }
+  | { kind: "error"; message: string };
+
+function parseRollCommand(
+  entities: { type: string; offset: number; length: number }[],
+  text: string,
+  botUsername: string,
+): RollCommandParseResult | null {
+  const commandEntity = findCommandEntity(entities, text, "/roll", botUsername);
+  if (!commandEntity) return null;
+
+  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
+  if (!remainder) {
+    return { kind: "ok", count: 1, sides: 20, notation: "1d20" };
+  }
+
+  const match = remainder.match(/^(\d+)d(\d+)$/iu);
+  if (!match) {
+    return { kind: "error", message: "用法是 /roll 或 /roll 2d6 这种格式喵~" };
+  }
+
+  const count = Number.parseInt(match[1] ?? "", 10);
+  const sides = Number.parseInt(match[2] ?? "", 10);
+
+  if (!Number.isInteger(count) || count <= 0 || count > 20) {
+    return { kind: "error", message: "骰子数量只能是 1 到 20 的正整数喵~" };
+  }
+  if (!Number.isInteger(sides) || sides < 2 || sides > 99999) {
+    return { kind: "error", message: "骰子面数只能是 2 到 99999 的正整数喵~" };
+  }
+
+  return { kind: "ok", count, sides, notation: `${count}d${sides}` };
+}
+
+function rollDice(params: { count: number; sides: number }): { results: number[]; total: number } {
+  const results = Array.from(
+    { length: params.count },
+    () => Math.floor(Math.random() * params.sides) + 1,
+  );
+  const total = results.reduce((sum, value) => sum + value, 0);
+  return { results, total };
+}
+
+function formatRollResult(params: { notation: string; results: number[]; total: number }): string {
+  if (params.results.length === 1) {
+    return `掷出了 ${params.notation}：${params.results[0]}`;
+  }
+  return `掷出了 ${params.notation}：${params.results.join(" + ")} = ${params.total}`;
 }
 
 function xmlEscape(text: string): string {
@@ -550,6 +795,14 @@ function maybeAttachRecentMediaRefs(params: {
   for (let i = history.length - 1; i >= 0; i--) {
     const entry = history[i];
     if (!entry || entry.uid === "bot" || entry.uid === "system") continue;
+    if (Array.isArray(entry.mediaRefs)) {
+      const refs = entry.mediaRefs
+        .filter((ref) => ref?.source === "current")
+        .map(mapRuntimeMediaRefToMediaRef)
+        .filter(Boolean) as MediaRef[];
+      if (refs.length > 0) return refs;
+      continue;
+    }
     const refs = parseMediaRefsFromBufferText(entry.text);
     if (refs.length > 0) {
       logger.info(
@@ -584,10 +837,9 @@ function mapRuntimeMediaRefToMediaRef(ref: {
     return null;
   }
 
-  const source = ref.source === "current" || ref.source === "reply_to" ? ref.source : "reply_to";
   return {
     type: ref.type,
-    source,
+    source: "reply_to",
     ...(ref.fileId ? { fileId: ref.fileId } : {}),
     ...(ref.thumbnailFileId ? { thumbnailFileId: ref.thumbnailFileId } : {}),
     ...(ref.emoji ? { emoji: ref.emoji } : {}),
@@ -609,7 +861,10 @@ async function attachRecentMediaRefs(params: {
     for (let i = recentEvents.length - 1; i >= 0; i--) {
       const event = recentEvents[i];
       if (!event || event.uid === "bot" || event.uid === "system") continue;
-      const refs = event.mediaRefs.map(mapRuntimeMediaRefToMediaRef).filter(Boolean) as MediaRef[];
+      const refs = event.mediaRefs
+        .filter((ref) => ref.source === "current")
+        .map(mapRuntimeMediaRefToMediaRef)
+        .filter(Boolean) as MediaRef[];
       if (refs.length > 0) {
         logger.info(
           { matchedText: params.rawText, sourceUid: event.uid, recoveredRefs: refs.length },
@@ -674,8 +929,23 @@ async function sendAiMessages(params: {
   replyToMessageId: number;
   messages: string[];
   stickerFileId: string | null;
-}): Promise<void> {
+}): Promise<{ messages: string[]; stickerFileId: string | null }> {
   const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
+  const sentMessages: string[] = [];
+  let sentStickerFileId: string | null = null;
+
+  const trackText = async (text: string): Promise<void> => {
+    touchBotActivity();
+    pushMessage(config.tgGroupId, "bot", config.botUsername, text.slice(0, MAX_BUFFER_TEXT));
+    await groupRuntime.recordBotMessages({ messages: [text] });
+  };
+
+  const trackSticker = async (fileId: string): Promise<void> => {
+    touchBotActivity();
+    const emoji = getStickerEmojiByFileId(fileId) ?? "🐱";
+    pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸 ${emoji}: ${fileId}]`);
+    await groupRuntime.recordBotMessages({ messages: [], stickerFileId: fileId });
+  };
 
   if (messages.length === 0) {
     // No text messages — if there's a sticker, send it with a reply reference
@@ -687,15 +957,18 @@ async function sendAiMessages(params: {
           stickerFileId,
           replyToMessageId,
         });
+        sentStickerFileId = stickerFileId;
+        await trackSticker(stickerFileId);
       } catch (err) {
         logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
       }
     }
-    return;
+    return { messages: sentMessages, stickerFileId: sentStickerFileId };
   }
 
   // First message replies to the user's message; subsequent messages are
   // sent standalone (like a human typing follow-up lines).
+  let textDispatchFailed = false;
   for (let i = 0; i < messages.length; i++) {
     const text = messages[i]!;
     const formatted = formatForTelegramHtml(text);
@@ -708,8 +981,12 @@ async function sendAiMessages(params: {
         formatted,
         ...(i === 0 ? { replyToMessageId } : {}),
       });
+      sentMessages.push(text);
+      await trackText(text);
     } catch (err) {
       logger.warn({ err, i }, "sendAiMessages: failed to send message");
+      textDispatchFailed = true;
+      break;
     }
 
     // Stagger messages to mimic human typing rhythm, but not after the last one
@@ -719,13 +996,17 @@ async function sendAiMessages(params: {
   }
 
   // Dispatch sticker after all text messages, if any
-  if (stickerFileId) {
+  if (stickerFileId && !textDispatchFailed) {
     try {
       await ctx.api.sendSticker(chatId, stickerFileId);
+      sentStickerFileId = stickerFileId;
+      await trackSticker(stickerFileId);
     } catch (err) {
       logger.warn({ err, stickerFileId }, "sendAiMessages: sticker dispatch failed");
     }
   }
+
+  return { messages: sentMessages, stickerFileId: sentStickerFileId };
 }
 
 const MANDATORY_REPLY_HINT =
@@ -757,6 +1038,8 @@ async function handleAiTurn(params: {
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
   memoryCandidateHints?: string[];
+  forceReply?: boolean;
+  dismissFallbackMessages?: string[];
 }): Promise<void> {
   const {
     ctx,
@@ -774,6 +1057,8 @@ async function handleAiTurn(params: {
     allowWebSearch,
     allowMediaTools,
     memoryCandidateHints,
+    forceReply,
+    dismissFallbackMessages,
   } = params;
 
   const chatId = ctx.chatId;
@@ -814,8 +1099,27 @@ async function handleAiTurn(params: {
 
   const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
 
-  const { tier, needsSearch } = await classifyMessage(userMessage);
-  const isTriggered = isMentioned || isRepliedToBot;
+  const localRoute = decideLocalAiRoute({
+    rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
+    isMentioned,
+    isRepliedToBot,
+    urls: urls ?? [],
+    mediaRefs: (mediaRefs ?? []) as MediaRef[],
+  });
+  const { tier, needsSearch } = localRoute ?? (await classifyMessage(userMessage));
+  if (localRoute) {
+    logger.info(
+      {
+        tier: localRoute.tier,
+        needsSearch: localRoute.needsSearch,
+        preferAdvisor: localRoute.preferAdvisor,
+        allowPersistentTools: localRoute.allowPersistentTools,
+        reason: localRoute.reason,
+      },
+      "handleAiTurn: applied local AI routing",
+    );
+  }
+  const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
 
   try {
     const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
@@ -854,6 +1158,8 @@ async function handleAiTurn(params: {
       ...(allowMediaTools != null ? { allowMediaTools } : {}),
       ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
       isRetryTurn: false,
+      allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+      ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
     });
 
     // Retry on dismiss when the user explicitly triggered the bot.
@@ -895,6 +1201,8 @@ async function handleAiTurn(params: {
           ...(allowMediaTools != null ? { allowMediaTools } : {}),
           ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
           isRetryTurn: true,
+          allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+          ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
         });
 
         if (result.action === "send") break;
@@ -904,10 +1212,21 @@ async function handleAiTurn(params: {
         clearInterval(typingTimer);
         logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
-        let finalFallbackMessages: string[] = [];
         let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
+        let sentFallback: { messages: string[]; stickerFileId: string | null } = {
+          messages: [],
+          stickerFileId: null,
+        };
 
-        if (result.rawText) {
+        if (dismissFallbackMessages?.length) {
+          sentFallback = await sendAiMessages({
+            ctx,
+            chatId,
+            replyToMessageId,
+            messages: dismissFallbackMessages,
+            stickerFileId: null,
+          });
+        } else if (result.rawText) {
           const rescued = await rescueSendMessagesFromDraft({
             userContext: user,
             userMessage,
@@ -917,7 +1236,6 @@ async function handleAiTurn(params: {
             rawDraft: result.rawText,
           });
           const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
-          finalFallbackMessages = fallbackMessages;
           if (rescued?.messages.length) {
             finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
             logger.info(
@@ -928,17 +1246,7 @@ async function handleAiTurn(params: {
               "handleAiTurn: rescued raw draft via send_message",
             );
           }
-          touchBotActivity();
-          for (const message of fallbackMessages) {
-            pushMessage(
-              config.tgGroupId,
-              "bot",
-              config.botUsername,
-              message.slice(0, MAX_BUFFER_TEXT),
-            );
-          }
-          await groupRuntime.recordBotMessages({ messages: fallbackMessages });
-          await sendAiMessages({
+          sentFallback = await sendAiMessages({
             ctx,
             chatId,
             replyToMessageId,
@@ -946,31 +1254,18 @@ async function handleAiTurn(params: {
             stickerFileId: rescued?.messages.length ? null : getStickerFileId(fallbackEmoji),
           });
         } else {
-          touchBotActivity();
           const stickerFileId = getStickerFileId(fallbackEmoji);
-          pushMessage(
-            config.tgGroupId,
-            "bot",
-            config.botUsername,
-            `[贴纸 ${fallbackEmoji}: ${stickerFileId || "unknown"}]`,
-          );
-          await groupRuntime.recordBotMessages({
+          sentFallback = await sendAiMessages({
+            ctx,
+            chatId,
+            replyToMessageId,
             messages: [],
             stickerFileId,
           });
-          if (stickerFileId) {
-            try {
-              await sendStickerWithReplyFallback({
-                ctx,
-                chatId,
-                stickerFileId,
-                replyToMessageId,
-              });
-            } catch (err) {
-              logger.warn({ err, emoji: fallbackEmoji }, "handleAiTurn: fallback sticker failed");
-            }
-          }
         }
+
+        const sentFallbackOutput =
+          sentFallback.messages.length > 0 || sentFallback.stickerFileId !== null;
 
         await groupRuntime.recordTurn({
           kind: "passive",
@@ -980,8 +1275,10 @@ async function handleAiTurn(params: {
           tier,
           needsSearch,
           toolCalls: finalFallbackToolCalls,
-          action: result.rawText ? "send" : "dismiss",
-          messages: finalFallbackMessages,
+          action: sentFallbackOutput ? "send" : "error",
+          messages: sentFallback.messages,
+          stickerFileId: sentFallback.stickerFileId,
+          ...(!sentFallbackOutput ? { error: "telegram fallback dispatch failed" } : {}),
           ...(result.metrics?.inputTokens != null
             ? { inputTokens: result.metrics.inputTokens }
             : {}),
@@ -1024,35 +1321,15 @@ async function handleAiTurn(params: {
 
     // result.action === "send"
     clearInterval(typingTimer);
-    touchBotActivity();
 
-    // Push all messages to the conversation buffer
-    for (const msg of result.messages) {
-      pushMessage(config.tgGroupId, "bot", config.botUsername, msg.slice(0, MAX_BUFFER_TEXT));
-    }
-    await groupRuntime.recordBotMessages({
-      messages: result.messages,
-      stickerFileId: result.stickerFileId,
-    });
-
-    // Sticker-only: push a sticker marker so the buffer stays coherent
-    if (result.messages.length === 0 && result.stickerFileId) {
-      const emoji = getStickerEmojiByFileId(result.stickerFileId) ?? "🐱";
-      pushMessage(
-        config.tgGroupId,
-        "bot",
-        config.botUsername,
-        `[贴纸 ${emoji}: ${result.stickerFileId}]`,
-      );
-    }
-
-    await sendAiMessages({
+    const sent = await sendAiMessages({
       ctx,
       chatId,
       replyToMessageId,
       messages: result.messages,
       stickerFileId: result.stickerFileId,
     });
+    const sentOutput = sent.messages.length > 0 || sent.stickerFileId !== null;
     await groupRuntime.recordTurn({
       kind: "passive",
       startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
@@ -1061,9 +1338,10 @@ async function handleAiTurn(params: {
       tier,
       needsSearch,
       toolCalls: result.metrics?.toolCalls ?? [],
-      action: "send",
-      messages: result.messages,
-      stickerFileId: result.stickerFileId,
+      action: sentOutput ? "send" : "error",
+      messages: sent.messages,
+      stickerFileId: sent.stickerFileId,
+      ...(!sentOutput ? { error: "telegram dispatch failed" } : {}),
       ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
       ...(result.metrics?.outputTokens != null
         ? { outputTokens: result.metrics.outputTokens }
@@ -1076,9 +1354,7 @@ async function handleAiTurn(params: {
   } catch (err) {
     clearInterval(typingTimer);
     logger.error({ err }, "handleAiTurn: AI turn failed");
-    await ctx.reply("呜喵...出了点问题喵...").catch((replyErr: unknown) => {
-      logger.warn({ err: replyErr }, "handleAiTurn: fallback reply failed");
-    });
+    await replyAndTrack(ctx, "呜喵...出了点问题喵...", replyToMessageId);
     await groupRuntime.recordTurn({
       kind: "passive",
       startedAt: Date.now(),
@@ -1131,6 +1407,20 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
 
+  bot.use(async (ctx, next) => {
+    const groupUpdate = ctx.update.message ?? ctx.update.edited_message;
+    if (groupUpdate?.chat.id.toString() !== config.tgGroupId) {
+      await next();
+      return;
+    }
+    const release = groupRuntime.beginIncomingActivity();
+    try {
+      await next();
+    } finally {
+      release();
+    }
+  });
+
   bot.on("message", async (ctx) => {
     if (isDuplicateUpdate(ctx.update.update_id)) return;
     const msg = ctx.message;
@@ -1173,6 +1463,29 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         } catch (err) {
           logger.error({ err }, "private /diary failed");
           await ctx.reply("生成日记时出错了喵...").catch(() => void 0);
+        }
+        return;
+      }
+
+      if (matchCommand(privEntities, privText, "/wordcloud", botUsername)) {
+        const date = privText.replace(/^\/wordcloud(?:@\w+)?\s*/u, "").trim() || todayDateStr();
+        await ctx.reply(`正在生成词云 ${date}...`).catch(() => void 0);
+        try {
+          const preview = await generateWordcloudPreviewForDateWithRetry(date);
+          if (!preview) {
+            await ctx.reply("这一天没有足够的聊天记录可生成词云喵。").catch(() => void 0);
+            return;
+          }
+          await ctx
+            .replyWithPhoto(new InputFile(preview.image, `${date}-wordcloud.png`), {
+              caption: preview.caption,
+            })
+            .catch(async () => {
+              await ctx.reply(preview.caption).catch(() => void 0);
+            });
+        } catch (err) {
+          logger.error({ err, date }, "private /wordcloud failed");
+          await ctx.reply("生成词云失败了喵...").catch(() => void 0);
         }
         return;
       }
@@ -1283,14 +1596,138 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const from = msg.from;
     if (!from) return;
 
+    const rawText = msg.text ?? msg.caption ?? "";
+    const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+
+    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
+      const replyName = from.first_name || "大哥哥";
+      await replyAndTrack(ctx, `晚安安 ${replyName}~ 🌙`, msg.message_id, false, "command_nighty");
+      void getOrCreateUser(from.id.toString(), from.first_name)
+        .then((user) => setNightyTimestamp(user.uid, Date.now()))
+        .catch((err: unknown) => {
+          logger.warn({ err, uid: from.id.toString() }, "failed to persist /nighty timestamp");
+        });
+      return;
+    }
+
+    const rollArgs = parseRollCommand(entities, rawText, botUsername);
+    if (rollArgs) {
+      let resultText: string;
+      let systemHint: string;
+      let dismissFallbackMessages: string[];
+      if (rollArgs.kind === "ok") {
+        const roll = rollDice({ count: rollArgs.count, sides: rollArgs.sides });
+        resultText = formatRollResult({
+          notation: rollArgs.notation,
+          results: roll.results,
+          total: roll.total,
+        });
+        systemHint = `<system_hint><event>command_roll</event><rule>用户刚刚使用了 /roll，程序已经发送了掷骰结果：${xmlEscape(resultText)}。你现在必须顺着上下文自然接一句，可以吐槽运气、调侃结果或接住话题，但不要机械重复完整结果。</rule></system_hint>`;
+        dismissFallbackMessages = ["这手气看着就很有节目效果，哼。"];
+      } else {
+        resultText = rollArgs.message;
+        systemHint = `<system_hint><event>command_roll_invalid</event><rule>用户刚刚使用了格式或范围错误的 /roll，程序已经发送了错误提示：${xmlEscape(resultText)}。你现在必须顺着上下文自然吐槽一下这次错误输入，语气可以调侃一点，但不要和程序提示完全重复。</rule></system_hint>`;
+        dismissFallbackMessages = ["连骰子格式都能写歪，你是想先把我绕晕吗喵。"];
+      }
+
+      await replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
+
+      const releaseRollActivity = groupRuntime.beginIncomingActivity();
+      void (async () => {
+        const user = await getOrCreateUser(from.id.toString(), from.first_name);
+        const displayName = user.nickname || from.first_name || "大哥哥";
+        const replyTo = msg.reply_to_message;
+        const isRepliedToBot =
+          replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
+          replyTo?.from?.id === botId;
+        const isMentioned = entities.some((e) => {
+          if (e.type !== "mention") return false;
+          const mention = rawText.slice(e.offset, e.offset + e.length);
+          return (
+            mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
+            mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
+          );
+        });
+        const extracted = await extractContent(ctx, msg, { rawText, entities });
+        const urls = extracted.urls;
+        const mediaRefs = await attachRecentMediaRefs({
+          groupId: config.tgGroupId,
+          rawText,
+          mediaRefs: extracted.mediaRefs,
+        });
+        const runtimeDecision = await groupRuntime.ingestUserMessage({
+          chatId: config.tgGroupId,
+          messageId: msg.message_id,
+          updateId: ctx.update.update_id,
+          kind: "command",
+          uid: from.id.toString(),
+          name: displayName,
+          ...(from.username ? { username: from.username } : {}),
+          text: rawText,
+          mediaRefs,
+          urls,
+          ...(replyTo && !isRepliedToBot
+            ? {
+                replyTo: {
+                  uid: replyTo.from?.id?.toString() ?? "",
+                  name: replyTo.from?.first_name ?? "某人",
+                  ...(replyTo.from?.username ? { username: replyTo.from.username } : {}),
+                  text: replyTo.text ?? replyTo.caption ?? "",
+                  ...(replyTo.message_id != null ? { messageId: replyTo.message_id } : {}),
+                },
+              }
+            : {}),
+          ts: Date.now(),
+          triggered: true,
+        });
+
+        const userMessage = buildUserMessage({
+          rawText,
+          displayName,
+          mediaRefs,
+          replyTo,
+          isRepliedToBot,
+          isMentioned,
+          urls,
+        });
+
+        groupRuntime.scheduleCommandTurn({
+          label: `roll:${msg.message_id}`,
+          execute: () =>
+            handleAiTurn({
+              ctx,
+              replyToMessageId: msg.message_id,
+              user,
+              userMessage,
+              systemHint,
+              isMentioned,
+              isRepliedToBot,
+              mediaRefs,
+              urls,
+              sourceRefs: [`tg:${config.tgGroupId}:roll:${msg.message_id}`],
+              ...(from.username ? { senderUsername: from.username } : {}),
+              ...(runtimeDecision.lateBindingStatus
+                ? { runtimeStatus: runtimeDecision.lateBindingStatus }
+                : {}),
+              allowWebSearch: runtimeDecision.allowWebSearch,
+              allowMediaTools: runtimeDecision.allowMediaTools,
+              forceReply: true,
+              dismissFallbackMessages,
+            }),
+        });
+      })()
+        .catch((err: unknown) => {
+          logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
+        })
+        .finally(releaseRollActivity);
+      return;
+    }
+
     // 2. Resolve user
     const user = await getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
     // 3. Extract content references (text, URLs, media file_ids, sticker emoji)
-    const rawText = msg.text ?? msg.caption ?? "";
-    const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
-
     const extracted = await extractContent(ctx, msg, { rawText, entities });
     const urls = extracted.urls;
     const mediaRefs = await attachRecentMediaRefs({
@@ -1332,7 +1769,22 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
-    const isCommandMessage = entities.some((entity) => entity.type === "bot_command");
+    const isCommandMessage = isCommandLikeMessage(entities);
+    if (!from.is_bot && !isCommandMessage) {
+      await persistWordcloudMessage({
+        chatId: config.tgGroupId,
+        messageId: msg.message_id,
+        userId: from.id.toString(),
+        displayName,
+        ...(from.username ? { username: from.username } : {}),
+        isBot: false,
+        isForwarded: isForwardedMessage(msg),
+        text: rawText,
+        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+      }).catch((err: unknown) => {
+        logger.warn({ err, messageId: msg.message_id }, "wordcloud: persist group message failed");
+      });
+    }
     const runtimeDecision = await groupRuntime.ingestUserMessage({
       chatId: config.tgGroupId,
       messageId: msg.message_id,
@@ -1366,6 +1818,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         bufferLine,
         from.username ?? undefined,
+        "normal",
+        mediaRefs,
       );
     }
 
@@ -1377,6 +1831,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
 你可以这样跟我互动：
 • @我 或 回复我 — 和我聊天
+• /roll [1d20|2d6|3d20] — 掷骰子，我会先报结果再接话
 • /shock [0-200|想说的话] — 电我一下，也可以带强度或顺便说话
 • /stroke [1-200|想说的话] — 撸撸本喵，也可以带力度或边撸边说话
 • /nighty — 跟我说晚安，8小时后我会发早安问候
@@ -1431,13 +1886,6 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         logger.warn({ err }, "group /reset runtime summary clear failed");
       });
       await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
-      return;
-    }
-
-    // 8. Goodnight — /nighty command only
-    if (matchCommand(entities, rawText, "/nighty", botUsername)) {
-      await setNightyTimestamp(user.uid, Date.now());
-      await replyAndTrack(ctx, `晚安 ${displayName}~ 🌙`, msg.message_id, false, "command_nighty");
       return;
     }
 
@@ -1547,6 +1995,35 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const rawText = msg.text ?? msg.caption ?? "";
 
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+    const isCommandMessage = isCommandLikeMessage(entities);
+    if (!from.is_bot && isCommandMessage) {
+      await deleteStoredMessage(config.tgGroupId, msg.message_id).catch((err: unknown) => {
+        logger.warn(
+          { err, messageId: msg.message_id },
+          "wordcloud: delete edited command message failed",
+        );
+      });
+    } else if (!from.is_bot && !isCommandMessage) {
+      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const displayName = user.nickname || from.first_name || "大哥哥";
+      await persistWordcloudMessage({
+        chatId: config.tgGroupId,
+        messageId: msg.message_id,
+        userId: from.id.toString(),
+        displayName,
+        ...(from.username ? { username: from.username } : {}),
+        isBot: false,
+        isForwarded: isForwardedMessage(msg),
+        text: rawText,
+        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+        ...(msg.edit_date != null ? { editedAt: msg.edit_date * 1000 } : {}),
+      }).catch((err: unknown) => {
+        logger.warn(
+          { err, messageId: msg.message_id },
+          "wordcloud: persist edited group message failed",
+        );
+      });
+    }
 
     const isMentioned = entities.some((e) => {
       if (e.type !== "mention") return false;
@@ -1633,6 +2110,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         displayName,
         editedBuffer.slice(0, MAX_BUFFER_TEXT),
         from.username ?? undefined,
+        "normal",
+        mediaRefs,
       );
     }
 

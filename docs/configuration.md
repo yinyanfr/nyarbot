@@ -10,15 +10,16 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 | `BOT_PERSONA_NAME`      | ❌       | Persona display name in prompts/help text (default: `にゃる`)                       |
 | `BOT_PERSONA_FULL_NAME` | ❌       | Persona full name (default: `晴海猫月`)                                             |
 | `BOT_PERSONA_READING`   | ❌       | Persona reading annotation (default: `はるみ にゃる`)                               |
-| `TG_ADMIN_UID`          | ✅       | Your Telegram user ID (used for `/status` and `/reset` access control)              |
-| `TG_GROUP_ID`           | ✅       | Target group ID — bot ignores messages from all other chats/private                 |
+| `TG_ADMIN_UID`          | ✅       | Admin user ID for private status/reset, diary/observation, and wordcloud commands   |
+| `TG_GROUP_ID`           | ✅       | Target group ID; other chats are ignored except supported admin DMs                 |
 | `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))           |
 | `TAVILY_API_KEY`        | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
-| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway token for Gemini vision calls                                 |
+| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway token for Gemini calls                                        |
 | `CF_ACCOUNT_ID`         | ✅       | Cloudflare account ID for AI Gateway                                                |
 | `BOT_USERNAME`          | ✅       | Telegram bot username (required; used for mention matching)                         |
 | `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog (format `ghp_...`)                      |
 | `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format (e.g., `yinyanfr/nyarbot-diary`)                 |
+| `TG_DIARY_CHANNEL_ID`   | ❌       | Channel ID for full diary publishing, including the wordcloud image when available  |
 | `LOG_LEVEL`             | ❌       | Pino log level (default: `info`)                                                    |
 | `PORT`                  | ❌       | Unused (long polling, no webhook server)                                            |
 
@@ -52,6 +53,24 @@ Additional optional envs with defaults:
   `PROACTIVE_MAX_FAILURES`, `PROACTIVE_COOLDOWN_HIGH_MS`,
   `PROACTIVE_COOLDOWN_MEDIUM_MS`, `PROACTIVE_COOLDOWN_LOW_MS`
 - `DIARY_CHECK_INTERVAL_MS`
+- `WORDCLOUD_DB_PATH` (`data/wordcloud.sqlite`)
+- `WORDCLOUD_CHECK_INTERVAL_MS` (`60000`)
+
+The current `.env.example` does not list the wordcloud variables; they remain optional and use the defaults above.
+
+## Local Wordcloud Storage
+
+- The wordcloud pipeline uses local SQLite, not Firestore.
+- The database path is controlled by `WORDCLOUD_DB_PATH` and defaults to `data/wordcloud.sqlite`.
+- Generated PNG artifacts are stored in `wordcloud-artifacts/` next to the SQLite database.
+- `WORDCLOUD_CHECK_INTERVAL_MS` drives noon, evening, and post-rollover publication checks, not only midnight generation.
+- Only the most recent 10 days of messages are retained.
+- Only human users count; the bot itself and other bots are excluded.
+- Command messages do not enter the wordcloud store. If a normal message is later edited into a command, it is removed from the local wordcloud database.
+- Edited messages overwrite by the same `message_id`, so the wordcloud always uses the final text.
+- Forwarded messages still count for the activity leaderboard and preview `messageCount`, but are excluded from the wordcloud body itself.
+- Repeated occurrences of the same token inside one message count once.
+- Rendering ships with a bundled full Source Han Sans variable font for Simplified Chinese, Traditional Chinese, Japanese, and Korean.
 
 ## Firebase
 
@@ -62,34 +81,36 @@ Additional optional envs with defaults:
 
 Firestore collections used:
 
-| Collection             | Document ID      | Fields                                                                      |
-| ---------------------- | ---------------- | --------------------------------------------------------------------------- |
-| `users/{uid}`          | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`    |
-| `images/{fileId}`      | Telegram file_id | `fileId`, `description`, `cachedAt`                                         |
-| `diary/{date}`         | Date YYYY-MM-DD  | `date`, `entries[]`, `diary?`, `generatedAt?`                               |
-| `runtime/group`        | Fixed document   | `summary`, `summaryCursorTs`, `lastProcessedMessageId?`, `lastCompactedAt?` |
-| `events/{autoId}`      | Auto ID          | Append-only chat events, bot outputs, ignored reasons, URL/media refs       |
-| `turns/{autoId}`       | Auto ID          | AI turn model, tool calls, action, token/cache usage, latency, errors       |
-| `compactions/{autoId}` | Auto ID          | Working-memory summary snapshots with cursor/token usage                    |
+| Collection               | Document ID      | Fields                                                                      |
+| ------------------------ | ---------------- | --------------------------------------------------------------------------- |
+| `users/{uid}`            | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`    |
+| `diary/{date}`           | Date YYYY-MM-DD  | legacy `entries[]`, `diary?`, `generatedAt?`, `generationRecords[]`         |
+| `diaryObservations/{id}` | Observation ID   | structured event/reaction fields, subject identity, confidence/status       |
+| `runtime/group`          | Fixed document   | `summary`, `summaryCursorTs`, `lastProcessedMessageId?`, `lastCompactedAt?` |
+| `events/{autoId}`        | Auto ID          | Append-only chat events, bot outputs, ignored reasons, URL/media refs       |
+| `turns/{autoId}`         | Auto ID          | AI turn model, tool calls, action, token/cache usage, latency, errors       |
+| `compactions/{autoId}`   | Auto ID          | Working-memory summary snapshots with cursor/token usage                    |
 
 ## DeepSeek Models
 
-The bot uses two models with two thinking-mode variants each:
+The bot uses two DeepSeek model IDs across three configured variants:
 
-| Model               | Thinking                                  | Usage                                                                                      |
-| ------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, affection-scoring love reply, probe gate, image/URL description |
-| `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss   |
-| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss             |
-| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Diary generation (midnight summary and `/diary` command)                                   |
+| Model               | Thinking                                  | Usage                                                                                    |
+| ------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, affection/reaction flows, and proactive probe                 |
+| `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss |
+| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss           |
 
 Thinking mode is injected via a custom `fetch` wrapper that modifies the request body before sending. Base URL is configurable via `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`, no `/v1` suffix).
 
 ## Cloudflare AI Gateway
 
-Gemini vision calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
+Gemini calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
-Model used: `google-ai-studio/gemini-3-flash-preview` — fast, cheap, and supports vision input. Also used for batch tweet photo description in `describeTweetPhotos()`.
+- `google-ai-studio/gemini-3.1-flash-lite`: Telegram/tweet image understanding and full-diary notification copy.
+- `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
+
+Media descriptions are cached only in-process for the current session. There is no runtime Firestore `images` cache.
 
 ## Tool-Call Architecture
 
