@@ -4,10 +4,13 @@ import { geminiDiaryModel, geminiFlashLiteModel } from "./ai.js";
 import {
   appendDiaryGenerationRecord,
   getDiaryEntries,
+  getGeneratedDiary,
   listActiveDiaryObservationsByDate,
+  loadRuntimeEventsForLocalDate,
   writeGeneratedDiary,
 } from "../services/firestore.js";
-import { now, todayDateStr } from "./time.js";
+import type { RuntimeEventRecord } from "../services/firestore.js";
+import { formatTimestamp, now, yesterdayDateStr } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub, waitForGithubPagesPublish } from "../services/github.js";
 import config from "../configs/env.js";
@@ -21,10 +24,13 @@ import {
   selectObservationsForDiary,
   serializeDiaryObservationsXml,
 } from "./diary-observations.js";
+import { normalizePromptData } from "./prompt-safety.js";
+import type { DiaryEntry, DiaryObservationV2 } from "../global.d.js";
 
 const DIARY_NOTIFICATION_TIMEOUT_MS = 20_000;
 const DIARY_GENERATION_TIMEOUT_MS = 120_000;
 const TELEGRAM_CAPTION_MAX_CHARS = 1024;
+const DIARY_CATCH_UP_DAYS = 3;
 
 function xmlEscape(text: string): string {
   return text
@@ -60,7 +66,8 @@ function extractUsage(result: unknown): { inputTokens?: number; outputTokens?: n
   };
 }
 
-let lastDate: string | null = null;
+const completedDates = new Set<string>();
+let diaryCheckRunning = false;
 
 export interface DiaryCallbacks {
   sendText: (
@@ -125,11 +132,12 @@ async function generateDiaryNotification(
     timeout: { totalMs: DIARY_NOTIFICATION_TIMEOUT_MS },
   });
 
+  const dateLabel = yesterdayDate === yesterdayDateStr() ? "昨日日记" : `${yesterdayDate} 日记`;
   const linkNotice = diaryUrl
     ? options.pagesReady
-      ? `昨日日记已经更新：${diaryUrl}`
-      : `昨日日记页面还在发布中，链接先放在这里：${diaryUrl}`
-    : "昨日日记已经整理好了。";
+      ? `${dateLabel}已经更新：${diaryUrl}`
+      : `${dateLabel}页面还在发布中，链接先放在这里：${diaryUrl}`
+    : `${dateLabel}已经整理好了。`;
 
   return `${text.trim()}\n\n${linkNotice}\n\n日语姬本日题库已更新，欢迎打卡`;
 }
@@ -214,25 +222,67 @@ function buildDiaryRequest(date: string, observationsXml: string): string {
   ].join("\n");
 }
 
-export async function generateDiaryForDate(date: string): Promise<string | null> {
+interface DiaryMaterial {
+  observations: DiaryObservationV2[];
+  entries: DiaryEntry[];
+  runtimeEventCount: number;
+}
+
+function runtimeEventsToDiaryEntries(events: RuntimeEventRecord[]): DiaryEntry[] {
+  return events.flatMap((event) => {
+    if (event.ignoredReason || event.kind === "system") return [];
+    const text = normalizePromptData(event.text, 600);
+    if (!text) return [];
+    const identity = event.username ? `${event.name} (@${event.username})` : event.name;
+    return [
+      {
+        ts: event.ts,
+        content: `[${formatTimestamp(event.ts, "HH:mm")}] ${identity}: ${text}`,
+      },
+    ];
+  });
+}
+
+async function loadDiaryMaterial(date: string): Promise<DiaryMaterial> {
   const activeObservations = await listActiveDiaryObservationsByDate(date);
-  const selected = selectObservationsForDiary(activeObservations);
-  const legacyEntries = activeObservations.length === 0 ? await getDiaryEntries(date) : [];
-  if (selected.length === 0 && legacyEntries.length === 0) {
-    logger.info({ date }, "diary: no observations or legacy entries for date, returning null");
-    return null;
+  const observations = selectObservationsForDiary(activeObservations);
+  const legacyEntries = observations.length === 0 ? await getDiaryEntries(date) : [];
+  if (observations.length > 0 || legacyEntries.length > 0) {
+    return { observations, entries: legacyEntries, runtimeEventCount: 0 };
   }
-  const observationIds = selected.map((observation) => observation.id);
+
+  const runtimeEvents = await loadRuntimeEventsForLocalDate(date);
+  const entries = runtimeEventsToDiaryEntries(runtimeEvents);
+  return {
+    observations,
+    entries,
+    runtimeEventCount: entries.length,
+  };
+}
+
+type DiaryGenerationAttempt =
+  | { status: "generated"; diary: string }
+  | { status: "no_material" }
+  | { status: "failed" };
+
+async function attemptDiaryGeneration(date: string): Promise<DiaryGenerationAttempt> {
+  const material = await loadDiaryMaterial(date);
+  if (material.observations.length === 0 && material.entries.length === 0) {
+    logger.info({ date }, "diary: no observations or runtime events for date, returning null");
+    return { status: "no_material" };
+  }
+  const observationIds = material.observations.map((observation) => observation.id);
   const requestPayload = buildDiaryRequest(
     date,
-    serializeDiaryObservationsXml(date, selected, legacyEntries),
+    serializeDiaryObservationsXml(date, material.observations, material.entries),
   );
 
   logger.info(
     {
       date,
-      observationCount: selected.length,
-      legacyCount: legacyEntries.length,
+      observationCount: material.observations.length,
+      legacyCount: material.entries.length - material.runtimeEventCount,
+      runtimeEventCount: material.runtimeEventCount,
     },
     "diary: generating diary from structured observations",
   );
@@ -261,7 +311,7 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
         error: "empty_diary_output",
       });
       logger.warn({ date }, "diary: model returned empty diary");
-      return null;
+      return { status: "failed" };
     }
 
     await appendDiaryGenerationRecord({
@@ -276,10 +326,10 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
       status: "success",
     });
     logger.info(
-      { date, len: diary.length, observationCount: selected.length },
+      { date, len: diary.length, observationCount: material.observations.length },
       "diary: generated diary for date",
     );
-    return diary;
+    return { status: "generated", diary };
   } catch (err) {
     await appendDiaryGenerationRecord({
       date,
@@ -295,14 +345,21 @@ export async function generateDiaryForDate(date: string): Promise<string | null>
       logger.warn({ err: recordErr, date }, "diary: failed to append failure record");
     });
     logger.error({ err, date }, "diary: generation failed");
-    return null;
+    return { status: "failed" };
   }
 }
 
-async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
+export async function generateDiaryForDate(date: string): Promise<string | null> {
+  const result = await attemptDiaryGeneration(date);
+  return result.status === "generated" ? result.diary : null;
+}
+
+async function generateYesterdayDiary(yesterdayDate: string): Promise<boolean> {
   try {
-    const diary = await generateDiaryForDate(yesterdayDate);
-    if (!diary) return;
+    const result = await attemptDiaryGeneration(yesterdayDate);
+    if (result.status === "no_material") return true;
+    if (result.status === "failed") return false;
+    const diary = result.diary;
 
     await writeGeneratedDiary(yesterdayDate, diary);
     logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
@@ -403,24 +460,39 @@ async function generateYesterdayDiary(yesterdayDate: string): Promise<void> {
           logger.warn({ err }, "diary: notification send failed");
         });
     }
+    return true;
   } catch (err) {
     logger.error({ err, yesterdayDate }, "diary: generation failed");
+    return false;
   }
 }
 
-export function checkAndGenerateDiary(): void {
-  const today = todayDateStr();
-  if (lastDate === null) {
-    lastDate = today;
-    return;
-  }
-  if (lastDate === today) return;
-  if (!hasReachedDiaryPublishTime()) return;
+function getCatchUpDates(): string[] {
+  const current = now();
+  return Array.from({ length: DIARY_CATCH_UP_DAYS }, (_, index) =>
+    current.subtract(DIARY_CATCH_UP_DAYS - index, "day").format("YYYY-MM-DD"),
+  );
+}
 
-  const yesterdayDate = lastDate;
-  lastDate = today;
-
-  generateYesterdayDiary(yesterdayDate).catch((err: unknown) => {
+export async function checkAndGenerateDiary(): Promise<void> {
+  if (diaryCheckRunning || !hasReachedDiaryPublishTime()) return;
+  diaryCheckRunning = true;
+  try {
+    for (const date of getCatchUpDates()) {
+      if (completedDates.has(date)) continue;
+      if (await getGeneratedDiary(date)) {
+        completedDates.add(date);
+        continue;
+      }
+      const completed = await generateYesterdayDiary(date);
+      if (completed) {
+        completedDates.add(date);
+        return;
+      }
+    }
+  } catch (err) {
     logger.error({ err }, "diary: checkAndGenerateDiary failed");
-  });
+  } finally {
+    diaryCheckRunning = false;
+  }
 }

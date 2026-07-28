@@ -103,11 +103,13 @@ The bot uses two DeepSeek model IDs across three configured variants:
 
 Thinking mode is injected via a custom `fetch` wrapper that modifies the request body before sending. Base URL is configurable via `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`, no `/v1` suffix).
 
+Reply-facing DeepSeek calls reserve 12 seconds for fast paths and 45 seconds for thinking paths. Network/timeouts, 401–403, 408/409/429, and 5xx switch a reply to Gemini 3.5 Flash-Lite before any DeepSeek tool call, after which that reply stays on Gemini. Classification, subagents, URL extraction, compaction, and background memory compression remain DeepSeek-only.
+
 ## Cloudflare AI Gateway
 
 Gemini calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
-- `google-ai-studio/gemini-3.1-flash-lite`: Telegram/tweet image understanding and full-diary notification copy.
+- `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-DeepSeek reply fallback, Telegram/tweet image understanding, and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
 - `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
 
 Media descriptions are cached only in-process for the current session. There is no runtime Firestore `images` cache.

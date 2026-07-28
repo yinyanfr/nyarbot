@@ -24,5 +24,11 @@ export {
   pickRandomStickerEmoji,
   stickerCount,
 } from "./stickers.js";
-export { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./proactive.js";
+export {
+  getProactiveHealthSnapshot,
+  startProactiveChecker,
+  stopProactiveChecker,
+  touchBotActivity,
+} from "./proactive.js";
+export type { ProactiveHealthSnapshot } from "./proactive.js";
 export { logger } from "./logger.js";

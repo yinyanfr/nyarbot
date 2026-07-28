@@ -1,6 +1,11 @@
 import { getFirestore, FieldValue, type Firestore, type Query } from "firebase-admin/firestore";
 import type { DiaryEntry, DiaryGenerationRecord, DiaryObservationV2, User } from "../global.d.js";
-import { dateStrForTimezone, parseTimestampInputForTimezone, todayDateStr } from "../libs/time.js";
+import {
+  dateRangeForTimezone,
+  dateStrForTimezone,
+  parseTimestampInputForTimezone,
+  todayDateStr,
+} from "../libs/time.js";
 import {
   normalizePromptData,
   prepareDiaryNoteForStorage,
@@ -332,6 +337,12 @@ export async function getDiaryEntries(date: string): Promise<DiaryEntry[]> {
   const data = doc.data();
   if (!data) return [];
   return Array.isArray(data.entries) ? (data.entries as DiaryEntry[]) : [];
+}
+
+export async function getGeneratedDiary(date: string): Promise<string | null> {
+  const doc = await db().collection("diary").doc(date).get();
+  const diary = doc.data()?.diary;
+  return typeof diary === "string" && diary.trim() ? diary : null;
 }
 
 export async function getDiaryObservation(id: string): Promise<DiaryObservationV2 | null> {
@@ -731,6 +742,30 @@ export async function loadRecentRuntimeEvents(
     .get();
   const records = snap.docs.map((doc) => doc.data() as RuntimeEventRecord);
   return newestFirst ? records.reverse() : records;
+}
+
+export async function loadRuntimeEventsForLocalDate(
+  date: string,
+  limit = 240,
+): Promise<RuntimeEventRecord[]> {
+  const range = dateRangeForTimezone(date, config.appTimezone);
+  if (!range) return [];
+  const boundedLimit = Math.max(1, Math.floor(limit));
+  const baseQuery = db()
+    .collection("events")
+    .where("ts", ">=", range.startMs)
+    .where("ts", "<", range.endMs);
+  const firstLimit = Math.ceil(boundedLimit / 2);
+  const lastLimit = boundedLimit - firstLimit;
+  const [firstSnap, lastSnap] = await Promise.all([
+    baseQuery.orderBy("ts", "asc").limit(firstLimit).get(),
+    lastLimit > 0 ? baseQuery.orderBy("ts", "desc").limit(lastLimit).get() : Promise.resolve(null),
+  ]);
+  const records = new Map<string, RuntimeEventRecord>();
+  for (const doc of [...firstSnap.docs, ...(lastSnap?.docs ?? [])]) {
+    records.set(doc.id, doc.data() as RuntimeEventRecord);
+  }
+  return [...records.values()].sort((a, b) => a.ts - b.ts);
 }
 
 export async function appendTurnRecord(record: RuntimeTurnRecord): Promise<void> {

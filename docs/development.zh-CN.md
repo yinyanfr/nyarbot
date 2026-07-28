@@ -116,7 +116,7 @@ Diary 是文学化归档：由 `writeDiary` 和午夜日记流程生成，面向
 
 ### 为什么有日记系统？
 
-Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。只有运行中的定时器观察到跨天后，才会在 00:02 后开始生成；目前没有启动补发。Gemini 3.1 Pro Preview 选择 active observations 并生成第一人称日记。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.1 Flash Lite 都会通读全文生成群通知导读。
+Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。定时器会在 00:02 后扫描最近三个已结束日期，且启动时立即检查。Gemini 3.1 Pro Preview 优先选择 active observations 生成第一人称日记；如果没有观察通过筛选，则依次使用旧日记条目和 runtime 持久化事件的首尾限量样本。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成群通知导读。
 
 ### 为什么用 dayjs 处理日期？
 

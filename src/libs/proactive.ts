@@ -34,9 +34,25 @@ function getCooldownMs(activityCount: number): number {
 
 let lastBotMessageTime = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
-let stopped = false;
+let stopped = true;
+let running = false;
 let consecutiveFailures = 0;
 const MAX_FAILURES = config.proactiveMaxFailures;
+let lastCheckAt: number | null = null;
+let lastSuccessAt: number | null = null;
+let lastFailureAt: number | null = null;
+let lastError: string | null = null;
+
+export interface ProactiveHealthSnapshot {
+  readonly running: boolean;
+  readonly scheduled: boolean;
+  readonly stopped: boolean;
+  readonly consecutiveFailures: number;
+  readonly lastCheckAt: number | null;
+  readonly lastSuccessAt: number | null;
+  readonly lastFailureAt: number | null;
+  readonly lastError: string | null;
+}
 
 // ---------------------------------------------------------------------------
 // Callback interface for sending messages to Telegram
@@ -103,8 +119,41 @@ export function touchBotActivity(): void {
   lastBotMessageTime = Date.now();
 }
 
+export function getProactiveHealthSnapshot(): Readonly<ProactiveHealthSnapshot> {
+  return Object.freeze({
+    running,
+    scheduled: timer !== null && !stopped,
+    stopped,
+    consecutiveFailures,
+    lastCheckAt,
+    lastSuccessAt,
+    lastFailureAt,
+    lastError,
+  });
+}
+
+function getNextCheckDelayMs(): number {
+  if (consecutiveFailures === 0) return CHECK_INTERVAL_MS;
+
+  const boundedFailureCount = Math.min(consecutiveFailures, Math.max(1, Math.floor(MAX_FAILURES)));
+  return Math.min(CHECK_INTERVAL_MS * 2 ** (boundedFailureCount - 1), 2_147_483_647);
+}
+
+function scheduleNextCheck(callbacks: ProactiveCallbacks, delayMs: number): void {
+  if (stopped) return;
+  timer = setTimeout(() => {
+    timer = null;
+    void check(callbacks);
+  }, delayMs);
+  timer.unref?.();
+}
+
 async function check(callbacks: ProactiveCallbacks): Promise<void> {
   if (stopped) return;
+
+  running = true;
+  lastCheckAt = Date.now();
+  let failed = false;
 
   try {
     const now = Date.now();
@@ -358,23 +407,23 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
 
       if (!sentOutput) throw new Error("telegram proactive dispatch failed");
       lastBotMessageTime = Date.now();
-      consecutiveFailures = 0;
     });
     if (!ran) return;
   } catch (err) {
+    failed = true;
     consecutiveFailures++;
-    logger.error(err, `proactive check failed (${consecutiveFailures}/${MAX_FAILURES})`);
-    if (consecutiveFailures >= MAX_FAILURES) {
-      logger.warn("stopping proactive checker after max consecutive failures");
-      stopProactiveChecker();
-      return; // don't reschedule
-    }
+    lastFailureAt = Date.now();
+    lastError = err instanceof Error ? err.message : String(err);
+    logger.error(err, `proactive check failed (${consecutiveFailures} consecutive failures)`);
   } finally {
-    // Schedule next check only after current one finishes (prevents overlap)
-    if (!stopped) {
-      timer = setTimeout(() => check(callbacks), CHECK_INTERVAL_MS);
-      timer.unref?.();
+    running = false;
+    if (!failed) {
+      consecutiveFailures = 0;
+      lastSuccessAt = Date.now();
+      lastError = null;
     }
+    // Schedule next check only after current one finishes (prevents overlap)
+    scheduleNextCheck(callbacks, getNextCheckDelayMs());
   }
 }
 
@@ -384,10 +433,9 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
  *   actions to the group.
  */
 export function startProactiveChecker(callbacks: ProactiveCallbacks): void {
-  if (timer) return;
+  if (timer || running) return;
   stopped = false;
-  timer = setTimeout(() => check(callbacks), CHECK_INTERVAL_MS);
-  timer.unref?.();
+  scheduleNextCheck(callbacks, CHECK_INTERVAL_MS);
 }
 
 /**

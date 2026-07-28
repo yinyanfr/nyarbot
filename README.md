@@ -11,7 +11,7 @@
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，Gemini 经 Cloudflare AI Gateway 负责视觉、日记生成和日记导读，Firestore 负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
+基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，不可用时由 Gemini 3.5 Flash-Lite 接管回复；Gemini 还经 Cloudflare AI Gateway 负责视觉和日记导读，Firestore 负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
 
 ## Overview
 
@@ -53,16 +53,16 @@
 
 ## Tech Stack
 
-| 层                  | 库                                                 |
-| ------------------- | -------------------------------------------------- |
-| Telegram Bot        | `grammy` v1                                        |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4              |
-| Gemini              | Gemini 3.1 Flash Lite / Pro Preview via AI Gateway |
-| Search / Extraction | `@tavily/ai-sdk`                                   |
-| Database            | `firebase-admin` (Firestore)                       |
-| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas` |
-| Runtime             | Node.js + TypeScript ESM                           |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                          |
+| 层                  | 库                                                     |
+| ------------------- | ------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                            |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
+| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                                       |
+| Database            | `firebase-admin` (Firestore)                           |
+| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas`     |
+| Runtime             | Node.js + TypeScript ESM                               |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
 ## Project Layout
 
@@ -144,15 +144,15 @@ node dist/app.js
 | `/diaryretract <id> [reason]` | 撤回日记观察（仅管理员，私聊）                |
 | `/diaryregen [date]`          | 重新生成预览，不保存或发布（仅管理员，私聊）  |
 
-| 场景          | 触发方式                                           |
-| ------------- | -------------------------------------------------- |
-| 聊天          | `@nyarbot` 或回复她的消息                          |
-| 告白          | 说「我喜欢你」「我们结婚吧」等（需 `@` 或回复）    |
-| 设置昵称      | 跟她说「叫我 XX」                                  |
-| 记录记忆      | 跟她说「记住 XXX」                                 |
-| 分享链接      | 直接发链接（被动触发时按需抓取）                   |
-| 发图片 / 贴纸 | 直接发送（被动触发时按需解析媒体）                 |
-| 日记记录      | bot 在群聊中自动通过 `writeDiary` 工具记录观察笔记 |
+| 场景          | 触发方式                                             |
+| ------------- | ---------------------------------------------------- |
+| 聊天          | `@nyarbot` 或回复她的消息                            |
+| 告白          | 说「我喜欢你」「我们结婚吧」等（需 `@` 或回复）      |
+| 设置昵称      | 跟她说「叫我 XX」                                    |
+| 记录记忆      | 跟她说「记住 XXX」                                   |
+| 分享链接      | 直接发链接（被动触发时按需抓取）                     |
+| 发图片 / 贴纸 | 直接发送（被动触发时按需解析媒体）                   |
+| 日记记录      | 优先使用 `writeDiary` 观察，缺失时回退到持久化群事件 |
 
 ## Configuration
 
@@ -221,7 +221,7 @@ English docs:
 ## Release Notes
 
 - 当前发布版本：[`1.0.0`](CHANGELOG.md)
-- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；Telegram 图片按真实字节识别 MIME，动画贴纸只安全读取缩略图；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，Flash Lite 通读全文生成克制导读
+- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；DeepSeek 不可用时由 Gemini 3.5 Flash-Lite 接管主动/被动回复；Telegram 图片按真实字节识别 MIME，动画贴纸只安全读取缩略图；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，3.5 Flash-Lite 通读全文生成克制导读
 
 ## Disclaimer
 

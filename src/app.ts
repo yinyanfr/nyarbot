@@ -180,7 +180,8 @@ async function main(): Promise<void> {
   });
 
   // Midnight diary generation: check interval configurable by env
-  diaryTimer = setInterval(checkAndGenerateDiary, config.diaryCheckIntervalMs);
+  void checkAndGenerateDiary();
+  diaryTimer = setInterval(() => void checkAndGenerateDiary(), config.diaryCheckIntervalMs);
   diaryTimer.unref?.();
 
   wordcloudTimer = setInterval(checkAndGenerateWordcloud, config.wordcloudCheckIntervalMs);

@@ -103,11 +103,13 @@ Bot 使用两个 DeepSeek model ID，共配置三种变体：
 
 思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
 
+面向回复的 DeepSeek 快速路径预留 12 秒，思考路径预留 45 秒。网络/超时、401–403、408/409/429 和 5xx 会在 DeepSeek 尚未调用工具时把整轮回复切换到 Gemini 3.5 Flash-Lite，后续 step 继续使用 Gemini。分类、subagent、URL 抽取、compaction 和后台记忆压缩仍只使用 DeepSeek。
+
 ## Cloudflare AI Gateway
 
 Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-- `google-ai-studio/gemini-3.1-flash-lite`：Telegram/推文图片理解、完整日记导读。
+- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退、Telegram/推文图片理解和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
 - `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
 
 媒体描述只做当前进程会话缓存，不再使用 Firestore `images` 运行时缓存。

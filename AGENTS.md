@@ -40,14 +40,14 @@ node dist/app.js   # run the compiled bot
 - `src/configs/env.ts` — typed config reader from `process.env`
 - `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, command routing, runtime ingestion, sendAiMessages
 - `src/libs/group-runtime.ts` — single-group runtime: message-level dedup, abuse gates, debounce, running/dirty lock, quiet mode, Firestore event/turn persistence, compaction trigger
-- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking), `classifyMessage()`, `generateAiTurn()` with stable tool-call architecture, `probeGate()` for proactive, one-shot `startSubagent`, compaction generation, on-demand rich-content tools
+- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking) with Gemini 3.5 Flash-Lite reply fallback, `classifyMessage()`, `generateAiTurn()` with stable tool-call architecture, `probeGate()` for proactive, one-shot `startSubagent`, compaction generation, on-demand rich-content tools
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (static persona + rules), `buildSessionContextBlock()` (summary/history/user data), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (current time + per-turn dynamic state)
 - `src/libs/conversation-buffer.ts` — in-memory hot ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
 - `src/libs/stickers.ts` — sticker facade: emoji-based lookup only (`getStickerFileId`), random fallback (`pickRandomStickerEmoji`), emoji-by-file-id reverse lookup (`getStickerEmojiByFileId`)
 - `src/libs/telegram-image.ts` — Telegram file download as data URL (no sticker download/conversion)
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
-- `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini Flash-Lite group notice
+- `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini 3.5 Flash-Lite group notice
 - `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, configurable `APP_TIMEZONE`
 - `src/libs/index.ts` — re-exports from `ai.ts`
 - `src/services/index.ts` — Firebase Admin SDK initialization
@@ -81,5 +81,5 @@ node dist/app.js   # run the compiled bot
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`webSearch` tool**: Keep schema stable. When flood protection disables search, expose a disabled tool that returns the reason; do not set the tool to `undefined`.
 - **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.
-- **Diary system**: Model writes structured observations via `writeDiary`. When a running timer observes rollover, generation starts after 00:02; there is currently no startup catch-up. Gemini 3.1 Pro Preview writes the diary and Flash Lite writes its group notice. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
+- **Diary system**: Model writes structured observations via `writeDiary`. After 00:02, startup and interval checks scan the previous three dates; missing structured material falls back to legacy entries and then a bounded sample of persisted runtime events. Gemini 3.1 Pro Preview writes the diary and Gemini 3.5 Flash-Lite writes its group notice. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
 - **Timezone**: Date formatting is centralized in `src/libs/time.ts` and uses `APP_TIMEZONE` (default `Asia/Shanghai`). Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.

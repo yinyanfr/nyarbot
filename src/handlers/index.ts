@@ -36,10 +36,10 @@ import {
   getStickerFileId,
   pickRandomStickerEmoji,
 } from "../libs/stickers.js";
-import { touchBotActivity } from "../libs/proactive.js";
+import { getProactiveHealthSnapshot, touchBotActivity } from "../libs/proactive.js";
 import { generateDiaryForDate } from "../libs/diary.js";
 import { generateWordcloudPreviewForDateWithRetry } from "../libs/wordcloud.js";
-import { todayDateStr } from "../libs/time.js";
+import { formatTimestamp, todayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
 import type { BotContext, BotInfo } from "./context.js";
@@ -1386,6 +1386,10 @@ async function buildStatusText(): Promise<string> {
     return null;
   });
   const runtimeStatus = groupRuntime.getStatusSnapshot();
+  const proactiveHealth = getProactiveHealthSnapshot();
+  const formatHealthTime = (timestamp: number | null) =>
+    timestamp == null ? "never" : formatTimestamp(timestamp, "MM-DD HH:mm:ss");
+  const proactiveError = proactiveHealth.lastError?.replace(/\s+/g, " ").slice(0, 200) ?? "none";
   const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
     logger.warn({ err }, "status runtime context failed");
     return null;
@@ -1396,6 +1400,9 @@ async function buildStatusText(): Promise<string> {
     `缓冲区消息数: ${historyLen}`,
     `Runtime: running=${runtimeStatus.running} debouncing=${runtimeStatus.debouncing} dirty=${runtimeStatus.dirty}`,
     `Quiet 剩余: ${Math.ceil(runtimeStatus.quietRemainingMs / 1000)}s`,
+    `Proactive: running=${proactiveHealth.running} scheduled=${proactiveHealth.scheduled} stopped=${proactiveHealth.stopped} failures=${proactiveHealth.consecutiveFailures}`,
+    `Proactive checks: last=${formatHealthTime(proactiveHealth.lastCheckAt)} success=${formatHealthTime(proactiveHealth.lastSuccessAt)} failure=${formatHealthTime(proactiveHealth.lastFailureAt)}`,
+    `Proactive error: ${proactiveError}`,
     `Summary cursor: ${runtimeContext?.summaryCursorTs ?? 0}`,
     `Recent events: ${runtimeContext?.recentEvents.length ?? "?"}`,
     `记忆用户数: ${memUsers ?? "?"}`,

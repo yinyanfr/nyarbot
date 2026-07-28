@@ -11,7 +11,7 @@ A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, Gemini handles vision, diary generation, and diary notices through Cloudflare AI Gateway, and Firestore provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
+Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, with Gemini 3.5 Flash-Lite taking over replies when DeepSeek is unavailable. Gemini also handles vision and diary notices through Cloudflare AI Gateway, while Firestore provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
 
 ## Overview
 
@@ -53,16 +53,16 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 
 ## Tech Stack
 
-| Layer               | Library                                            |
-| ------------------- | -------------------------------------------------- |
-| Telegram Bot        | `grammy` v1                                        |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4              |
-| Gemini              | Gemini 3.1 Flash Lite / Pro Preview via AI Gateway |
-| Search / Extraction | `@tavily/ai-sdk`                                   |
-| Database            | `firebase-admin` (Firestore)                       |
-| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas` |
-| Runtime             | Node.js + TypeScript ESM                           |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                          |
+| Layer               | Library                                                |
+| ------------------- | ------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                            |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
+| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                                       |
+| Database            | `firebase-admin` (Firestore)                           |
+| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas`     |
+| Runtime             | Node.js + TypeScript ESM                               |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
 ## Project Layout
 
@@ -152,7 +152,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 | Memory       | Tell the bot “remember XXX”                                        |
 | Shared links | Send a link directly; content may be fetched on demand             |
 | Media        | Send images / stickers / media; content may be inspected on demand |
-| Diary note   | The bot can record observations through the `writeDiary` tool      |
+| Diary note   | Prefer `writeDiary` observations; fall back to persisted events    |
 
 ## Configuration
 
@@ -221,7 +221,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 ## Release Notes
 
 - Current release: [`1.0.0`](CHANGELOG.md)
-- Recent updates: added `/roll` and a fast `/nighty` path; proactive turns now use candidate windows and activity revisions to prevent duplicate or stale replies; Telegram media is MIME-sniffed and animated stickers use safe thumbnails; wordclouds gained noon/evening slots and diary reuse; blog publishing batches image and Markdown; Gemini 3.1 Pro Preview writes diaries while Flash Lite reads the full diary for restrained update copy
+- Recent updates: added `/roll` and a fast `/nighty` path; proactive turns now use candidate windows and activity revisions to prevent duplicate or stale replies; Gemini 3.5 Flash-Lite takes over proactive/passive replies when DeepSeek is unavailable; Telegram media is MIME-sniffed and animated stickers use safe thumbnails; wordclouds gained noon/evening slots and diary reuse; blog publishing batches image and Markdown; Gemini 3.1 Pro Preview writes diaries while 3.5 Flash-Lite reads the full diary for restrained update copy
 
 ## Disclaimer
 

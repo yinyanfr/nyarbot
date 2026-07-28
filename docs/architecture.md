@@ -126,13 +126,14 @@ If all retries still dismiss:
 | DeepSeek v4 Flash, thinking disabled             | Classification, short chat, greetings, affection/reaction flows, proactive probe |
 | DeepSeek v4 Flash, thinking enabled              | Complex conversations and tool-calling turns                                     |
 | DeepSeek v4 Pro, thinking enabled                | Technical questions and advisor-heavy turns                                      |
-| Gemini 3.1 Flash Lite via Cloudflare AI Gateway  | Telegram/tweet vision and full-diary notification copy                           |
+| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | DeepSeek reply fallback, Telegram/tweet vision, full-diary notification copy     |
 | Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                            |
 
 ### Why two providers?
 
 - **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
-- **Gemini 3.1 Flash Lite** handles image understanding and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
+- **Gemini 3.5 Flash-Lite** handles unavailable-DeepSeek reply fallback, image understanding, and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
+- Provider selection is sticky for the whole reply: if the first DeepSeek step falls back, every later tool step stays on Gemini so thought signatures remain valid. The bot never switches providers after DeepSeek has already emitted a tool call. Fallback activates for network/timeouts, 401–403, 408/409/429, and 5xx responses, but not malformed 400 requests or normal dismissals.
 
 ## Local Routing
 
@@ -239,7 +240,7 @@ If cooldown has elapsed, the checker finds the latest bot output and treats only
 
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.
 
-The proactive checker stops after env-configurable consecutive failures (default: 5).
+Transient proactive failures trigger bounded exponential backoff. Any non-throwing check, including a valid silent result, clears the consecutive-failure count; the checker continues scheduling until explicit shutdown. Admin `/status` exposes its timer, failure count, timestamps, and latest error.
 
 ## Diary System
 
@@ -253,13 +254,13 @@ The bot records structured conversational observations via the `writeDiary` AI t
 
 ### Midnight Generation
 
-An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) detects date changes based on `APP_TIMEZONE`. Generation requires the process to observe rollover; unlike the wordcloud final rollup, it has no startup catch-up:
+An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) checks dates based on `APP_TIMEZONE`. It runs once at startup and scans the previous three dates, so restarts can catch up recent missing diaries:
 
-1. After 00:02, it selects up to 12 active observations for yesterday; legacy `diary/{date}.entries` are fallback input only.
+1. After 00:02, it selects up to 12 active observations. If none survive selection, legacy `diary/{date}.entries` are used; if those are also absent, a bounded sample from that day's persisted runtime `events` provides fallback material.
 2. Gemini 3.1 Pro Preview composes the diary. The text and a generation record (model, prompt/style versions, observation ids, usage/status) are saved to Firestore.
 3. The previous-day wordcloud artifact is generated or reused. Telegram channel publishing sends it as the photo caption when the diary fits 1024 characters, otherwise it sends the diary as following text.
 4. GitHub publishing creates blobs, a tree, and one commit containing the Markdown and optional `source/img/diary/` image, then non-force updates `main`. Markdown uses root-relative `/img/diary/...` URLs.
-5. If configured GitHub publishing succeeds, the bot polls Pages readiness. Gemini 3.1 Flash Lite then reads the full diary and writes a restrained 1–2 sentence group notice regardless of GitHub availability; link state and challenge copy are appended deterministically.
+5. If configured GitHub publishing succeeds, the bot polls Pages readiness. Gemini 3.5 Flash-Lite then reads the full diary and writes a restrained 1–2 sentence group notice regardless of GitHub availability; link state and challenge copy are appended deterministically.
 
 ### Admin Diary Commands
 

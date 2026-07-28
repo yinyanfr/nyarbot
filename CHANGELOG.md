@@ -23,7 +23,8 @@
 - **Search prefetch policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search for the current turn, and mandatory search hints no longer conflict with the prefetch flow.
 - **Memory and diary heuristics** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/handlers/index.ts`): `saveMemory` now prefers reusable user facts, `writeDiary` is more candidate-first, and `memoryCandidateHints` are narrower to reduce false positives.
 - **Wordcloud rendering and filtering** (`src/libs/wordcloud.ts`, `src/services/local-wordcloud-store.ts`, `src/handlers/index.ts`): the wordcloud now uses a bundled full Source Han Sans variable font for CJK text, records forwarded-message state, excludes forwarded text from the cloud body while still counting it in activity stats, removes messages edited into commands, deduplicates repeated tokens within a single message, and uses a tighter center-heavy layout with filler/negative token filtering.
-- **Diary generation and notification models** (`src/libs/diary.ts`, `src/libs/ai.ts`): Gemini 3.1 Pro Preview now generates diaries; Gemini 3.1 Flash Lite reads the complete diary and produces a restrained 1–2 sentence group introduction, while link readiness and challenge copy are appended deterministically.
+- **Diary generation and notification models** (`src/libs/diary.ts`, `src/libs/ai.ts`): Gemini 3.1 Pro Preview now generates diaries; Gemini 3.5 Flash-Lite reads the complete diary and produces a restrained 1–2 sentence group introduction, while link readiness and challenge copy are appended deterministically.
+- **Reply model failover** (`src/libs/ai.ts`): proactive and passive reply steps now switch from unavailable DeepSeek models to Gemini 3.5 Flash-Lite without replaying completed tool effects; fallback warnings are rate-limited and main-turn metrics record the responding model.
 - **Proactive candidate handling** (`src/libs/proactive.ts`, `src/libs/group-runtime.ts`): only messages after the latest bot output are reply candidates, and activity revisions cancel stale probe/generation output before or between dispatches.
 - **Fast `/nighty` handling** (`src/handlers/index.ts`): goodnight acknowledgements now bypass normal user/media processing and persist the timestamp in the background.
 - **Batched GitHub diary publishing** (`src/services/github.ts`, `src/libs/diary.ts`): diary Markdown and optional wordcloud images are committed together through Git blobs/tree/commit and a non-force branch update.
@@ -31,6 +32,8 @@
 
 ### Fixed
 
+- **Proactive checker recovery** (`src/libs/proactive.ts`, `src/handlers/index.ts`): transient model/API failures now use bounded exponential backoff instead of permanently stopping the checker; successful silent checks reset the consecutive-failure count, and `/status` exposes checker health.
+- **Diary gaps after quiet days or restarts** (`src/libs/diary.ts`, `src/services/firestore.ts`, `src/app.ts`): startup and interval checks now catch up missing diaries from the previous three dates, with persisted runtime events as bounded fallback material when no structured observation or legacy entry is available.
 - **Retry-side diary duplication** (`src/libs/ai.ts`, `src/handlers/index.ts`, `src/services/firestore.ts`): retry turns no longer duplicate persistent diary writes or other side effects.
 - **Image-trigger reply policy** (`src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): when a message needs image understanding, the bot now requires it before speaking, instead of bluffing around the image.
 - **Turn metrics consistency** (`src/handlers/index.ts`): rescue-generated `send_message` calls are now reflected in turn tool-call records and logs.

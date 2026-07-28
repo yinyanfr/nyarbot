@@ -116,7 +116,7 @@ Diary is literary archive written by `writeDiary` and the midnight diary flow. I
 
 ### Why a diary system?
 
-The bot records structured `DiaryObservationV2` records via `writeDiary`, including optional stable subject identity. When the running timer observes rollover, generation begins after 00:02; there is currently no startup catch-up. Gemini 3.1 Pro Preview selects and consolidates active observations into a first-person diary. The final wordcloud is reused for Telegram/blog publishing; GitHub blobs, tree, Markdown, and image are batched into one Git Data API commit. Pages is polled only after configured GitHub publishing succeeds; Gemini 3.1 Flash Lite reads the full diary for the group notice regardless of publishing availability.
+The bot records structured `DiaryObservationV2` records via `writeDiary`, including optional stable subject identity. After 00:02, the timer scans the previous three dates and also runs at startup. Gemini 3.1 Pro Preview consolidates selected observations into a first-person diary; when no observation survives selection, legacy entries and then a bounded first/last sample of persisted runtime events provide fallback material. The final wordcloud is reused for Telegram/blog publishing; GitHub blobs, tree, Markdown, and image are batched into one Git Data API commit. Pages is polled only after configured GitHub publishing succeeds; Gemini 3.5 Flash-Lite reads the full diary for the group notice regardless of publishing availability.
 
 ### Why dayjs for date handling?
 

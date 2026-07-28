@@ -29,6 +29,18 @@ export function dateStrForTimezone(tsMs: number, timeZone: string): string {
   return dayjs(tsMs).tz(timeZone).format("YYYY-MM-DD");
 }
 
+export function dateRangeForTimezone(
+  date: string,
+  timeZone: string,
+): { startMs: number; endMs: number } | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !isValidTimezone(timeZone)) return null;
+  const start = dayjs.tz(`${date}T00:00:00`, timeZone);
+  if (!start.isValid() || start.format("YYYY-MM-DD") !== date) return null;
+  const nextDate = start.add(1, "day").format("YYYY-MM-DD");
+  const end = dayjs.tz(`${nextDate}T00:00:00`, timeZone);
+  return { startMs: start.valueOf(), endMs: end.valueOf() };
+}
+
 export function parseTimestampInputForTimezone(value: string, timeZone: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;

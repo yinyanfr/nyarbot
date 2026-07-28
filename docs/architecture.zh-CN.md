@@ -121,18 +121,19 @@ type AiTurnResult =
 
 ## AI 模型路由
 
-| Provider/model                                  | 用途                                     |
-| ----------------------------------------------- | ---------------------------------------- |
-| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测 |
-| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                   |
-| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次            |
-| Gemini 3.1 Flash Lite（Cloudflare AI Gateway）  | Telegram/推文图片理解、完整日记导读      |
-| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览       |
+| Provider/model                                  | 用途                                                   |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测               |
+| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                                 |
+| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次                          |
+| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | DeepSeek 回复回退、Telegram/推文图片理解、完整日记导读 |
+| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                     |
 
 ### 为什么用两个提供商？
 
 - **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 3.1 Flash Lite** 经 Cloudflare AI Gateway 处理图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- **Gemini 3.5 Flash-Lite** 经 Cloudflare AI Gateway 处理 DeepSeek 不可用时的回复回退、图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- 一轮回复会粘在同一提供商上：如果首个 DeepSeek step 触发回退，后续工具 step 全部继续使用 Gemini，以保留有效 thought signature；DeepSeek 已经发出工具调用后不会再中途切换。网络/超时、401–403、408/409/429 和 5xx 会触发回退；错误请求 400 和正常 `dismiss` 不会触发。
 
 ## 本地路由
 
@@ -239,7 +240,7 @@ type AiTurnResult =
 
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。
 
-主动插话检查器在连续失败达到环境变量阈值后停止（默认 5 次）。
+主动插话遇到暂时故障时采用有上限的指数退避。任何未抛错的检查（包括合理保持沉默）都会清零连续失败计数；除非显式关闭，检查器会持续调度。管理员 `/status` 会显示其定时器、失败次数、时间戳和最近错误。
 
 ## 日记系统
 
@@ -253,13 +254,13 @@ Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终
 
 ### 午夜生成
 
-一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检测日期变化。进程必须实际观察到跨天；与词云最终版不同，日记目前没有启动补发：
+一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检查日期。启动时会立即运行并扫描最近三个已结束日期，因此重启后可以补生成近期缺失日记：
 
-1. 00:02 后选取昨天最多 12 条 active observations；旧的 `diary/{date}.entries` 只作为回退输入。
+1. 00:02 后选取最多 12 条 active observations；若没有观察通过筛选，则依次回退到旧的 `diary/{date}.entries` 和当天持久化 runtime `events` 的限量样本。
 2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 Firestore。
 3. 生成或复用昨日词云。推送 Telegram 频道时，日记不超过 1024 字符则作为图片 caption，否则图片后另发正文。
 4. GitHub 发布通过 blobs/tree/commit 一次提交 Markdown 与可选的 `source/img/diary/` 图片，再非 force 更新 `main`；Markdown 使用 `/img/diary/...` 根路径。
-5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.1 Flash Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
+5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
 
 ### 日记管理员命令
 
