@@ -16,6 +16,9 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 | `TAVILY_API_KEY`        | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
 | `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway token for Gemini calls                                        |
 | `CF_ACCOUNT_ID`         | ✅       | Cloudflare account ID for AI Gateway                                                |
+| `BILIBILI_SESSDATA`     | ❌       | Bilibili login cookie for reliable subtitle access                                  |
+| `BILIBILI_BILI_JCT`     | ❌       | Bilibili CSRF cookie; configure together with the other Bilibili credentials        |
+| `BILIBILI_DEDEUSERID`   | ❌       | Bilibili user ID cookie; configure together with the other Bilibili credentials     |
 | `BOT_USERNAME`          | ✅       | Telegram bot username (required; used for mention matching)                         |
 | `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog (format `ghp_...`)                      |
 | `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format (e.g., `yinyanfr/nyarbot-diary`)                 |
@@ -27,6 +30,9 @@ Additional optional envs with defaults:
 
 - `DEEPSEEK_BASE_URL` (`https://api.deepseek.com`)
 - `CF_AIG_GATEWAY` (`gem`)
+- `BILIBILI_REQUEST_TIMEOUT_MS` (`10000`), `BILIBILI_RATE_LIMIT_MS` (`500`),
+  `BILIBILI_CACHE_SIZE` (`100`)
+- `VIDEO_READ_TIMEOUT_MS` (`120000`), `VIDEO_TRANSCRIPT_MAX_CHARS` (`20000`)
 - `GITHUB_API_BASE` (`https://api.github.com`)
 - `GITHUB_API_VERSION` (`2022-11-28`)
 - `APP_TIMEZONE` (`Asia/Shanghai`, validated as IANA timezone at startup)
@@ -112,6 +118,10 @@ Gemini calls are routed through Cloudflare AI Gateway for caching and observabil
 - `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-DeepSeek reply fallback, Telegram/tweet image understanding, and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
 - `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
 
+YouTube video understanding also uses Cloudflare AI Gateway with `gemini-3.5-flash-lite`. A restricted AI SDK URL-passthrough hook preserves the public YouTube URL as Gemini `fileData` even though the gateway wrapper does not advertise native URL support. The bot process does not contact Google directly or download the video, and each call accepts one video.
+
+Bilibili reading accepts BV URLs, legacy `av<number>` URLs, and `b23.tv` short links. Legacy AV IDs are resolved to BV IDs through Bilibili's public view API before the pinned local `@xzxzzx/bilibili-mcp` process calls only `get_video_transcript` and `get_video_metadata`. No download or account mutation tools are exposed. If subtitles are unavailable, the result contains metadata only. Login cookies are optional for public metadata but normally required for reliable subtitles.
+
 Media descriptions are cached only in-process for the current session. There is no runtime Firestore `images` cache.
 
 ## Tool-Call Architecture
@@ -130,6 +140,7 @@ The bot uses `generateText()` (not streaming) with the following tools exposed t
 | `webSearch`             | Tavily search; disabled by runtime flood protection by returning a reason        |
 | `describeTelegramMedia` | Inspect current-turn Telegram media on demand                                    |
 | `fetchUrlContent`       | Fetch current-turn URLs on demand                                                |
+| `readVideo`             | Read YouTube through native Gemini, or Bilibili subtitles with metadata fallback |
 | `startSubagent`         | One-shot helper for URL/media/technical research; cannot send group messages     |
 
 Tool schema is kept stable for KV-cache friendliness. When `needsSearch=true`, late binding adds a mandatory search hint; if the model sends without `webSearch`, the turn retries once.

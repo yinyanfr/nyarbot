@@ -16,6 +16,9 @@
 | `TAVILY_API_KEY`        | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
 | `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
 | `CF_ACCOUNT_ID`         | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
+| `BILIBILI_SESSDATA`     | ❌   | Bilibili 登录 Cookie，用于可靠获取字幕                                      |
+| `BILIBILI_BILI_JCT`     | ❌   | Bilibili CSRF Cookie，需与其他 Bilibili 凭据一起配置                        |
+| `BILIBILI_DEDEUSERID`   | ❌   | Bilibili 用户 ID Cookie，需与其他 Bilibili 凭据一起配置                     |
 | `BOT_USERNAME`          | ✅   | Telegram bot 用户名（必填，用于 @提及匹配）                                 |
 | `GITHUB_TOKEN`          | ❌   | GitHub PAT，用于推送日记到 Hexo 博客（格式 `ghp_...`）                      |
 | `GITHUB_REPO`           | ❌   | GitHub 仓库名，格式 `owner/repo`（如 `yinyanfr/nyarbot-diary`）             |
@@ -27,6 +30,9 @@
 
 - `DEEPSEEK_BASE_URL`（`https://api.deepseek.com`）
 - `CF_AIG_GATEWAY`（`gem`）
+- `BILIBILI_REQUEST_TIMEOUT_MS`（`10000`）、`BILIBILI_RATE_LIMIT_MS`（`500`）、
+  `BILIBILI_CACHE_SIZE`（`100`）
+- `VIDEO_READ_TIMEOUT_MS`（`120000`）、`VIDEO_TRANSCRIPT_MAX_CHARS`（`20000`）
 - `GITHUB_API_BASE`（`https://api.github.com`）
 - `GITHUB_API_VERSION`（`2022-11-28`）
 - `APP_TIMEZONE`（`Asia/Shanghai`，启动时会校验 IANA 时区，非法值直接报错）
@@ -112,6 +118,10 @@ Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测�
 - 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退、Telegram/推文图片理解和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
 - `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
 
+YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-lite`。由于 gateway wrapper 不会声明原生 URL 支持，这一路径使用受限的 AI SDK URL passthrough，把公开 YouTube URL 保留为 Gemini `fileData`。Bot 不会直连 Google API，也不会下载视频；每次调用只读取一个视频。
+
+Bilibili 读取支持 BV 链接、遗留的 `av+数字` 链接和 `b23.tv` 短链接。AV ID 会先通过 Bilibili 公开 view API 转换成 BV ID，再由锁定版本的本地 `@xzxzzx/bilibili-mcp` 子进程调用 `get_video_transcript` 和 `get_video_metadata`。不会暴露下载或账号写操作；字幕不可用时仅返回元数据。公开元数据通常不要求 Cookie，但可靠字幕读取一般需要完整登录凭据。
+
 媒体描述只做当前进程会话缓存，不再使用 Firestore `images` 运行时缓存。
 
 ## 工具调用架构
@@ -130,6 +140,7 @@ Bot 使用 `generateText()`（非流式）向模型暴露以下工具：
 | `webSearch`             | Tavily 搜索；schema 固定，runtime flood 禁用时返回原因    |
 | `describeTelegramMedia` | 按需查看当前轮 Telegram 媒体；主动/限流场景会返回禁用原因 |
 | `fetchUrlContent`       | 按需抓取当前轮 URL；无 URL 或限流时返回原因               |
+| `readVideo`             | 原生 Gemini 读取 YouTube；Bilibili 字幕优先、元数据降级   |
 | `startSubagent`         | 一次性 helper，用于 URL/媒体/技术检索，不能直接发群消息   |
 
 工具 schema 尽量保持稳定以利于 KV cache。当 `needsSearch=true` 时，late-binding 会追加 mandatory search；如果模型未搜索却准备发送，会自动重试一次。

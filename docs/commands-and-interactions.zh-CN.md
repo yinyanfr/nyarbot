@@ -53,7 +53,8 @@
 
 - URL 仍通过 Telegram entity + 正则回退提取。
 - handler 不再预抓取链接内容。
-- 在**被动触发**时，模型可按需调用 `fetchUrlContent`。
+- 在**被动触发**时，模型可按需调用 `fetchUrlContent` 或 `readVideo`。
+- `readVideo` 会把支持的 YouTube URL 直接交给原生 Gemini 理解声音与画面；Bilibili 走只读 MCP 获取字幕和元数据，字幕不可用时只返回元数据。
 - `fetchUrlContent` 三级策略：
   1. Twitter/X 推文链接 → FxEmbed API v2（`/2/status/{id}`）
   2. 其他链接 → 直接抓取 `<title>`/`<meta description>`
@@ -115,6 +116,7 @@
 | `sendSticker`           | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送     |
 | `describeTelegramMedia` | 按需解析媒体；主动路径只允许查看最新候选消息中的图片   |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容（仅被动触发）                  |
+| `readVideo`             | 理解 YouTube 声画内容；Bilibili 字幕优先、元数据降级   |
 | `writeDiary`            | 创建、更新、取代或撤回结构化日记观察                   |
 | `webSearch`             | Tavily 搜索；schema 固定，runtime flood 禁用时返回原因 |
 | `startSubagent`         | 一次性 URL/媒体/技术研究 helper，不能直接发群消息      |
@@ -136,6 +138,7 @@
                                          ├─ 模型调用 sendSticker → 选择 file_id 分发
                                          ├─ 模型调用 describeTelegramMedia → 按需媒体描述
                                          ├─ 模型调用 fetchUrlContent → 按需 URL 摘要
+                                         ├─ 模型调用 readVideo → YouTube/Bilibili 视频信息
                                          ├─ 模型调用 writeDiary → 修改结构化观察
                                          ├─ 模型调用 webSearch → Tavily 搜索执行
                                          ├─ 模型调用 startSubagent → 一次性研究摘要

@@ -59,7 +59,7 @@ handlers/index.ts (setupHandlers)
     │     ├─ User-tail late binding (time, trigger state, tool availability, runtime state)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
-│     │               describeTelegramMedia, fetchUrlContent, startSubagent
+│     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
     │     ├─ Rich content on demand; session-only cache, no Firestore image cache
     │     │     ├─ Photos use full file; other media/stickers prefer thumbnails
     │     │     └─ Known signatures win; image/* headers are accepted as fallback
@@ -92,6 +92,7 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 | `sendSticker`           | Select a sticker by emoji from the hardcoded pack. Invalid emoji cancels sticker sending.                    |
 | `describeTelegramMedia` | On-demand media description for triggered turns, plus selected newest-candidate images in proactive turns.   |
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive-triggered turns only).             |
+| `readVideo`             | YouTube native Gemini understanding; Bilibili subtitle reading with metadata-only fallback.                  |
 | `writeDiary`            | Create/update/retract a structured observation in Firestore `diaryObservations`.                             |
 | `webSearch`             | Tavily search. Tool schema stays stable; when flood protection disables search, the tool returns the reason. |
 | `startSubagent`         | One-shot helper for URL/media/technical research. It returns a short summary and cannot send group messages. |

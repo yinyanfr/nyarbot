@@ -14,6 +14,7 @@ import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversat
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
 import { groupRuntime } from "./libs/group-runtime.js";
 import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
+import { closeVideoReader } from "./libs/video.js";
 import {
   closeLocalWordcloudStore,
   initLocalWordcloudStore,
@@ -212,6 +213,7 @@ process.once("SIGINT", () => {
   if (wordcloudTimer) clearInterval(wordcloudTimer);
   if (bufferSaveTimer) clearInterval(bufferSaveTimer);
   closeLocalWordcloudStore();
+  void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
@@ -221,6 +223,7 @@ process.once("SIGTERM", () => {
   if (wordcloudTimer) clearInterval(wordcloudTimer);
   if (bufferSaveTimer) clearInterval(bufferSaveTimer);
   closeLocalWordcloudStore();
+  void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   void bot.stop();
 });
@@ -228,12 +231,14 @@ process.once("SIGTERM", () => {
 // Crash guards: ensure unhandled errors are logged before exit
 process.once("uncaughtException", (err) => {
   closeLocalWordcloudStore();
+  void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal({ err }, "uncaught exception — exiting");
   process.exit(1);
 });
 process.once("unhandledRejection", (reason) => {
   closeLocalWordcloudStore();
+  void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal(
     { err: reason instanceof Error ? reason : new Error(String(reason)) },

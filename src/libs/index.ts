@@ -8,6 +8,8 @@ export {
   generateShockResponse,
   generateStrokeResponse,
   fetchUrlContent,
+  isTwitterStatusUrl,
+  containsTwitterStatusUrl,
 } from "./ai.js";
 export type { AiTurnResult, GenerateOptions, ProbeGateOptions } from "./ai.js";
 export {

@@ -1,4 +1,4 @@
-import { probeGate, generateAiTurn, type RichMediaRef } from "./ai.js";
+import { containsTwitterStatusUrl, probeGate, generateAiTurn, type RichMediaRef } from "./ai.js";
 import {
   getHistory,
   pushMessage,
@@ -174,10 +174,14 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     const recentHistory = history
       .slice(latestBotIndex + 1)
       .filter((entry) => entry.timestamp > now - WINDOW_MS);
+    const candidateHistory = recentHistory.filter((entry) => !containsTwitterStatusUrl(entry.text));
+    const safeReferenceHistory = referenceHistory.filter(
+      (entry) => entry.uid === "bot" || !containsTwitterStatusUrl(entry.text),
+    );
 
     // A bot output consumes everything before it; proactive turns only consider
     // new real-user messages that arrived afterwards.
-    const recentCount = recentHistory.filter(
+    const recentCount = candidateHistory.filter(
       (entry) => entry.uid !== "bot" && entry.uid !== "system",
     ).length;
 
@@ -192,7 +196,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
     const ran = await groupRuntime.runProactiveTurn(async () => {
       // Collect recent members for the probe gate context
       const memberMap = new Map<string, { name: string; username?: string }>();
-      for (const entry of recentHistory) {
+      for (const entry of candidateHistory) {
         if (entry.uid !== "bot" && entry.uid !== "system" && !memberMap.has(entry.uid)) {
           memberMap.set(entry.uid, {
             name: entry.name,
@@ -207,7 +211,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       }));
 
       const shouldProceed = await probeGate({
-        recentConversation: referenceHistory
+        recentConversation: safeReferenceHistory
           .map((entry) => {
             const label = entry.username
               ? `[${entry.name} (@${entry.username})]`
@@ -215,7 +219,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
             return `${label}: ${entry.text}`;
           })
           .join("\n"),
-        candidateConversation: recentHistory
+        candidateConversation: candidateHistory
           .map((entry) => {
             const label = entry.username
               ? `[${entry.name} (@${entry.username})]`
@@ -250,8 +254,8 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       }, 4500);
       await callbacks.sendChatAction("typing").catch(() => void 0);
 
-      const formattedHistory = formatHistoryAsContext(referenceHistory);
-      const formattedCandidates = formatHistoryAsContext(recentHistory);
+      const formattedHistory = formatHistoryAsContext(safeReferenceHistory);
+      const formattedCandidates = formatHistoryAsContext(candidateHistory);
 
       // Collect recent bot messages for human-likeness feedback
       const recentBotMessages = history
@@ -262,7 +266,7 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       // Use the current conversation context for the proactive response
       let result;
       try {
-        const recentImageMediaRefs = collectRecentImageMediaRefs(recentHistory);
+        const recentImageMediaRefs = collectRecentImageMediaRefs(candidateHistory);
         result = await generateAiTurn({
           userContext: { uid: "proactive", nickname: "", memories: [] },
           userMessage:
@@ -324,8 +328,8 @@ async function check(callbacks: ProactiveCallbacks): Promise<void> {
       logger.info(
         {
           candidateMessages: recentCount,
-          candidateStartTs: recentHistory[0]?.timestamp ?? null,
-          candidateEndTs: recentHistory.at(-1)?.timestamp ?? null,
+          candidateStartTs: candidateHistory[0]?.timestamp ?? null,
+          candidateEndTs: candidateHistory.at(-1)?.timestamp ?? null,
         },
         "proactive: sending reply for new messages",
       );

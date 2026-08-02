@@ -53,7 +53,8 @@ Before classification, the handler runs a lightweight local route so short chats
 
 - URLs are extracted from Telegram entities + regex fallback.
 - No eager fetch is performed in handlers.
-- During **passive replies**, the model can call `fetchUrlContent` on demand.
+- During **passive replies**, the model can call `fetchUrlContent` or `readVideo` on demand.
+- `readVideo` sends supported YouTube URLs directly to native Gemini for audio/visual understanding. Bilibili uses a read-only MCP path for subtitles and metadata; when subtitles are unavailable it returns metadata only.
 - `fetchUrlContent` uses a three-tier strategy:
   1. **Twitter/X status links** → FxEmbed API v2 (`/2/status/{id}`)
   2. **Other links** → direct `fetch()` + HTML title/meta description extraction
@@ -115,6 +116,7 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending       |
 | `describeTelegramMedia` | On-demand media description; proactive access is limited to candidate images           |
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)        |
+| `readVideo`             | Read YouTube audio/visual content or Bilibili subtitles with metadata-only fallback    |
 | `writeDiary`            | Create, update, supersede, or retract a structured diary observation                   |
 | `webSearch`             | Tavily search; stable schema, returns a reason when runtime flood protection blocks it |
 | `startSubagent`         | One-shot URL/media/technical research helper; cannot send group messages               |
@@ -136,6 +138,7 @@ User message → classifyMessage() → generateAiTurn()
                                          ├─ Model calls sendSticker → file_id selected for dispatch
                                          ├─ Model calls describeTelegramMedia → on-demand media description
                                          ├─ Model calls fetchUrlContent → on-demand URL summary
+                                         ├─ Model calls readVideo → YouTube/Bilibili video information
                                          ├─ Model calls writeDiary → structured observation mutation
                                          ├─ Model calls webSearch → Tavily search executed
                                          ├─ Model calls startSubagent → one-shot research summary

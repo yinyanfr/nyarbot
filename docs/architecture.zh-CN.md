@@ -59,7 +59,7 @@ handlers/index.ts（setupHandlers）
     │     ├─ 用户消息尾部 late-binding（当前时间、触发态、工具可用性、runtime 状态）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
-│     │           describeTelegramMedia、fetchUrlContent、startSubagent
+│     │           describeTelegramMedia、fetchUrlContent、readVideo、startSubagent
     │     ├─ 富内容按需读取；只做会话缓存，不写 Firestore 图片缓存
     │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
     │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
@@ -92,6 +92,7 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 | `sendSticker`           | 通过 emoji 直接选择硬编码贴纸。无效 emoji 会取消贴纸发送，不再回退到智能选择。 |
 | `describeTelegramMedia` | 被动触发时按需描述媒体；主动路径仅可查看最新候选中选出的图片。                 |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                            |
+| `readVideo`             | 原生 Gemini 理解 YouTube；Bilibili 字幕读取，失败时仅返回元数据。              |
 | `writeDiary`            | 在 Firestore `diaryObservations` 创建、更新或撤回结构化观察。                  |
 | `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。        |
 | `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。       |

@@ -22,6 +22,7 @@ import {
   generateLoveResponse,
   generateShockResponse,
   generateStrokeResponse,
+  isTwitterStatusUrl,
   rescueSendMessagesFromDraft,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
@@ -54,6 +55,7 @@ import { getPersonaLabel } from "../libs/persona.js";
 import { sanitizePromptText } from "../libs/prompt-safety.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
+import { isSupportedVideoUrl } from "../libs/video.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
@@ -151,8 +153,10 @@ function decideLocalAiRoute(params: {
   const hasCurrentMedia = currentMedia.length > 0;
   const hasNonStickerMedia = currentMedia.some((media) => media.type !== "sticker");
   const hasUrls = urls.length > 0;
+  const hasOnlyVideoUrls = hasUrls && urls.every(isSupportedVideoUrl);
   const asksCurrentFact = CURRENT_FACT_QUESTION_REGEX.test(normalized);
-  const needsSearch = hasUrls || REALTIME_REQUEST_REGEX.test(normalized) || asksCurrentFact;
+  const needsSearch =
+    (hasUrls && !hasOnlyVideoUrls) || REALTIME_REQUEST_REGEX.test(normalized) || asksCurrentFact;
   const looksTechnical = TECHNICAL_SIGNAL_REGEX.test(normalized);
   const wantsDetailedAnswer = DETAILED_REQUEST_REGEX.test(normalized);
   const isTriggered = isMentioned || isRepliedToBot;
@@ -198,6 +202,17 @@ function decideLocalAiRoute(params: {
       allowPersistentTools: false,
       usedLocalRoute: true,
       reason: "sticker_or_light_media_chat",
+    };
+  }
+
+  if (isTriggered && hasOnlyVideoUrls && !needsSearch) {
+    return {
+      tier: "simple",
+      needsSearch: false,
+      preferAdvisor: true,
+      allowPersistentTools: true,
+      usedLocalRoute: true,
+      reason: "video_url_present",
     };
   }
 
@@ -640,6 +655,16 @@ function buildBufferLine(params: {
     const userLabel = ri.username ? `${ri.name} (@${ri.username})` : ri.name;
     parts.push(`[回复 ${ri.uid} ${userLabel}: "${ri.text.slice(0, 100)}"]`);
   }
+  if (params.urls.length > 0) {
+    const prioritizedUrls = [
+      ...params.urls.filter(isTwitterStatusUrl),
+      ...params.urls.filter((url) => !isTwitterStatusUrl(url)),
+    ];
+    for (const url of prioritizedUrls) {
+      const compact = url.length > 120 ? `${url.slice(0, 117)}...` : url;
+      parts.push(`[链接: ${compact}]`);
+    }
+  }
   if (params.rawText) parts.push(params.rawText);
   const currentMedia = params.mediaRefs.filter((m) => m.source === "current");
   if (currentMedia.length > 0) {
@@ -660,12 +685,6 @@ function buildBufferLine(params: {
         parts.push(
           `[音频 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""} ${media.title ?? ""}]`,
         );
-    }
-  }
-  if (params.urls.length > 0) {
-    for (const url of params.urls) {
-      const compact = url.length > 120 ? `${url.slice(0, 117)}...` : url;
-      parts.push(`[链接: ${compact}]`);
     }
   }
   return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
@@ -1165,7 +1184,11 @@ async function handleAiTurn(params: {
     // Retry on dismiss when the user explicitly triggered the bot.
     // tech tier: no retry, just send the fallback.
     // simple/complex tier: 1 retry, then fallback.
-    if (result.action === "dismiss" && isTriggered) {
+    if (
+      result.action === "dismiss" &&
+      isTriggered &&
+      result.dismissReason !== "twitter_fetch_failed"
+    ) {
       let retries = 0;
       const maxRetries = tier === "tech" ? 0 : 1;
 
@@ -1205,10 +1228,15 @@ async function handleAiTurn(params: {
           ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
         });
 
-        if (result.action === "send") break;
+        if (
+          result.action === "send" ||
+          (result.action === "dismiss" && result.dismissReason === "twitter_fetch_failed")
+        ) {
+          break;
+        }
       }
 
-      if (result.action === "dismiss") {
+      if (result.action === "dismiss" && result.dismissReason !== "twitter_fetch_failed") {
         clearInterval(typingTimer);
         logger.info("handleAiTurn: dismissed after retries, sending fallback");
         const fallbackEmoji = pickRandomStickerEmoji();
@@ -1296,7 +1324,10 @@ async function handleAiTurn(params: {
 
     if (result.action === "dismiss") {
       clearInterval(typingTimer);
-      logger.info("handleAiTurn: model chose to dismiss (silence)");
+      logger.info(
+        { dismissReason: result.dismissReason ?? "model_dismissed" },
+        "handleAiTurn: turn dismissed (silence)",
+      );
       await groupRuntime.recordTurn({
         kind: "passive",
         startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),

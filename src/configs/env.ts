@@ -16,6 +16,14 @@ function parseNumberEnv(key: string, fallback: number): number {
   return parsed;
 }
 
+function parsePositiveIntegerEnv(key: string, fallback: number): number {
+  const value = parseNumberEnv(key, fallback);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid environment variable: ${key} must be a positive integer`);
+  }
+  return value;
+}
+
 function validateTimezone(timezone: string): string {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: timezone });
@@ -57,6 +65,14 @@ const config = {
   cfAigToken: process.env.CF_AIG_TOKEN!,
   cfAccountId: process.env.CF_ACCOUNT_ID!,
   cfAigGateway: process.env.CF_AIG_GATEWAY ?? "gem",
+  bilibiliSessdata: process.env.BILIBILI_SESSDATA ?? "",
+  bilibiliBiliJct: process.env.BILIBILI_BILI_JCT ?? "",
+  bilibiliDedeUserId: process.env.BILIBILI_DEDEUSERID ?? "",
+  bilibiliRequestTimeoutMs: parsePositiveIntegerEnv("BILIBILI_REQUEST_TIMEOUT_MS", 10_000),
+  bilibiliRateLimitMs: parseNumberEnv("BILIBILI_RATE_LIMIT_MS", 500),
+  bilibiliCacheSize: parsePositiveIntegerEnv("BILIBILI_CACHE_SIZE", 100),
+  videoReadTimeoutMs: parsePositiveIntegerEnv("VIDEO_READ_TIMEOUT_MS", 120_000),
+  videoTranscriptMaxChars: parsePositiveIntegerEnv("VIDEO_TRANSCRIPT_MAX_CHARS", 20_000),
   githubToken: process.env.GITHUB_TOKEN ?? "",
   githubRepo: process.env.GITHUB_REPO ?? "",
   githubApiBase: process.env.GITHUB_API_BASE ?? "https://api.github.com",

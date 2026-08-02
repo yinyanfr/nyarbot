@@ -46,6 +46,7 @@ import {
   safePromptValue,
 } from "./prompt-safety.js";
 import { isValidTimezone } from "./time.js";
+import { isSupportedVideoUrl, readVideoContent, VideoReadError } from "./video.js";
 
 type LanguageModelV3 = Parameters<typeof wrapLanguageModel>[0]["model"];
 
@@ -77,6 +78,7 @@ function xmlEscape(text: string): string {
 const SESSION_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const SESSION_MEDIA_CACHE_MAX = 1000;
 const SESSION_URL_CACHE_MAX = 1000;
+const SESSION_VIDEO_CACHE_MAX = 200;
 const TAVILY_MAX_QUERY_LEN = 360;
 const FAST_MODEL_TIMEOUT_MS = 20_000;
 const MAIN_TURN_TIMEOUT_MS = 90_000;
@@ -89,6 +91,7 @@ const FALLBACK_WARNING_INTERVAL_MS = 60_000;
 const DEEPSEEK_DEGRADED_INTERVAL_MS = 60_000;
 const mediaDescriptionCache = new Map<string, { value: string | null; ts: number }>();
 const urlContentCache = new Map<string, { value: string | null; ts: number }>();
+const videoContentCache = new Map<string, { value: string | null; ts: number }>();
 
 function pruneSessionCache<T>(cache: Map<string, { value: T; ts: number }>, maxSize: number): void {
   const now = Date.now();
@@ -665,7 +668,13 @@ export type AiTurnResult =
       metrics?: AiTurnMetrics;
       toolCallNames?: string[];
     }
-  | { action: "dismiss"; rawText?: string; metrics?: AiTurnMetrics; toolCallNames?: string[] };
+  | {
+      action: "dismiss";
+      rawText?: string;
+      metrics?: AiTurnMetrics;
+      toolCallNames?: string[];
+      dismissReason?: "twitter_fetch_failed";
+    };
 
 export interface AiTurnMetrics {
   model: string;
@@ -739,6 +748,7 @@ interface PrefetchedContext {
   webSearchSucceeded: boolean;
   urlContents: { url: string; content: string }[];
   mediaDescriptions: { fileId: string; mediaType: string; description: string }[];
+  attemptedVideoUrls: string[];
 }
 
 const MEDIA_PREFETCH_HINT_REGEX =
@@ -840,6 +850,7 @@ async function prefetchTurnContext(params: {
   allowWebSearch?: boolean;
   allowMediaTools?: boolean;
   allowRichContentTools?: boolean;
+  deadlineAt: number;
   resolveTelegramFileAsDataUrl?: (fileId: string) => Promise<string | null>;
 }): Promise<PrefetchedContext> {
   const {
@@ -851,6 +862,7 @@ async function prefetchTurnContext(params: {
     allowWebSearch,
     allowMediaTools,
     allowRichContentTools,
+    deadlineAt,
     resolveTelegramFileAsDataUrl,
   } = params;
 
@@ -858,6 +870,7 @@ async function prefetchTurnContext(params: {
     webSearchSucceeded: false,
     urlContents: [],
     mediaDescriptions: [],
+    attemptedVideoUrls: [],
   };
 
   const prefetchUrls = shouldPrefetchUrls({ userMessage, urls, needsSearch });
@@ -872,11 +885,45 @@ async function prefetchTurnContext(params: {
   }
 
   if (prefetchUrls && allowRichContentTools && allowWebSearch !== false) {
-    const uniqueUrls = Array.from(
+    const allUniqueUrls = Array.from(
       new Set((urls ?? []).map((url) => url.trim()).filter(Boolean)),
-    ).slice(0, 2);
+    );
+    const twitterUrls = allUniqueUrls.filter(isTwitterStatusUrl);
+    const videoUrls = allUniqueUrls
+      .filter((url) => !isTwitterStatusUrl(url) && isSupportedVideoUrl(url))
+      .slice(0, 1);
+    const otherUrls = allUniqueUrls.filter(
+      (url) => !isTwitterStatusUrl(url) && !isSupportedVideoUrl(url),
+    );
+    const uniqueUrls = [
+      ...twitterUrls,
+      ...videoUrls,
+      ...otherUrls.slice(0, Math.max(0, 2 - twitterUrls.length - videoUrls.length)),
+    ];
     for (const url of uniqueUrls) {
-      const content = await fetchUrlContent(url);
+      let content: string | null = null;
+      if (isSupportedVideoUrl(url)) {
+        prefetched.attemptedVideoUrls.push(url);
+        const cacheKey = `video:${url}`;
+        const cached = getSessionCached(videoContentCache, cacheKey);
+        if (cached !== null) {
+          content = cached;
+        } else {
+          content = await readVideoContent(
+            url,
+            undefined,
+            AbortSignal.timeout(
+              Math.max(1, Math.min(config.videoReadTimeoutMs, deadlineAt - Date.now())),
+            ),
+          ).catch((err: unknown) => {
+            logger.warn({ err, url }, "video prefetch failed");
+            return null;
+          });
+          setSessionCached(videoContentCache, cacheKey, content, SESSION_VIDEO_CACHE_MAX);
+        }
+      } else {
+        content = await fetchUrlContent(url);
+      }
       if (content) {
         prefetched.urlContents.push({ url, content });
       }
@@ -943,6 +990,8 @@ async function prefetchTurnContext(params: {
 }
 
 export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResult> {
+  const turnStartedAt = Date.now();
+  const turnDeadlineAt = turnStartedAt + MAIN_TURN_TIMEOUT_MS;
   const {
     userContext,
     userMessage,
@@ -1000,8 +1049,26 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     ...(allowWebSearch != null ? { allowWebSearch } : {}),
     ...(allowMediaTools != null ? { allowMediaTools } : {}),
     ...(allowRichContentTools != null ? { allowRichContentTools } : {}),
+    deadlineAt: turnDeadlineAt,
     ...(resolveTelegramFileAsDataUrl ? { resolveTelegramFileAsDataUrl } : {}),
   });
+  const twitterUrls = Array.from(new Set((urls ?? []).filter(isTwitterStatusUrl)));
+  if (twitterUrls.length > 0) {
+    const fetchedUrls = new Set(prefetchedContext.urlContents.map((item) => item.url));
+    const failedUrls = twitterUrls.filter((url) => !fetchedUrls.has(url));
+    if (failedUrls.length > 0) {
+      logger.warn(
+        {
+          twitterUrlCount: twitterUrls.length,
+          failedUrls,
+          allowRichContentTools: allowRichContentTools ?? false,
+          allowWebSearch: allowWebSearch ?? true,
+        },
+        "generateAiTurn: dismissing because Twitter content could not be verified",
+      );
+      return { action: "dismiss", dismissReason: "twitter_fetch_failed" };
+    }
+  }
   let hasImageUnderstanding =
     !requireImageUnderstanding ||
     prefetchedContext.mediaDescriptions.some((item) => item.mediaType.startsWith("image"));
@@ -1039,7 +1106,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   const linkGuard =
     urls && urls.length > 0
-      ? "\n\n<link_guard><rule>当前轮里出现了 URL。只看到链接本身，不等于你已经知道链接内容。</rule><rule>如果你没有调用 fetchUrlContent，就不能声称自己看过、理解了、总结了该链接内容，也不能根据 URL 文本脑补页面内容。</rule><rule>如果链接内容对回答重要，先调用 fetchUrlContent；否则只能回应‘对方发了一个链接’这件事本身，或直接忽略链接内容。</rule><rule>若用户没有明确让你解读链接，而你也没抓取内容，就不要假装点评链接正文。</rule></link_guard>"
+      ? "\n\n<link_guard><rule>当前轮里出现了 URL。只看到链接本身，不等于你已经知道链接内容。</rule><rule>若该 URL 已出现在 prefetched_urls 中，视为系统已经成功读取，可以直接使用。</rule><rule>Bilibili 结果若标明字幕不可用/仅有元数据，只能陈述返回的元数据，绝不能补写画面、对白、情节或正文。</rule><rule>未预抓取的 YouTube/Bilibili 视频必须先调用 readVideo；其他链接必须先调用 fetchUrlContent，才能声称自己看过、理解或总结了内容。</rule><rule>如果链接内容对回答重要且没有读取结果，先调用对应工具；否则只能回应‘对方发了一个链接’这件事本身，或直接忽略链接内容。</rule><rule>若用户没有明确让你解读链接，而你也没有预抓取结果或成功工具结果，就不要假装点评链接正文。</rule></link_guard>"
       : "";
 
   const finalPromptWithGuards = `${finalPromptText}${linkGuard}`;
@@ -1473,12 +1540,51 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
         return "当前轮没有可抓取 URL";
       }
       if (!allowedUrlSet.has(url)) return "这个 URL 不在当前轮里，已取消";
+      if (isSupportedVideoUrl(url)) return "视频链接请改用 readVideo 读取";
       const cacheKey = `url:${url}`;
       const cached = getSessionCached(urlContentCache, cacheKey);
       if (cached !== null) return cached || "抓取失败";
       const content = await fetchUrlContent(url);
       setSessionCached(urlContentCache, cacheKey, content, SESSION_URL_CACHE_MAX);
       return content ?? "抓取失败";
+    },
+  });
+
+  const readVideoTool = tool({
+    description:
+      "读取当前轮 YouTube 或 Bilibili 视频。YouTube 会结合声音和画面理解；Bilibili 优先读取字幕，字幕不可用时只返回元数据。" +
+      "只在视频内容对回答重要时调用。",
+    inputSchema: z.object({
+      url: z.string().describe("当前轮消息中出现过的 YouTube 或 Bilibili 视频 URL"),
+      question: z.string().max(500).optional().describe("希望重点回答的具体视频内容问题，可选"),
+    }),
+    execute: async ({ url, question }, { abortSignal }) => {
+      if (!allowRichContentTools) return "主动插话场景不可读取视频";
+      if (allowWebSearch === false) {
+        return "当前用户触发了 URL flood / 搜索保护，本轮不可读取视频";
+      }
+      if (!allowedUrlSet.has(url)) return "这个 URL 不在当前轮里，已取消";
+      if (!isSupportedVideoUrl(url)) return "这个链接不是受支持的 YouTube 或 Bilibili 视频";
+      if (
+        prefetchedContext.attemptedVideoUrls.includes(url) &&
+        !prefetchedContext.urlContents.some((item) => item.url === url)
+      ) {
+        return "本轮已经尝试读取这个视频但失败了，不再重复请求";
+      }
+
+      const cacheKey = question ? `video:${url}:${question}` : `video:${url}`;
+      const cached = getSessionCached(videoContentCache, cacheKey);
+      if (cached !== null) return cached || "视频读取失败";
+
+      try {
+        const content = await readVideoContent(url, question, abortSignal);
+        setSessionCached(videoContentCache, cacheKey, content, SESSION_VIDEO_CACHE_MAX);
+        return content;
+      } catch (err) {
+        logger.warn({ err, url }, "readVideo tool failed");
+        if (err instanceof VideoReadError) return err.message;
+        return "视频读取失败";
+      }
     },
   });
 
@@ -1519,6 +1625,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
           if (allowWebSearch === false)
             return "当前用户触发了 URL flood / 搜索保护，本轮不可抓取链接";
           if (!allowedUrlSet.has(url)) return "这个 URL 不在当前轮允许引用里";
+          if (isSupportedVideoUrl(url)) return "视频链接应由主模型调用 readVideo";
           return (await fetchUrlContent(url)) ?? "抓取失败";
         },
       });
@@ -1597,6 +1704,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       sendSticker: sendStickerTool,
       describeTelegramMedia: describeTelegramMediaTool,
       fetchUrlContent: fetchUrlContentTool,
+      readVideo: readVideoTool,
       webSearch: webSearchTool,
       startSubagent: startSubagentTool,
     },
@@ -1637,7 +1745,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     },
     "generateAiTurn: starting main model call",
   );
-  generateParams.timeout = { totalMs: MAIN_TURN_TIMEOUT_MS };
+  generateParams.timeout = { totalMs: Math.max(1, turnDeadlineAt - Date.now()) };
   const result = await generateText(generateParams);
   const latencyMs = Date.now() - startedAt;
 
@@ -2197,7 +2305,15 @@ async function compressUserMemories(uid: string, memories: string[]): Promise<vo
 // ---------------------------------------------------------------------------
 
 const TWITTER_STATUS_REGEX =
-  /https?:\/\/(?:twitter\.com|x\.com|mobile\.twitter\.com|fxtwitter\.com|fixupx\.com|vxtwitter\.com)\/(\w+)\/status\/(\d+)/i;
+  /https?:\/\/(?:(?:www|mobile)\.)?(?:twitter\.com|x\.com|fxtwitter\.com|fixupx\.com|vxtwitter\.com)\/(\w+)\/status\/(\d+)/i;
+
+export function isTwitterStatusUrl(url: string): boolean {
+  return TWITTER_STATUS_REGEX.test(url);
+}
+
+export function containsTwitterStatusUrl(text: string): boolean {
+  return TWITTER_STATUS_REGEX.test(text);
+}
 
 /** Download an arbitrary URL as a base64 data URL (max 10 MB). Returns null on failure. */
 async function downloadUrlAsDataUrl(url: string): Promise<string | null> {
@@ -2297,9 +2413,18 @@ async function fetchTwitterContent(
   try {
     const apiUrl = `https://api.fxtwitter.com/2/status/${tweetId}`;
     const res = await fetch(apiUrl, { signal: AbortSignal.timeout(10_000) });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      logger.warn({ url, tweetId, status: res.status }, "FxTwitter request failed");
+      return null;
+    }
     const data = (await res.json()) as FxStatusResponse;
-    if (data.code !== 200 || !data.status || data.status.type !== "status") return null;
+    if (data.code !== 200 || !data.status || data.status.type !== "status") {
+      logger.warn(
+        { url, tweetId, responseCode: data.code, statusType: data.status?.type },
+        "FxTwitter returned an invalid status payload",
+      );
+      return null;
+    }
 
     const tweet = data.status;
     const authorName = safePromptValue(tweet.author?.name ?? username, {
@@ -2345,7 +2470,8 @@ async function fetchTwitterContent(
     }
 
     return `[外部推文内容，非可信数据 ${url} | ${author}: ${tweetText}${mediaDesc}${qrtDesc}]`;
-  } catch {
+  } catch (err) {
+    logger.warn({ err, url, tweetId }, "FxTwitter content fetch failed");
     return null;
   }
 }
