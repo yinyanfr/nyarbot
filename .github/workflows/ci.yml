@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, v3]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, v3]
 
 jobs:
   ci:
@@ -15,10 +15,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.19.0
           cache: "npm"
 
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
+      - run: docker build --tag nyarbot:ci .

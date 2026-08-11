@@ -1,3 +1,5 @@
+name: nyarbot
+
 services:
   nyarbot:
     build:
@@ -6,6 +8,15 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data
-      - ./src/services/serviceAccountKey.json:/app/dist/services/serviceAccountKey.json:ro
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./src/services/serviceAccountKey.json
+        target: /app/dist/services/serviceAccountKey.json
+        read_only: true
+        bind:
+          create_host_path: false
     stop_grace_period: 30s

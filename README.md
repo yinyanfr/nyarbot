@@ -125,14 +125,15 @@ node dist/app.js
 
 ### Docker
 
-准备好 `.env` 和 `src/services/serviceAccountKey.json` 后，使用 Compose 构建并后台运行：
+准备好 `.env` 和 `src/services/serviceAccountKey.json` 后，创建持久化目录并使用 Compose 构建：
 
 ```bash
+mkdir -p data
 docker compose up -d --build
 docker compose logs -f nyarbot
 ```
 
-运行数据保存在 Compose 目录下的 `data/` 中。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
+运行数据保存在 Compose 目录下的 `data/` 中；Compose 要求该目录和 Firebase 密钥预先存在，不会自动创建缺失的挂载源。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
 
 ## Commands & Interactions
 
