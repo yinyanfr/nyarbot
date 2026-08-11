@@ -122,6 +122,17 @@ npm run build
 node dist/app.js
 ```
 
+### Docker
+
+After preparing `.env` and `src/services/serviceAccountKey.json`, build and run the bot with Compose:
+
+```bash
+docker compose up -d --build
+docker compose logs -f nyarbot
+```
+
+Runtime data is persisted in `data/` under the Compose directory. Run `docker compose up -d --build` again after updating the code, or use `docker compose down` to stop the service.
+
 ## Commands & Interactions
 
 See [Commands & Interactions Docs](docs/commands-and-interactions.md).

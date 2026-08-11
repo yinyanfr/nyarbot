@@ -1,0 +1,11 @@
+services:
+  nyarbot:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./src/services/serviceAccountKey.json:/app/dist/services/serviceAccountKey.json:ro
+    stop_grace_period: 30s

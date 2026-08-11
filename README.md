@@ -123,6 +123,17 @@ npm run build
 node dist/app.js
 ```
 
+### Docker
+
+准备好 `.env` 和 `src/services/serviceAccountKey.json` 后，使用 Compose 构建并后台运行：
+
+```bash
+docker compose up -d --build
+docker compose logs -f nyarbot
+```
+
+运行数据保存在 Compose 目录下的 `data/` 中。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
+
 ## Commands & Interactions
 
 详见 [命令与交互文档](docs/commands-and-interactions.zh-CN.md)。
