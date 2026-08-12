@@ -11,7 +11,7 @@ nyarbot 是一个用 TypeScript (ESM) 编写的 Telegram 机器人，拥有单�
 - debounce：被 @ 或回复触发后先等群聊安静，默认 5 秒；新触发会延长，30 秒硬上限。
 - `running` / `dirty` lock：同一时间最多一个 passive/proactive AI turn；运行中有新触发时只标脏，结束后再排队判断。
 - quiet mode：30 秒内真实用户消息达到阈值后进入 3 分钟安静模式；主动插话暂停，普通非 @ / 非回复不触发。
-- Firestore append-only 记录：`events`、`turns`、`compactions` 和 `runtime/group` 是恢复、调试与 compaction 的来源。
+- SQLite append-only 记录：runtime events、turns、compactions 和 group state 是恢复、调试与 compaction 的来源。
 
 ## 数据流
 
@@ -19,7 +19,7 @@ nyarbot 是一个用 TypeScript (ESM) 编写的 Telegram 机器人，拥有单�
 Telegram Update
     │
     ▼
-app.ts（入口：初始化 Firebase、创建 Bot、注册 handler、启动主动插话检查器）
+app.ts（入口：初始化 SQLite、创建 Bot、注册 handler、启动主动插话检查器）
     │
     ▼
 handlers/index.ts（setupHandlers）
@@ -32,11 +32,11 @@ handlers/index.ts（setupHandlers）
     ├─ 群内快速命令
     │     ├─ /nighty → 立即确认 + 后台写入时间戳
     │     └─ /roll → 立即报结果；后台提取内容并 scheduleCommandTurn()
-    ├─ 用户解析（firestore.ts → 60秒进程内缓存）
+    ├─ 用户解析（persistence.ts → 60秒进程内缓存）
     ├─ 内容提取（extract-content.ts）
     │     ├─ URL 检测（entity + 正则回退）
     │     └─ 保留原始 file_id / thumbnail_file_id / 贴纸 emoji 引用
-    ├─ 本地词云持久化（local-wordcloud-store.ts）
+    ├─ 统一 SQLite 词云持久化（local-wordcloud-store.ts）
     │     ├─ 仅目标群活人消息
     │     ├─ 命令消息跳过；编辑成命令时删除旧记录
     │     ├─ 编辑消息按相同 message_id 覆盖
@@ -52,7 +52,7 @@ handlers/index.ts（setupHandlers）
     │     └─ complex → flashThinkModel
     │     └─ tech → proThinkModel
     ├─ Runtime 调度（group-runtime.ts）
-    │     ├─ 事件持久化、去重、限流、debounce、running lock
+    │     ├─ 事件写入 SQLite、去重、限流、debounce、running lock
     │     └─ 构造 summary + recent events 上下文
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 静态系统提示词（buildSystemPrompt）
@@ -60,7 +60,7 @@ handlers/index.ts（setupHandlers）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
 │     │           describeTelegramMedia、fetchUrlContent、readVideo、startSubagent
-    │     ├─ 富内容按需读取；只做会话缓存，不写 Firestore 图片缓存
+    │     ├─ 富内容按需读取；只做会话缓存，不做持久化图片缓存
     │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
     │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
     │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
@@ -93,7 +93,7 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 | `describeTelegramMedia` | 被动触发时按需描述媒体；主动路径仅可查看最新候选中选出的图片。                 |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                            |
 | `readVideo`             | 原生 Gemini 理解 YouTube；Bilibili 字幕读取，失败时仅返回元数据。              |
-| `writeDiary`            | 在 Firestore `diaryObservations` 创建、更新或撤回结构化观察。                  |
+| `writeDiary`            | 在统一 SQLite 中创建、更新或撤回结构化观察。                                   |
 | `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。        |
 | `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。       |
 
@@ -163,15 +163,15 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **Runtime events**：Firestore `events` 是恢复、调试和 compaction 的主要来源，append-only 保存用户消息、编辑、命令、bot 输出和忽略原因。
-- **对话缓冲区**：内存环形缓冲区仍保留为热缓存和 proactive 快速扫描窗口；它不是唯一上下文来源，重启恢复依赖 Firestore runtime events 与 `runtime/group.summary`。
-- **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
-- **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
-- **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
+- **Runtime events**：SQLite `runtime_events` 是恢复、调试和 compaction 的主要来源，append-only 保存用户消息、编辑、命令、bot 输出和忽略原因。
+- **对话缓冲区**：内存环形缓冲区仍保留为热缓存和 proactive 快速扫描窗口；它不是唯一上下文来源，重启恢复依赖 SQLite runtime events 与 `runtime_group` 状态。
+- **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 SQLite，进程内缓存 60 秒。
+- **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化。
+- **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `runtime_compactions` 并更新 `runtime_group`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
 
 ## 词云流水线
 
-- `src/services/local-wordcloud-store.ts` 用 SQLite 保存最近 10 天群消息和词云发布记录。
+- `src/services/local-wordcloud-store.ts` 用统一 SQLite 保存最近 10 天群消息和词云发布记录。
 - `src/libs/wordcloud.ts` 负责分词、词频统计、布局、渲染和发布。
 - 运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场，通过 SQLite slot marker 去重；错过的中午场不补发。
 - 00:02 后发布昨日最终版，重启后也会 catch up。
@@ -258,7 +258,7 @@ Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终
 一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检查日期。启动时会立即运行并扫描最近三个已结束日期，因此重启后可以补生成近期缺失日记：
 
 1. 00:02 后选取最多 12 条 active observations；若没有观察通过筛选，则依次回退到旧的 `diary/{date}.entries` 和当天持久化 runtime `events` 的限量样本。
-2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 Firestore。
+2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 SQLite。
 3. 生成或复用昨日词云。推送 Telegram 频道时，日记不超过 1024 字符则作为图片 caption，否则图片后另发正文。
 4. GitHub 发布通过 blobs/tree/commit 一次提交 Markdown 与可选的 `source/img/diary/` 图片，再非 force 更新 `main`；Markdown 使用 `/img/diary/...` 根路径。
 5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
@@ -267,16 +267,16 @@ Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终
 
 管理员私聊提供 `/diary`、`/diaryregen [date]` 预览，以及 `/diaryobs`、`/diaryshow`、`/diaryedit`、`/diaryretract` 观察管理。预览/重新生成不会保存或发布日记正文。
 
-### Firestore Schema
+### SQLite 记录
 
 ```
-diary/{YYYY-MM-DD}
+YYYY-MM-DD 对应的 diary 行
   ├── entries?: DiaryEntry[]              （旧格式回退）
   ├── diary?: string
   ├── generatedAt?: number
   └── generationRecords?: DiaryGenerationRecord[]
 
-diaryObservations/{id}
+id 对应的 diary_observations 行
   └── DiaryObservationV2
 ```
 

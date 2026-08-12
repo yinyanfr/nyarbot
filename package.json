@@ -15,7 +15,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run build && node --test dist/**/*.test.js",
+    "backup:restore": "npm run build && node dist/scripts/restore-sqlite-backup.js"
   },
   "repository": {
     "type": "git",
@@ -41,7 +42,6 @@
     "better-sqlite3": "^12.11.1",
     "dayjs": "^1.11.20",
     "dotenv": "^17.4.2",
-    "firebase-admin": "^13.8.0",
     "grammy": "^1.42.0",
     "nodejieba": "^3.5.8",
     "opencc-js": "^1.4.0",

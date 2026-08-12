@@ -1,5 +1,5 @@
 /**
- * The info of a telegram user stored in firebase users/{uid}
+ * Persistent Telegram user profile.
  */
 export interface User {
   uid: string;

@@ -4,27 +4,31 @@
 
 所有配置通过 `.env` 文件（已 gitignore）。模板在 `.env.example`。
 
-| 变量                    | 必填 | 说明                                                                        |
-| ----------------------- | ---- | --------------------------------------------------------------------------- |
-| `BOT_API_KEY`           | ✅   | Telegram Bot Token（来自 [@BotFather](https://t.me/BotFather)）             |
-| `BOT_PERSONA_NAME`      | ❌   | 人设显示名（用于提示词/帮助文案，默认：`にゃる`）                           |
-| `BOT_PERSONA_FULL_NAME` | ❌   | 人设全名（默认：`晴海猫月`）                                                |
-| `BOT_PERSONA_READING`   | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
-| `TG_ADMIN_UID`          | ✅   | 管理员 ID，用于私聊状态/重置、日记观察管理和词云命令                        |
-| `TG_GROUP_ID`           | ✅   | 目标群组 ID；其他聊天被忽略，但支持的管理员私聊命令除外                     |
-| `DEEPSEEK_API_KEY`      | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
-| `TAVILY_API_KEY`        | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
-| `CF_AIG_TOKEN`          | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
-| `CF_ACCOUNT_ID`         | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
-| `BILIBILI_SESSDATA`     | ❌   | Bilibili 登录 Cookie，用于可靠获取字幕                                      |
-| `BILIBILI_BILI_JCT`     | ❌   | Bilibili CSRF Cookie，需与其他 Bilibili 凭据一起配置                        |
-| `BILIBILI_DEDEUSERID`   | ❌   | Bilibili 用户 ID Cookie，需与其他 Bilibili 凭据一起配置                     |
-| `BOT_USERNAME`          | ✅   | Telegram bot 用户名（必填，用于 @提及匹配）                                 |
-| `GITHUB_TOKEN`          | ❌   | GitHub PAT，用于推送日记到 Hexo 博客（格式 `ghp_...`）                      |
-| `GITHUB_REPO`           | ❌   | GitHub 仓库名，格式 `owner/repo`（如 `yinyanfr/nyarbot-diary`）             |
-| `TG_DIARY_CHANNEL_ID`   | ❌   | 完整日记推送频道 ID；有词云时会一并发送                                     |
-| `LOG_LEVEL`             | ❌   | Pino 日志级别（默认：`info`）                                               |
-| `PORT`                  | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
+| 变量                         | 必填 | 说明                                                                        |
+| ---------------------------- | ---- | --------------------------------------------------------------------------- |
+| `BOT_API_KEY`                | ✅   | Telegram Bot Token（来自 [@BotFather](https://t.me/BotFather)）             |
+| `BOT_PERSONA_NAME`           | ❌   | 人设显示名（用于提示词/帮助文案，默认：`にゃる`）                           |
+| `BOT_PERSONA_FULL_NAME`      | ❌   | 人设全名（默认：`晴海猫月`）                                                |
+| `BOT_PERSONA_READING`        | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
+| `TG_ADMIN_UID`               | ✅   | 管理员 ID，用于私聊状态/重置、日记观察管理和词云命令                        |
+| `TG_GROUP_ID`                | ✅   | 目标群组 ID；其他聊天被忽略，但支持的管理员私聊命令除外                     |
+| `DEEPSEEK_API_KEY`           | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
+| `TAVILY_API_KEY`             | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
+| `CF_AIG_TOKEN`               | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
+| `CF_ACCOUNT_ID`              | ✅   | Cloudflare 账户 ID，用于 AI Gateway                                         |
+| `BILIBILI_SESSDATA`          | ❌   | Bilibili 登录 Cookie，用于可靠获取字幕                                      |
+| `BILIBILI_BILI_JCT`          | ❌   | Bilibili CSRF Cookie，需与其他 Bilibili 凭据一起配置                        |
+| `BILIBILI_DEDEUSERID`        | ❌   | Bilibili 用户 ID Cookie，需与其他 Bilibili 凭据一起配置                     |
+| `BOT_USERNAME`               | ✅   | Telegram bot 用户名（必填，用于 @提及匹配）                                 |
+| `GITHUB_TOKEN`               | ❌   | GitHub PAT，用于推送日记到 Hexo 博客（格式 `ghp_...`）                      |
+| `GITHUB_REPO`                | ❌   | GitHub 仓库名，格式 `owner/repo`（如 `yinyanfr/nyarbot-diary`）             |
+| `TG_DIARY_CHANNEL_ID`        | ❌   | 完整日记推送频道 ID；有词云时会一并发送                                     |
+| `DATABASE_PATH`              | ❌   | 统一 SQLite 数据库路径（默认：`data/nyarbot.sqlite`）                       |
+| `DATABASE_BACKUP_PASSPHRASE` | ✅   | SQLite 备份加密口令，长度必须为 20–1024 字符                                |
+| `DATABASE_BACKUP_SCHEDULE`   | ❌   | 基于 `APP_TIMEZONE` 的每日备份时间，24 小时 `HH:mm`（默认：`03:30`）        |
+| `DATABASE_BACKUP_PATH`       | ❌   | 本地加密备份目录（默认：`data/backups`）                                    |
+| `LOG_LEVEL`                  | ❌   | Pino 日志级别（默认：`info`）                                               |
+| `PORT`                       | ❌   | 未使用（长轮询模式，无 webhook 服务器）                                     |
 
 其他可选变量（带默认值）：
 
@@ -59,15 +63,15 @@
   `PROACTIVE_MAX_FAILURES`、`PROACTIVE_COOLDOWN_HIGH_MS`、
   `PROACTIVE_COOLDOWN_MEDIUM_MS`、`PROACTIVE_COOLDOWN_LOW_MS`
 - `DIARY_CHECK_INTERVAL_MS`
-- `WORDCLOUD_DB_PATH`（`data/wordcloud.sqlite`）
 - `WORDCLOUD_CHECK_INTERVAL_MS`（`60000`）
 
-当前 `.env.example` 未列出词云变量；它们仍是可选项，并使用上述默认值。
+`DATABASE_BACKUP_PASSPHRASE` 是启动必填项。必须与数据库和加密归档分开保管；丢失口令后备份无法恢复。
 
-## 本地词云存储
+## 统一 SQLite 存储
 
-- 词云使用本地 SQLite，不上传 Firestore。
-- 默认数据库路径由 `WORDCLOUD_DB_PATH` 控制，默认 `data/wordcloud.sqlite`。
+- 生产持久化由 `src/services/database.ts` 和 `src/services/persistence.ts` 实现，不初始化 Firebase Admin，也不访问 Firestore。
+- `DATABASE_PATH` 默认是 `data/nyarbot.sqlite`，统一保存用户、记忆、日记、runtime events/turns/state/compactions 和词云表。
+- 词云流水线使用同一个数据库。
 - 生成的 PNG 保存在 SQLite 同目录的 `wordcloud-artifacts/`。
 - `WORDCLOUD_CHECK_INTERVAL_MS` 同时驱动中午、晚间和跨天发布检查，不只是午夜生成。
 - 只保留最近 10 天消息。
@@ -78,24 +82,11 @@
 - 同一条消息里重复出现的同一个词只计 1 次。
 - 词云渲染内置完整 Source Han Sans 可变字体，支持简中、繁中、日文、韩文。
 
-## Firebase
+## 备份与 Firebase 维护
 
-1. 在 [console.firebase.google.com](https://console.firebase.google.com) 创建 Firebase 项目
-2. 在项目中启用 **Cloud Firestore**
-3. 生成**服务账号密钥** JSON 文件：项目设置 → 服务账号 → 生成新的私钥
-4. 保存为 `src/services/serviceAccountKey.json`（已 gitignore）
+默认情况下，bot 每天在 `APP_TIMEZONE` 的 03:30 创建在线 SQLite 快照，使用 `DATABASE_BACKUP_PASSPHRASE` 压缩加密，保存到 `DATABASE_BACKUP_PATH`，并发送给 `TG_ADMIN_UID`。本地文件名形如 `nyarbot-20260812T193000Z.sqlite.gz.enc`，保留最新七份。上传失败会通过管理员私聊报告，并在 15 分钟后重试。
 
-使用的 Firestore 集合：
-
-| 集合                     | 文档 ID          | 字段                                                                        |
-| ------------------------ | ---------------- | --------------------------------------------------------------------------- |
-| `users/{uid}`            | Telegram 用户 ID | `uid`、`nickname`、`memories[]`、`nightyTimestamp?`、`lastMorningGreet?`    |
-| `diary/{date}`           | 日期 YYYY-MM-DD  | 旧 `entries[]`、`diary?`、`generatedAt?`、`generationRecords[]`             |
-| `diaryObservations/{id}` | 观察 ID          | 结构化事件/反应、subject identity、confidence/status                        |
-| `runtime/group`          | 固定文档         | `summary`、`summaryCursorTs`、`lastProcessedMessageId?`、`lastCompactedAt?` |
-| `events/{autoId}`        | 自动 ID          | append-only 群聊事件、bot 输出、忽略原因、URL/媒体引用                      |
-| `turns/{autoId}`         | 自动 ID          | AI turn 的模型、工具调用、action、token/cache usage、latency、错误          |
-| `compactions/{autoId}`   | 自动 ID          | 工作记忆摘要快照与 cursor/token usage                                       |
+生产环境不依赖 Firebase，也不挂载运行时凭据。已 gitignore 的 `src/services/serviceAccountKey.json` 只在切换前由独立的 `tools/firestore-to-sqlite` 维护工具使用。一次性命令、检查、回滚与恢复流程见[数据库迁移与备份维护](database-maintenance.zh-CN.md)。
 
 ## DeepSeek 模型
 
@@ -122,7 +113,7 @@ YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-
 
 Bilibili 读取支持 BV 链接、遗留的 `av+数字` 链接和 `b23.tv` 短链接。AV ID 会先通过 Bilibili 公开 view API 转换成 BV ID，再由锁定版本的本地 `@xzxzzx/bilibili-mcp` 子进程调用 `get_video_transcript` 和 `get_video_metadata`。不会暴露下载或账号写操作；字幕不可用时仅返回元数据。公开元数据通常不要求 Cookie，但可靠字幕读取一般需要完整登录凭据。
 
-媒体描述只做当前进程会话缓存，不再使用 Firestore `images` 运行时缓存。
+媒体描述只做当前进程会话缓存，不写入 SQLite。
 
 ## 工具调用架构
 

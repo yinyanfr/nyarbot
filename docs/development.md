@@ -11,8 +11,9 @@
 npm ci
 cp .env.example .env
 # Edit .env with your keys
-# Place serviceAccountKey.json in src/services/
 ```
+
+Production needs no Firebase credential. `src/services/serviceAccountKey.json` is used only by the one-shot migration tool before cutover.
 
 ## Scripts
 
@@ -39,7 +40,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`/`master`:
 3. `npm run lint`
 4. `npm run format:check`
 
-No test suite is configured (the `test` script is a placeholder).
+`npm test` builds the project and runs the database backup tests.
 
 ## Key Design Decisions
 
@@ -77,7 +78,7 @@ Current retry policy: simple/complex turns retry once; tech turns do not retry t
 
 ### Why a single-group runtime?
 
-The handler still owns Telegram details, but AI scheduling goes through `groupRuntime`. That gives the bot one place for passive/proactive locking, debounce, hot-chat quiet mode, abuse gates, and Firestore turn/event records.
+The handler still owns Telegram details, but AI scheduling goes through `groupRuntime`. That gives the bot one place for passive/proactive locking, debounce, hot-chat quiet mode, abuse gates, and SQLite turn/event records.
 
 Runtime defaults:
 
@@ -129,7 +130,7 @@ The bot records structured `DiaryObservationV2` records via `writeDiary`, includ
 
 ### In-memory state
 
-The conversation buffer, user cache, update dedup set, and proactive timer state are still in-process memory, but conversation recovery no longer depends only on the buffer. Firestore `events` are the append-only fact log, and `runtime/group.summary` plus recent events are the long-context source; the buffer is a hot cache and fast scan window.
+The conversation buffer, user cache, update dedup set, and proactive timer state are still in-process memory, but conversation recovery no longer depends only on the buffer. SQLite `runtime_events` are the append-only fact log, and `runtime_group` plus recent events are the long-context source; the buffer is a hot cache and fast scan window.
 
 ### Logger architecture
 
@@ -154,9 +155,11 @@ Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead 
 
 URL summaries are cached only in-process. Lightweight URL markers remain in history, while proactive URL fetching stays disabled.
 
-## Firestore Schema
+## Unified SQLite Schema
 
-### `users/{uid}`
+`src/services/database.ts` owns schema initialization and versioning; `src/services/persistence.ts` owns application CRUD. The default database is `data/nyarbot.sqlite`.
+
+### Users
 
 ```typescript
 interface User {
@@ -191,23 +194,23 @@ interface DiaryObservationV2 {
   status: "active" | "superseded" | "retracted";
 }
 
-// diary/{date}
+// diary row keyed by date
 // entries?: DiaryEntry[] (legacy fallback)
 // diary?: string (generated diary text)
 // generatedAt?: number (ms since epoch)
 // generationRecords?: DiaryGenerationRecord[]
 
-// diaryObservations/{id}: DiaryObservationV2
+// diary_observations row keyed by id: DiaryObservationV2
 ```
 
 ## Wordcloud Publishing
 
 The local SQLite store tracks noon, evening, and final-daily publication slots. While running, noon is attempted from 12:00–17:59 and evening after 18:00; a missed noon slot is not backfilled. Generated artifacts live in `wordcloud-artifacts/`, generation/publishing retries up to three times, and the previous-day final image is reused by diary channel and GitHub publishing.
 
-### Runtime collections
+### Runtime tables
 
 ```typescript
-// runtime/group
+// runtime_group
 interface RuntimeGroupStateDoc {
   summary: string;
   summaryCursorTs: number;
@@ -216,12 +219,12 @@ interface RuntimeGroupStateDoc {
   updatedAt: number;
 }
 
-// events/{autoId}
+// runtime_events
 // append-only user/edit/command/bot events with URL/media refs and ignoredReason.
 
-// turns/{autoId}
+// runtime_turns
 // model, tier, needsSearch, tool calls, action, messages, token/cache usage, latency, error.
 
-// compactions/{autoId}
+// runtime_compactions
 // append-only compaction snapshots with old/new cursors and token usage.
 ```

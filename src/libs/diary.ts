@@ -8,8 +8,8 @@ import {
   listActiveDiaryObservationsByDate,
   loadRuntimeEventsForLocalDate,
   writeGeneratedDiary,
-} from "../services/firestore.js";
-import type { RuntimeEventRecord } from "../services/firestore.js";
+} from "../services/persistence.js";
+import type { RuntimeEventRecord } from "../services/persistence.js";
 import { formatTimestamp, now, yesterdayDateStr } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub, waitForGithubPagesPublish } from "../services/github.js";

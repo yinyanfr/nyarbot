@@ -11,7 +11,7 @@ A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, with Gemini 3.5 Flash-Lite taking over replies when DeepSeek is unavailable. Gemini also handles vision and diary notices through Cloudflare AI Gateway, while Firestore provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
+Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, with Gemini 3.5 Flash-Lite taking over replies when DeepSeek is unavailable. Gemini also handles vision and diary notices through Cloudflare AI Gateway, while one unified SQLite database provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
 
 ## Overview
 
@@ -59,8 +59,8 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 | AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
 | Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
 | Search / Extraction | `@tavily/ai-sdk`                                       |
-| Database            | `firebase-admin` (Firestore)                           |
-| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas`     |
+| Database            | `better-sqlite3` (unified SQLite)                      |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
 | Runtime             | Node.js + TypeScript ESM                               |
 | Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
@@ -68,7 +68,7 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 
 ```text
 src/
-├── app.ts                      # Bootstraps bot, Firebase, diary, wordcloud, proactive loop, logging
+├── app.ts                      # Bootstraps bot, SQLite, diary, wordcloud, proactive loop, logging
 ├── configs/
 │   └── env.ts                  # Environment loading and validation
 ├── handlers/
@@ -87,17 +87,17 @@ src/
 │   ├── proactive.ts            # Proactive scheduling and dispatch
 │   ├── diary.ts                # Diary generation and publishing
 │   ├── wordcloud.ts            # Wordcloud generation, layout, rendering, publishing
+│   ├── database-backup.ts      # Daily encrypted SQLite backups
 │   ├── format-telegram.ts      # Markdown → Telegram HTML
 │   ├── stickers.ts             # emoji → file_id sticker routing
 │   ├── telegram-image.ts       # Telegram file download helpers
 │   ├── logger.ts               # pino + admin DM notifications
 │   └── time.ts                 # Timezone utilities
 ├── services/
-│   ├── firestore.ts            # Firestore CRUD
-│   ├── local-wordcloud-store.ts # Local SQLite wordcloud storage and activity stats
-│   ├── github.ts               # Hexo diary publishing
-│   ├── index.ts                # Firebase Admin initialization
-│   └── serviceAccountKey.json  # Firebase credentials (gitignored)
+│   ├── database.ts             # SQLite connection, schema, and migrations
+│   ├── persistence.ts          # User, diary, and runtime persistence
+│   ├── local-wordcloud-store.ts # Wordcloud queries and publication records
+│   └── github.ts               # Hexo diary publishing
 └── global.d.ts                 # Shared types
 ```
 
@@ -112,19 +112,16 @@ npm ci
 # 2. Configure environment variables
 cp .env.example .env
 
-# 3. Place the Firebase service account key
-# Save serviceAccountKey.json to src/services/
-
-# 4. Build
+# 3. Build
 npm run build
 
-# 5. Run
+# 4. Run
 node dist/app.js
 ```
 
 ### Docker
 
-After preparing `.env` and `src/services/serviceAccountKey.json`, create the persistent directory and build the bot with Compose:
+After preparing `.env`, create the persistent directory and build the bot with Compose:
 
 ```bash
 mkdir -p data
@@ -132,7 +129,7 @@ docker compose up -d --build
 docker compose logs -f nyarbot
 ```
 
-Runtime data is persisted in `data/` under the Compose directory. Compose requires this directory and the Firebase key to exist instead of creating missing bind sources. Run `docker compose up -d --build` again after updating the code, or use `docker compose down` to stop the service.
+The unified database defaults to `data/nyarbot.sqlite`. Compose persists the whole `data/` directory and does not mount Firebase credentials. The directory must already exist because Compose does not create a missing bind source. Run `docker compose up -d --build` again after updating the code, or use `docker compose down` to stop the service.
 
 ## Commands & Interactions
 
@@ -170,28 +167,31 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 
 See [Configuration Docs](docs/configuration.md).
 
-| Variable                      | Required | Description                                                               |
-| ----------------------------- | -------- | ------------------------------------------------------------------------- |
-| `BOT_API_KEY`                 | ✅       | Telegram bot token                                                        |
-| `BOT_USERNAME`                | ✅       | Bot username (must match Telegram)                                        |
-| `TG_GROUP_ID`                 | ✅       | Target group ID                                                           |
-| `TG_ADMIN_UID`                | ✅       | Admin Telegram user ID                                                    |
-| `DEEPSEEK_API_KEY`            | ✅       | DeepSeek API key                                                          |
-| `TAVILY_API_KEY`              | ✅       | Tavily API key                                                            |
-| `CF_AIG_TOKEN`                | ✅       | Cloudflare AI Gateway token                                               |
-| `CF_ACCOUNT_ID`               | ✅       | Cloudflare account ID                                                     |
-| `BOT_PERSONA_NAME`            | ❌       | Persona display name                                                      |
-| `BOT_PERSONA_FULL_NAME`       | ❌       | Persona full name                                                         |
-| `BOT_PERSONA_READING`         | ❌       | Persona reading                                                           |
-| `GITHUB_TOKEN`                | ❌       | GitHub PAT for Hexo diary publishing                                      |
-| `GITHUB_REPO`                 | ❌       | GitHub repo in `owner/repo` form                                          |
-| `TG_DIARY_CHANNEL_ID`         | ❌       | Telegram channel ID for full diary publishing                             |
-| `WORDCLOUD_DB_PATH`           | ❌       | Local SQLite path for wordcloud storage (default `data/wordcloud.sqlite`) |
-| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌       | Wordcloud publication-slot check interval (default `60000`)               |
+| Variable                      | Required | Description                                                 |
+| ----------------------------- | -------- | ----------------------------------------------------------- |
+| `BOT_API_KEY`                 | ✅       | Telegram bot token                                          |
+| `BOT_USERNAME`                | ✅       | Bot username (must match Telegram)                          |
+| `TG_GROUP_ID`                 | ✅       | Target group ID                                             |
+| `TG_ADMIN_UID`                | ✅       | Admin Telegram user ID                                      |
+| `DEEPSEEK_API_KEY`            | ✅       | DeepSeek API key                                            |
+| `TAVILY_API_KEY`              | ✅       | Tavily API key                                              |
+| `CF_AIG_TOKEN`                | ✅       | Cloudflare AI Gateway token                                 |
+| `CF_ACCOUNT_ID`               | ✅       | Cloudflare account ID                                       |
+| `BOT_PERSONA_NAME`            | ❌       | Persona display name                                        |
+| `BOT_PERSONA_FULL_NAME`       | ❌       | Persona full name                                           |
+| `BOT_PERSONA_READING`         | ❌       | Persona reading                                             |
+| `GITHUB_TOKEN`                | ❌       | GitHub PAT for Hexo diary publishing                        |
+| `GITHUB_REPO`                 | ❌       | GitHub repo in `owner/repo` form                            |
+| `TG_DIARY_CHANNEL_ID`         | ❌       | Telegram channel ID for full diary publishing               |
+| `DATABASE_PATH`               | ❌       | Unified SQLite path (default `data/nyarbot.sqlite`)         |
+| `DATABASE_BACKUP_PASSPHRASE`  | ✅       | SQLite backup encryption passphrase, at least 20 characters |
+| `DATABASE_BACKUP_SCHEDULE`    | ❌       | Daily backup time, default `03:30` in `APP_TIMEZONE`        |
+| `DATABASE_BACKUP_PATH`        | ❌       | Local encrypted backup directory (default `data/backups`)   |
+| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌       | Wordcloud publication-slot check interval (default `60000`) |
 
 ## Wordcloud Notes
 
-- Wordcloud source messages live only in local SQLite, not Firestore.
+- Wordcloud source messages and all other persistent data share the unified SQLite database.
 - Only human users count. The bot itself and other bots are excluded from both the cloud and the activity leaderboard.
 - Command messages are excluded. If a normal message is later edited into a command, it is removed from the local wordcloud store.
 - Edited messages overwrite by the same `message_id`, so the cloud uses the final text.
@@ -222,6 +222,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 - [Configuration](docs/configuration.md)
 - [Commands & Interactions](docs/commands-and-interactions.md)
 - [Development](docs/development.md)
+- [Database Migration & Backup Maintenance](docs/database-maintenance.md)
 
 中文文档：
 

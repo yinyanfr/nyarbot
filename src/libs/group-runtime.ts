@@ -1,18 +1,18 @@
 import config from "../configs/env.js";
 import { APICallError } from "ai";
 import {
-  appendCompactionRecord,
   appendRuntimeEvent,
+  appendRuntimeEventAndAdvance,
+  commitRuntimeCompaction,
   appendTurnRecord,
   loadRecentRuntimeEvents,
   loadRecentTurnRecords,
   loadRuntimeGroupState,
-  writeRuntimeGroupState,
   type RuntimeEventRecord,
   type RuntimeMediaRef,
   type RuntimeReplyRef,
   type RuntimeTurnRecord,
-} from "../services/firestore.js";
+} from "../services/persistence.js";
 import { generateConversationCompaction } from "./ai.js";
 import { logger } from "./logger.js";
 
@@ -299,7 +299,7 @@ class SingleGroupRuntime {
       (!quiet || input.triggered) &&
       stats.cooldownUntilMs <= now;
 
-    await appendRuntimeEvent({
+    const event: RuntimeEventRecord = {
       chatId: input.chatId,
       ...(input.messageId != null ? { messageId: input.messageId } : {}),
       ...(input.updateId != null ? { updateId: input.updateId } : {}),
@@ -313,12 +313,14 @@ class SingleGroupRuntime {
       ...(input.replyTo ? { replyTo: input.replyTo } : {}),
       ts: now,
       ...(ignoredReason ? { ignoredReason } : {}),
-    });
+    };
 
     this.state.lastProcessedEventTs = now;
     if (input.messageId != null) {
       this.state.lastProcessedMessageId = input.messageId;
-      await writeRuntimeGroupState({ lastProcessedMessageId: input.messageId });
+      await appendRuntimeEventAndAdvance(event, input.messageId);
+    } else {
+      await appendRuntimeEvent(event);
     }
 
     const disabledReasons: string[] = [];
@@ -515,19 +517,22 @@ class SingleGroupRuntime {
         throw err;
       }
 
-      await appendCompactionRecord({
-        oldCursorTs: runtime.summaryCursorTs,
-        newCursorTs,
-        summary: result.summary,
-        inputTokens: result.inputTokens ?? 0,
-        outputTokens: result.outputTokens ?? 0,
-        createdAt: Date.now(),
-      });
-      await writeRuntimeGroupState({
-        summary: result.summary,
-        summaryCursorTs: newCursorTs,
-        lastCompactedAt: Date.now(),
-      });
+      const completedAt = Date.now();
+      await commitRuntimeCompaction(
+        {
+          oldCursorTs: runtime.summaryCursorTs,
+          newCursorTs,
+          summary: result.summary,
+          inputTokens: result.inputTokens ?? 0,
+          outputTokens: result.outputTokens ?? 0,
+          createdAt: completedAt,
+        },
+        {
+          summary: result.summary,
+          summaryCursorTs: newCursorTs,
+          lastCompactedAt: completedAt,
+        },
+      );
       logger.info(
         {
           oldCursorTs: runtime.summaryCursorTs,

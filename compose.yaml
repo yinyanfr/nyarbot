@@ -13,10 +13,4 @@ services:
         target: /app/data
         bind:
           create_host_path: false
-      - type: bind
-        source: ./src/services/serviceAccountKey.json
-        target: /app/dist/services/serviceAccountKey.json
-        read_only: true
-        bind:
-          create_host_path: false
     stop_grace_period: 30s

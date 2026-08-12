@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Unified SQLite persistence and encrypted backups** (`src/services/database.ts`, `src/services/persistence.ts`, `src/libs/database-backup.ts`, `tools/firestore-to-sqlite`): production persistence now uses `data/nyarbot.sqlite`; a one-shot maintenance tool migrates Firestore and the legacy wordcloud database, and daily encrypted SQLite backups are sent to the Telegram admin.
 - **Local AI routing and advisor hints** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): short casual chats, technical/math prompts, detailed requests, and current-fact queries can now be fast-pathed locally before falling back to full classification.
 - **`/stroke` command** (`src/handlers/index.ts`, docs): added a dedicated petting reaction flow parallel to `/shock`.
 - **Fallback rescue send path** (`src/libs/ai.ts`, `src/handlers/index.ts`): dismissed raw drafts are now retried through a real `send_message` rescue flow before sticker-only fallback, so visible replies stay closer to the model's intended output.

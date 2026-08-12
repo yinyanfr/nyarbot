@@ -59,7 +59,7 @@
   1. Twitter/X 推文链接 → FxEmbed API v2（`/2/status/{id}`）
   2. 其他链接 → 直接抓取 `<title>`/`<meta description>`
   3. 回退 → Tavily Extract
-- 链接摘要缓存为进程内会话缓存，不写入 Firestore。
+- 链接摘要缓存为进程内会话缓存，不写入 SQLite。
 
 ### 贴纸
 
@@ -123,7 +123,7 @@
 
 如果本轮在模型生成前已经完成成功的搜索预取，这次预取就算已经搜索过；只有结果仍不足时，模型才需要再额外调用 `webSearch`。
 
-所有记忆/昵称工具在写入 Firestore 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
+所有记忆/昵称工具在写入 SQLite 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
 
 ### 工具调用流程
 
@@ -132,9 +132,9 @@
                                         │
                                         ├─ 模型调用 send_message → 文本添加到 messages[]
                                         ├─ 模型调用 dismiss → dismissed = true
-                                        ├─ 模型调用 saveMemory → Firestore 写入
-                                        ├─ 模型调用 setNickname → Firestore 写入
-                                        ├─ 模型调用 deleteMemory → Firestore 删除
+                                        ├─ 模型调用 saveMemory → SQLite 写入
+                                        ├─ 模型调用 setNickname → SQLite 写入
+                                        ├─ 模型调用 deleteMemory → SQLite 删除
                                          ├─ 模型调用 sendSticker → 选择 file_id 分发
                                          ├─ 模型调用 describeTelegramMedia → 按需媒体描述
                                          ├─ 模型调用 fetchUrlContent → 按需 URL 摘要

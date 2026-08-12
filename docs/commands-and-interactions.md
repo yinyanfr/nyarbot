@@ -59,7 +59,7 @@ Before classification, the handler runs a lightweight local route so short chats
   1. **Twitter/X status links** → FxEmbed API v2 (`/2/status/{id}`)
   2. **Other links** → direct `fetch()` + HTML title/meta description extraction
   3. **Fallback** → Tavily Extract summarization
-- URL content cache is in-memory (session-scoped), not persisted to Firestore.
+- URL content cache is in-memory (session-scoped), not persisted to SQLite.
 
 ### Stickers
 
@@ -123,7 +123,7 @@ The `generateAiTurn()` function exposes these tools to the model:
 
 If a web search already succeeded during prefetch before generation, that counts as the turn's required search; the model only needs to call `webSearch` again when the prefetched result is still insufficient.
 
-All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
+All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to SQLite.
 
 ### Tool Call Flow
 
@@ -132,9 +132,9 @@ User message → classifyMessage() → generateAiTurn()
                                         │
                                         ├─ Model calls send_message → text added to messages[]
                                         ├─ Model calls dismiss → dismissed = true
-                                        ├─ Model calls saveMemory → Firestore write
-                                        ├─ Model calls setNickname → Firestore write
-                                        ├─ Model calls deleteMemory → Firestore delete
+                                        ├─ Model calls saveMemory → SQLite write
+                                        ├─ Model calls setNickname → SQLite write
+                                        ├─ Model calls deleteMemory → SQLite delete
                                          ├─ Model calls sendSticker → file_id selected for dispatch
                                          ├─ Model calls describeTelegramMedia → on-demand media description
                                          ├─ Model calls fetchUrlContent → on-demand URL summary

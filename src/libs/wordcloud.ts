@@ -168,7 +168,7 @@ const BUNDLED_CJK_FONT_PATH = fileURLToPath(
 const DEFAULT_FONT_FAMILY =
   '"NyarbotWordcloudCJK", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif';
 const WORDCLOUD_ARTIFACT_DIR = path.resolve(
-  path.dirname(config.wordcloudDbPath),
+  path.dirname(config.databasePath),
   "wordcloud-artifacts",
 );
 const STOP_WORDS = new Set([

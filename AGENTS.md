@@ -32,14 +32,14 @@ node dist/app.js   # run the compiled bot
 | Telegram bot framework | `grammy` v1                                                |
 | AI / LLM               | `ai` (Vercel AI SDK v6) with DeepSeek via `@ai-sdk/openai` |
 | Web search             | `@tavily/ai-sdk`                                           |
-| Database               | `firebase-admin` (Firestore)                               |
+| Database               | `better-sqlite3` (unified SQLite)                          |
 
 ## Architecture
 
 - `src/app.ts` — bot entrypoint (imports `dotenv/config`, creates Bot, registers handlers, creates ProactiveCallbacks, starts proactive checker)
 - `src/configs/env.ts` — typed config reader from `process.env`
 - `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, command routing, runtime ingestion, sendAiMessages
-- `src/libs/group-runtime.ts` — single-group runtime: message-level dedup, abuse gates, debounce, running/dirty lock, quiet mode, Firestore event/turn persistence, compaction trigger
+- `src/libs/group-runtime.ts` — single-group runtime: message-level dedup, abuse gates, debounce, running/dirty lock, quiet mode, SQLite event/turn persistence, compaction trigger
 - `src/libs/ai.ts` — DeepSeek providers (no-think + thinking) with Gemini 3.5 Flash-Lite reply fallback, `classifyMessage()`, `generateAiTurn()` with stable tool-call architecture, `probeGate()` for proactive, one-shot `startSubagent`, compaction generation, on-demand rich-content tools
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (static persona + rules), `buildSessionContextBlock()` (summary/history/user data), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (current time + per-turn dynamic state)
 - `src/libs/conversation-buffer.ts` — in-memory hot ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
@@ -49,10 +49,11 @@ node dist/app.js   # run the compiled bot
 - `src/libs/video.ts` — stable video reader backend: native Gemini YouTube understanding and read-only Bilibili MCP transcript/metadata access
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
 - `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini 3.5 Flash-Lite group notice
+- `src/libs/database-backup.ts` — daily online SQLite snapshot, encryption, local retention, and Telegram admin delivery
 - `src/libs/time.ts` — dayjs timezone utilities: `now()`, `todayDateStr()`, `yesterdayDateStr()`, `formatTimestamp()`, `formatSystemPromptTime()`, configurable `APP_TIMEZONE`
 - `src/libs/index.ts` — re-exports from `ai.ts`
-- `src/services/index.ts` — Firebase Admin SDK initialization
-- `src/services/firestore.ts` — Firestore operations: users, structured diary observations/generation records, plus runtime `events`, `turns`, `runtime/group`, and `compactions`
+- `src/services/database.ts` — unified SQLite connection, schema initialization, and migrations
+- `src/services/persistence.ts` — SQLite operations for users, diary observations/generation records, runtime events/turns/state, and compactions
 - `src/services/github.ts` — Git Data API publishing: `pushDiaryToGithub()` batches Hexo Markdown and optional wordcloud image into one commit; external repo automation may deploy Pages
 - `src/global.d.ts` — shared `User`, `DiaryEntry`, `DiaryObservationV2`, and `DiaryGenerationRecord` types
 
@@ -60,13 +61,14 @@ node dist/app.js   # run the compiled bot
 
 - All secrets live in `.env` (gitignored). Template at `.env.example`.
 - `dotenv/config` is imported at the top of `src/app.ts`.
-- Firebase service account JSON is at `src/services/serviceAccountKey.json` (gitignored).
+- `DATABASE_BACKUP_PASSPHRASE` is required and must be kept separately from encrypted backup archives.
+- Firebase credentials are not used or mounted by production. `src/services/serviceAccountKey.json` is needed only by `tools/firestore-to-sqlite` during the one-shot maintenance migration before cutover.
 - `GITHUB_TOKEN` and `GITHUB_REPO` are optional — bot runs fine without GitHub publishing.
 
 ## Conventions
 
 - The bot is scoped to a **single Telegram group** (`tgGroupId` in config). Ignore other chats except supported admin DM commands.
-- User nicknames and memories are stored in Firestore under `users/{uid}`.
+- User nicknames and memories are stored in the unified SQLite database at `DATABASE_PATH` (default `data/nyarbot.sqlite`).
 - The bot is meant to reply naturally, memorize users, understand images/stickers, and proactively join conversations — not just respond to commands.
 - **Language**: The group chat is in Simplified Chinese. System prompt, classification prompt, and bot responses are in Chinese. Match the user's language if they switch.
 - **DeepSeek API**: Base URL is `https://api.deepseek.com` (no `/v1` suffix). Thinking mode is **ON by default** — must explicitly send `thinking: { type: "disabled" }` for simple/fast responses.
@@ -77,7 +79,7 @@ node dist/app.js   # run the compiled bot
 - **Single-group runtime**: Passive and proactive AI turns must go through `groupRuntime` so debounce, `running`, `dirty`, and quiet mode stay coherent.
 - **KV cache strategy**: Keep `buildSystemPrompt()` byte-stable. Current time, hot-chat state, naturalness feedback, search/media availability, and mandatory search hints belong in late-binding user-context tail.
 - **Stable tool schema**: `generateAiTurn()` keeps the main tool set stable (`send_message`, `dismiss`, memory tools, diary, sticker, rich-content tools, `webSearch`, `startSubagent`). Tools return a runtime-disabled reason internally instead of disappearing from the schema.
-- **Compaction vs diary**: Compaction is untrusted working memory under `compactions` and `runtime/group.summary`. Structured observations live under `diaryObservations`; generated diaries and generation records live under `diary/{date}`. Do not mix them.
+- **Compaction vs diary**: Compaction remains untrusted working memory in SQLite runtime tables. Structured observations and generated diaries are separate SQLite records. Do not mix them.
 - **`formatForTelegramHtml`**: AI text and Markdown-enabled reply paths are converted to Telegram HTML; deterministic command replies/captions may bypass it.
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`webSearch` tool**: Keep schema stable. When flood protection disables search, expose a disabled tool that returns the reason; do not set the tool to `undefined`.

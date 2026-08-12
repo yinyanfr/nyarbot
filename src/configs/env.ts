@@ -33,6 +33,28 @@ function validateTimezone(timezone: string): string {
   }
 }
 
+function validateBackupPassphrase(value: string): string {
+  if (value.length < 20) {
+    throw new Error(
+      "Invalid environment variable: DATABASE_BACKUP_PASSPHRASE must be at least 20 characters",
+    );
+  }
+  if (value.length > 1024) {
+    throw new Error("Invalid environment variable: DATABASE_BACKUP_PASSPHRASE is too long");
+  }
+  return value;
+}
+
+function validateBackupSchedule(value: string): string {
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) {
+    throw new Error(
+      "Invalid environment variable: DATABASE_BACKUP_SCHEDULE must use HH:mm (24-hour) format",
+    );
+  }
+  return value;
+}
+
 const required = {
   BOT_USERNAME: process.env.BOT_USERNAME,
   BOT_API_KEY: process.env.BOT_API_KEY,
@@ -42,6 +64,7 @@ const required = {
   TAVILY_API_KEY: process.env.TAVILY_API_KEY,
   CF_AIG_TOKEN: process.env.CF_AIG_TOKEN,
   CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID,
+  DATABASE_BACKUP_PASSPHRASE: process.env.DATABASE_BACKUP_PASSPHRASE,
 } as const;
 
 for (const [key, value] of Object.entries(required)) {
@@ -81,7 +104,10 @@ const config = {
   logAppName: process.env.LOG_APP_NAME ?? "nyarbot",
   adminDmMinIntervalMs: parseNumberEnv("ADMIN_DM_MIN_INTERVAL_MS", 5_000),
   conversationBufferPath: process.env.CONVERSATION_BUFFER_PATH ?? "data/conversation-buffer.json",
-  wordcloudDbPath: process.env.WORDCLOUD_DB_PATH ?? "data/wordcloud.sqlite",
+  databasePath: process.env.DATABASE_PATH ?? "data/nyarbot.sqlite",
+  databaseBackupPassphrase: validateBackupPassphrase(requireEnv("DATABASE_BACKUP_PASSPHRASE")),
+  databaseBackupSchedule: validateBackupSchedule(process.env.DATABASE_BACKUP_SCHEDULE ?? "03:30"),
+  databaseBackupPath: process.env.DATABASE_BACKUP_PATH ?? "data/backups",
   proactiveCheckIntervalMs: parseNumberEnv("PROACTIVE_CHECK_INTERVAL_MS", 15_000),
   proactiveWindowMs: parseNumberEnv("PROACTIVE_WINDOW_MS", 3 * 60 * 1000),
   proactiveMessageDelayMs: parseNumberEnv("PROACTIVE_MESSAGE_DELAY_MS", 400),

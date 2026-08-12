@@ -3,7 +3,7 @@ import { Bot, InlineKeyboard } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
-import { initFirebase } from "./services/index.js";
+import { closeDatabase, initDatabase } from "./services/database.js";
 import { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./libs/proactive.js";
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
@@ -15,25 +15,25 @@ import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.j
 import { groupRuntime } from "./libs/group-runtime.js";
 import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
 import { closeVideoReader } from "./libs/video.js";
-import {
-  closeLocalWordcloudStore,
-  initLocalWordcloudStore,
-} from "./services/local-wordcloud-store.js";
+import { DatabaseBackupService } from "./libs/database-backup.js";
 
 let diaryTimer: ReturnType<typeof setInterval> | undefined;
 let wordcloudTimer: ReturnType<typeof setInterval> | undefined;
 let bufferSaveTimer: ReturnType<typeof setInterval> | undefined;
-
-initFirebase();
+let databaseBackup: DatabaseBackupService | undefined;
+let shuttingDown = false;
+let activeMiddleware = 0;
+let resolveMiddlewareDrain: (() => void) | undefined;
 
 type BotContext = import("./handlers/context.js").BotContext;
 
 const bot = new Bot<BotContext>(config.botApiKey);
 
 // Auto-retry: handles 429 rate limit errors so the bot doesn't crash
-bot.api.config.use(autoRetry());
+bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
 
 async function main(): Promise<void> {
+  const database = initDatabase();
   // Populate bot.botInfo before registering handlers so there's no window in
   // which polling is live but handlers are absent. Avoids dropped updates at
   // startup and obviates onStart's role as a registration site.
@@ -44,11 +44,30 @@ async function main(): Promise<void> {
   // Forward warn/error logs to admin DM from now on
   initAdminNotify(bot.api);
 
+  databaseBackup = new DatabaseBackupService({
+    database,
+    api: bot.api,
+    adminUid: config.tgAdminUid,
+    passphrase: config.databaseBackupPassphrase,
+    archiveDirectory: config.databaseBackupPath,
+    schedule: config.databaseBackupSchedule,
+    timeZone: config.appTimezone,
+  });
+  databaseBackup.start();
+
+  bot.use(async (_ctx, next) => {
+    activeMiddleware += 1;
+    try {
+      await next();
+    } finally {
+      activeMiddleware -= 1;
+      if (activeMiddleware === 0) resolveMiddlewareDrain?.();
+    }
+  });
   setupHandlers(bot, botInfo);
 
   // Restore conversation context from last session
   await loadConversationBuffer();
-  initLocalWordcloudStore();
 
   const proactiveCallbacks: ProactiveCallbacks = {
     sendText: async (text: string) => {
@@ -206,38 +225,44 @@ main().catch((err: unknown) => {
   process.exit(1);
 });
 
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopProactiveChecker();
+  if (diaryTimer) clearInterval(diaryTimer);
+  if (wordcloudTimer) clearInterval(wordcloudTimer);
+  if (bufferSaveTimer) clearInterval(bufferSaveTimer);
+  await bot.stop();
+  if (activeMiddleware > 0) {
+    await new Promise<void>((resolve) => {
+      resolveMiddlewareDrain = resolve;
+    });
+    resolveMiddlewareDrain = undefined;
+  }
+  await databaseBackup?.close();
+  await closeVideoReader();
+  await saveConversationBuffer().catch(() => void 0);
+  closeDatabase();
+}
+
 // Graceful shutdown
 process.once("SIGINT", () => {
-  stopProactiveChecker();
-  if (diaryTimer) clearInterval(diaryTimer);
-  if (wordcloudTimer) clearInterval(wordcloudTimer);
-  if (bufferSaveTimer) clearInterval(bufferSaveTimer);
-  closeLocalWordcloudStore();
-  void closeVideoReader();
-  saveConversationBuffer().catch(() => void 0);
-  void bot.stop();
+  void shutdown();
 });
 process.once("SIGTERM", () => {
-  stopProactiveChecker();
-  if (diaryTimer) clearInterval(diaryTimer);
-  if (wordcloudTimer) clearInterval(wordcloudTimer);
-  if (bufferSaveTimer) clearInterval(bufferSaveTimer);
-  closeLocalWordcloudStore();
-  void closeVideoReader();
-  saveConversationBuffer().catch(() => void 0);
-  void bot.stop();
+  void shutdown();
 });
 
 // Crash guards: ensure unhandled errors are logged before exit
 process.once("uncaughtException", (err) => {
-  closeLocalWordcloudStore();
+  closeDatabase();
   void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal({ err }, "uncaught exception — exiting");
   process.exit(1);
 });
 process.once("unhandledRejection", (reason) => {
-  closeLocalWordcloudStore();
+  closeDatabase();
   void closeVideoReader();
   saveConversationBuffer().catch(() => void 0);
   logger.fatal(

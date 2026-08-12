@@ -11,8 +11,9 @@
 npm ci
 cp .env.example .env
 # 编辑 .env 填入你的密钥
-# 将 serviceAccountKey.json 放到 src/services/
 ```
+
+生产环境不需要 Firebase 凭据。`src/services/serviceAccountKey.json` 只在切换前供一次性迁移工具使用。
 
 ## 脚本
 
@@ -39,7 +40,7 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` �
 3. `npm run lint`
 4. `npm run format:check`
 
-没有配置测试套件（`test` 脚本是占位符）。
+`npm test` 会先构建项目，再运行数据库备份测试。
 
 ## 关键设计决策
 
@@ -77,7 +78,7 @@ DeepSeek 输出 Markdown（粗体、斜体、代码、链接、LaTeX 数学）�
 
 ### 为什么有单群 Runtime？
 
-handler 仍负责 Telegram 细节，但 AI 调度统一交给 `groupRuntime`。这样可以保证 passive/proactive 不并发、群聊白热化时不抢话、刷屏用户不会触发大量模型调用，并且每轮模型输入/输出、工具调用、token usage 都能写入 Firestore 供调试。
+handler 仍负责 Telegram 细节，但 AI 调度统一交给 `groupRuntime`。这样可以保证 passive/proactive 不并发、群聊白热化时不抢话、刷屏用户不会触发大量模型调用，并且每轮模型输入/输出、工具调用、token usage 都能写入 SQLite 供调试。
 
 Runtime 的默认阈值：
 
@@ -129,7 +130,7 @@ Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳�
 
 ### 进程内状态
 
-对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态仍在进程内存中，但对话恢复和调试不再只依赖缓冲区。Firestore `events` 是 append-only 事实记录，`runtime/group.summary` + recent events 是长期上下文来源；内存 buffer 是热缓存和快速扫描窗口。
+对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态仍在进程内存中，但对话恢复和调试不再只依赖缓冲区。SQLite `runtime_events` 是 append-only 事实记录，`runtime_group` + recent events 是长期上下文来源；内存 buffer 是热缓存和快速扫描窗口。
 
 ### 日志架构
 
@@ -154,9 +155,11 @@ Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描
 
 URL 摘要只做进程内缓存；历史会保留轻量 URL 标记，但主动路径不抓取 URL 内容。
 
-## Firestore Schema
+## 统一 SQLite Schema
 
-### `users/{uid}`
+`src/services/database.ts` 负责 schema 初始化与版本，`src/services/persistence.ts` 负责应用 CRUD。默认数据库是 `data/nyarbot.sqlite`。
+
+### Users
 
 ```typescript
 interface User {
@@ -191,23 +194,23 @@ interface DiaryObservationV2 {
   status: "active" | "superseded" | "retracted";
 }
 
-// diary/{date}
+// diary 表中以日期为键的记录
 // entries?: DiaryEntry[]（旧格式回退）
 // diary?: string（生成的日记文本）
 // generatedAt?: number（毫秒时间戳）
 // generationRecords?: DiaryGenerationRecord[]
 
-// diaryObservations/{id}: DiaryObservationV2
+// diary_observations 表中以 id 为键的 DiaryObservationV2
 ```
 
 ## 词云发布
 
 本地 SQLite 会记录中午、晚间和昨日最终版三个发布 slot。运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场；错过的中午场不补发。生成文件保存在 `wordcloud-artifacts/`，生成/发布最多重试三次；昨日最终图片会被日记频道与 GitHub 发布复用。
 
-### Runtime collections
+### Runtime tables
 
 ```typescript
-// runtime/group
+// runtime_group
 interface RuntimeGroupStateDoc {
   summary: string;
   summaryCursorTs: number;
@@ -216,7 +219,7 @@ interface RuntimeGroupStateDoc {
   updatedAt: number;
 }
 
-// events/{autoId}
+// runtime_events
 interface RuntimeEventRecord {
   chatId: string;
   messageId?: number;
@@ -231,9 +234,9 @@ interface RuntimeEventRecord {
   ignoredReason?: string;
 }
 
-// turns/{autoId}
+// runtime_turns
 // stores model, tier, needsSearch, tool calls, action, messages, token/cache usage, latency, error.
 
-// compactions/{autoId}
+// runtime_compactions
 // append-only compaction snapshots with oldCursorTs/newCursorTs and token usage.
 ```

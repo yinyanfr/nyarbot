@@ -11,7 +11,7 @@
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，不可用时由 Gemini 3.5 Flash-Lite 接管回复；Gemini 还经 Cloudflare AI Gateway 负责视觉和日记导读，Firestore 负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
+基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，不可用时由 Gemini 3.5 Flash-Lite 接管回复；Gemini 还经 Cloudflare AI Gateway 负责视觉和日记导读，统一 SQLite 数据库负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
 
 ## Overview
 
@@ -60,8 +60,8 @@
 | AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
 | Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
 | Search / Extraction | `@tavily/ai-sdk`                                       |
-| Database            | `firebase-admin` (Firestore)                           |
-| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas`     |
+| Database            | `better-sqlite3`（统一 SQLite）                        |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
 | Runtime             | Node.js + TypeScript ESM                               |
 | Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
@@ -69,7 +69,7 @@
 
 ```text
 src/
-├── app.ts                      # 入口：初始化 bot / Firebase / diary / wordcloud / proactive / logging
+├── app.ts                      # 入口：初始化 bot / SQLite / diary / wordcloud / proactive / logging
 ├── configs/
 │   └── env.ts                  # 环境变量读取与校验
 ├── handlers/
@@ -88,17 +88,17 @@ src/
 │   ├── proactive.ts            # 主动插话调度
 │   ├── diary.ts                # 日记生成与发布链路
 │   ├── wordcloud.ts            # 词云生成、渲染与发布
+│   ├── database-backup.ts      # 每日加密 SQLite 备份
 │   ├── format-telegram.ts      # Markdown → Telegram HTML
 │   ├── stickers.ts             # emoji → file_id 贴纸路由
 │   ├── telegram-image.ts       # Telegram 文件下载
 │   ├── logger.ts               # pino + admin DM 通知
 │   └── time.ts                 # 时区工具
 ├── services/
-│   ├── firestore.ts            # Firestore CRUD
-│   ├── local-wordcloud-store.ts # 本地 sqlite 消息存储与活跃榜统计
-│   ├── github.ts               # Hexo diary 推送
-│   ├── index.ts                # Firebase Admin 初始化
-│   └── serviceAccountKey.json  # Firebase 凭证（gitignored）
+│   ├── database.ts             # SQLite 连接、schema 与迁移
+│   ├── persistence.ts          # 用户、日记与 runtime 持久化
+│   ├── local-wordcloud-store.ts # 统一 SQLite 中的词云消息与活跃榜统计
+│   └── github.ts               # Hexo diary 推送
 └── global.d.ts                 # 共享类型
 ```
 
@@ -113,19 +113,16 @@ npm ci
 # 2. 配置环境变量
 cp .env.example .env
 
-# 3. 放入 Firebase 服务账号密钥
-# 将 serviceAccountKey.json 放到 src/services/ 下
-
-# 4. 编译
+# 3. 编译
 npm run build
 
-# 5. 运行
+# 4. 运行
 node dist/app.js
 ```
 
 ### Docker
 
-准备好 `.env` 和 `src/services/serviceAccountKey.json` 后，创建持久化目录并使用 Compose 构建：
+准备好 `.env` 后，创建持久化目录并使用 Compose 构建：
 
 ```bash
 mkdir -p data
@@ -133,7 +130,7 @@ docker compose up -d --build
 docker compose logs -f nyarbot
 ```
 
-运行数据保存在 Compose 目录下的 `data/` 中；Compose 要求该目录和 Firebase 密钥预先存在，不会自动创建缺失的挂载源。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
+统一数据库默认位于 `data/nyarbot.sqlite`，Compose 将整个 `data/` 目录持久化，且不挂载 Firebase 凭据。Compose 要求该目录预先存在，不会自动创建缺失的挂载源。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
 
 ## Commands & Interactions
 
@@ -171,28 +168,31 @@ docker compose logs -f nyarbot
 
 详见 [配置文档](docs/configuration.zh-CN.md)。
 
-| 变量                          | 必填 | 说明                                               |
-| ----------------------------- | ---- | -------------------------------------------------- |
-| `BOT_API_KEY`                 | ✅   | Telegram Bot Token                                 |
-| `BOT_USERNAME`                | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致）       |
-| `TG_GROUP_ID`                 | ✅   | 目标群组 ID（bot 只在此群工作）                    |
-| `TG_ADMIN_UID`                | ✅   | 管理员 Telegram 用户 ID                            |
-| `DEEPSEEK_API_KEY`            | ✅   | DeepSeek API Key                                   |
-| `TAVILY_API_KEY`              | ✅   | Tavily Search API Key                              |
-| `CF_AIG_TOKEN`                | ✅   | Cloudflare AI Gateway Token                        |
-| `CF_ACCOUNT_ID`               | ✅   | Cloudflare Account ID                              |
-| `BOT_PERSONA_NAME`            | ❌   | 机器人对话名，默认 `にゃる`                        |
-| `BOT_PERSONA_FULL_NAME`       | ❌   | 机器人全名，默认 `晴海猫月`                        |
-| `BOT_PERSONA_READING`         | ❌   | 名字读音标注，默认 `はるみ にゃる`                 |
-| `GITHUB_TOKEN`                | ❌   | GitHub PAT，用于推送日记到 Hexo 博客               |
-| `GITHUB_REPO`                 | ❌   | GitHub 仓库名，格式 `owner/repo`                   |
-| `TG_DIARY_CHANNEL_ID`         | ❌   | 自动日记全文推送频道 ID                            |
-| `WORDCLOUD_DB_PATH`           | ❌   | 本地词云 sqlite 路径，默认 `data/wordcloud.sqlite` |
-| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌   | 词云发布时段检查间隔，默认 `60000`                 |
+| 变量                          | 必填 | 说明                                         |
+| ----------------------------- | ---- | -------------------------------------------- |
+| `BOT_API_KEY`                 | ✅   | Telegram Bot Token                           |
+| `BOT_USERNAME`                | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致） |
+| `TG_GROUP_ID`                 | ✅   | 目标群组 ID（bot 只在此群工作）              |
+| `TG_ADMIN_UID`                | ✅   | 管理员 Telegram 用户 ID                      |
+| `DEEPSEEK_API_KEY`            | ✅   | DeepSeek API Key                             |
+| `TAVILY_API_KEY`              | ✅   | Tavily Search API Key                        |
+| `CF_AIG_TOKEN`                | ✅   | Cloudflare AI Gateway Token                  |
+| `CF_ACCOUNT_ID`               | ✅   | Cloudflare Account ID                        |
+| `BOT_PERSONA_NAME`            | ❌   | 机器人对话名，默认 `にゃる`                  |
+| `BOT_PERSONA_FULL_NAME`       | ❌   | 机器人全名，默认 `晴海猫月`                  |
+| `BOT_PERSONA_READING`         | ❌   | 名字读音标注，默认 `はるみ にゃる`           |
+| `GITHUB_TOKEN`                | ❌   | GitHub PAT，用于推送日记到 Hexo 博客         |
+| `GITHUB_REPO`                 | ❌   | GitHub 仓库名，格式 `owner/repo`             |
+| `TG_DIARY_CHANNEL_ID`         | ❌   | 自动日记全文推送频道 ID                      |
+| `DATABASE_PATH`               | ❌   | 统一 SQLite 路径，默认 `data/nyarbot.sqlite` |
+| `DATABASE_BACKUP_PASSPHRASE`  | ✅   | SQLite 备份加密口令，至少 20 字符            |
+| `DATABASE_BACKUP_SCHEDULE`    | ❌   | 每日备份时间，默认 `03:30`（`APP_TIMEZONE`） |
+| `DATABASE_BACKUP_PATH`        | ❌   | 本地加密备份目录，默认 `data/backups`        |
+| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌   | 词云发布时段检查间隔，默认 `60000`           |
 
 ## Wordcloud Notes
 
-- 词云消息只保存在本地 SQLite，不上传 Firestore。
+- 词云消息与其他持久化数据位于同一个 SQLite 数据库。
 - 仅统计活人消息；bot 自身和其他 bot 不参与词云和活跃榜。
 - 命令消息不会进入词云；如果一条普通消息后来被编辑成命令，会从本地词云库删除。
 - 编辑消息按同一 `message_id` 覆盖，词云使用最终文本。
@@ -223,6 +223,7 @@ npm run build      # 编译 src/ → dist/
 - [配置文档](docs/configuration.zh-CN.md)
 - [命令与交互](docs/commands-and-interactions.zh-CN.md)
 - [开发文档](docs/development.zh-CN.md)
+- [数据库迁移与备份维护](docs/database-maintenance.zh-CN.md)
 
 English docs:
 

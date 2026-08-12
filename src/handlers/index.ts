@@ -13,7 +13,7 @@ import {
   setMorningGreeted,
   countUsersWithMemories,
   updateDiaryObservation,
-} from "../services/firestore.js";
+} from "../services/persistence.js";
 import { deleteStoredMessage, upsertGroupMessage } from "../services/local-wordcloud-store.js";
 import {
   classifyMessage,

@@ -32,7 +32,7 @@ import {
   retractDiaryObservation,
   updateDiaryObservation,
   overwriteUserMemories,
-} from "../services/firestore.js";
+} from "../services/persistence.js";
 import { getStickerEmojis, getStickerFileId } from "./stickers.js";
 import { logger } from "./logger.js";
 import { getPersonaLabel } from "./persona.js";

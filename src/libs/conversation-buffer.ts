@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "./logger.js";
 import config from "../configs/env.js";
-import type { RuntimeMediaRef } from "../services/firestore.js";
+import type { RuntimeMediaRef } from "../services/persistence.js";
 import { sanitizePromptText } from "./prompt-safety.js";
 
 export type HistoryEntryKind =

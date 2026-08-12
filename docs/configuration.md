@@ -4,27 +4,31 @@
 
 All configuration is via `.env` (gitignored). Template at `.env.example`.
 
-| Variable                | Required | Description                                                                         |
-| ----------------------- | -------- | ----------------------------------------------------------------------------------- |
-| `BOT_API_KEY`           | ✅       | Telegram Bot Token from [@BotFather](https://t.me/BotFather)                        |
-| `BOT_PERSONA_NAME`      | ❌       | Persona display name in prompts/help text (default: `にゃる`)                       |
-| `BOT_PERSONA_FULL_NAME` | ❌       | Persona full name (default: `晴海猫月`)                                             |
-| `BOT_PERSONA_READING`   | ❌       | Persona reading annotation (default: `はるみ にゃる`)                               |
-| `TG_ADMIN_UID`          | ✅       | Admin user ID for private status/reset, diary/observation, and wordcloud commands   |
-| `TG_GROUP_ID`           | ✅       | Target group ID; other chats are ignored except supported admin DMs                 |
-| `DEEPSEEK_API_KEY`      | ✅       | DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))           |
-| `TAVILY_API_KEY`        | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
-| `CF_AIG_TOKEN`          | ✅       | Cloudflare AI Gateway token for Gemini calls                                        |
-| `CF_ACCOUNT_ID`         | ✅       | Cloudflare account ID for AI Gateway                                                |
-| `BILIBILI_SESSDATA`     | ❌       | Bilibili login cookie for reliable subtitle access                                  |
-| `BILIBILI_BILI_JCT`     | ❌       | Bilibili CSRF cookie; configure together with the other Bilibili credentials        |
-| `BILIBILI_DEDEUSERID`   | ❌       | Bilibili user ID cookie; configure together with the other Bilibili credentials     |
-| `BOT_USERNAME`          | ✅       | Telegram bot username (required; used for mention matching)                         |
-| `GITHUB_TOKEN`          | ❌       | GitHub PAT for pushing diaries to Hexo blog (format `ghp_...`)                      |
-| `GITHUB_REPO`           | ❌       | GitHub repo in `owner/repo` format (e.g., `yinyanfr/nyarbot-diary`)                 |
-| `TG_DIARY_CHANNEL_ID`   | ❌       | Channel ID for full diary publishing, including the wordcloud image when available  |
-| `LOG_LEVEL`             | ❌       | Pino log level (default: `info`)                                                    |
-| `PORT`                  | ❌       | Unused (long polling, no webhook server)                                            |
+| Variable                     | Required | Description                                                                         |
+| ---------------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `BOT_API_KEY`                | ✅       | Telegram Bot Token from [@BotFather](https://t.me/BotFather)                        |
+| `BOT_PERSONA_NAME`           | ❌       | Persona display name in prompts/help text (default: `にゃる`)                       |
+| `BOT_PERSONA_FULL_NAME`      | ❌       | Persona full name (default: `晴海猫月`)                                             |
+| `BOT_PERSONA_READING`        | ❌       | Persona reading annotation (default: `はるみ にゃる`)                               |
+| `TG_ADMIN_UID`               | ✅       | Admin user ID for private status/reset, diary/observation, and wordcloud commands   |
+| `TG_GROUP_ID`                | ✅       | Target group ID; other chats are ignored except supported admin DMs                 |
+| `DEEPSEEK_API_KEY`           | ✅       | DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))           |
+| `TAVILY_API_KEY`             | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
+| `CF_AIG_TOKEN`               | ✅       | Cloudflare AI Gateway token for Gemini calls                                        |
+| `CF_ACCOUNT_ID`              | ✅       | Cloudflare account ID for AI Gateway                                                |
+| `BILIBILI_SESSDATA`          | ❌       | Bilibili login cookie for reliable subtitle access                                  |
+| `BILIBILI_BILI_JCT`          | ❌       | Bilibili CSRF cookie; configure together with the other Bilibili credentials        |
+| `BILIBILI_DEDEUSERID`        | ❌       | Bilibili user ID cookie; configure together with the other Bilibili credentials     |
+| `BOT_USERNAME`               | ✅       | Telegram bot username (required; used for mention matching)                         |
+| `GITHUB_TOKEN`               | ❌       | GitHub PAT for pushing diaries to Hexo blog (format `ghp_...`)                      |
+| `GITHUB_REPO`                | ❌       | GitHub repo in `owner/repo` format (e.g., `yinyanfr/nyarbot-diary`)                 |
+| `TG_DIARY_CHANNEL_ID`        | ❌       | Channel ID for full diary publishing, including the wordcloud image when available  |
+| `DATABASE_PATH`              | ❌       | Unified SQLite database path (default: `data/nyarbot.sqlite`)                       |
+| `DATABASE_BACKUP_PASSPHRASE` | ✅       | Encryption passphrase for SQLite backups; must be 20–1024 characters                |
+| `DATABASE_BACKUP_SCHEDULE`   | ❌       | Daily backup time in `APP_TIMEZONE`, 24-hour `HH:mm` (default: `03:30`)             |
+| `DATABASE_BACKUP_PATH`       | ❌       | Local encrypted backup directory (default: `data/backups`)                          |
+| `LOG_LEVEL`                  | ❌       | Pino log level (default: `info`)                                                    |
+| `PORT`                       | ❌       | Unused (long polling, no webhook server)                                            |
 
 Additional optional envs with defaults:
 
@@ -59,15 +63,15 @@ Additional optional envs with defaults:
   `PROACTIVE_MAX_FAILURES`, `PROACTIVE_COOLDOWN_HIGH_MS`,
   `PROACTIVE_COOLDOWN_MEDIUM_MS`, `PROACTIVE_COOLDOWN_LOW_MS`
 - `DIARY_CHECK_INTERVAL_MS`
-- `WORDCLOUD_DB_PATH` (`data/wordcloud.sqlite`)
 - `WORDCLOUD_CHECK_INTERVAL_MS` (`60000`)
 
-The current `.env.example` does not list the wordcloud variables; they remain optional and use the defaults above.
+`DATABASE_BACKUP_PASSPHRASE` is required at startup. Store it separately from both the database and encrypted archives; losing it makes the backups unrecoverable.
 
-## Local Wordcloud Storage
+## Unified SQLite Storage
 
-- The wordcloud pipeline uses local SQLite, not Firestore.
-- The database path is controlled by `WORDCLOUD_DB_PATH` and defaults to `data/wordcloud.sqlite`.
+- Production persistence is implemented by `src/services/database.ts` and `src/services/persistence.ts`; it does not initialize Firebase Admin or contact Firestore.
+- `DATABASE_PATH` defaults to `data/nyarbot.sqlite` and contains users, memories, diaries, runtime events/turns/state/compactions, and wordcloud tables.
+- The wordcloud pipeline uses this same database.
 - Generated PNG artifacts are stored in `wordcloud-artifacts/` next to the SQLite database.
 - `WORDCLOUD_CHECK_INTERVAL_MS` drives noon, evening, and post-rollover publication checks, not only midnight generation.
 - Only the most recent 10 days of messages are retained.
@@ -78,24 +82,11 @@ The current `.env.example` does not list the wordcloud variables; they remain op
 - Repeated occurrences of the same token inside one message count once.
 - Rendering ships with a bundled full Source Han Sans variable font for Simplified Chinese, Traditional Chinese, Japanese, and Korean.
 
-## Firebase
+## Backups and Firebase Maintenance
 
-1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
-2. Enable **Cloud Firestore** in the project
-3. Generate a **service account key** JSON file: Project Settings → Service Accounts → Generate New Private Key
-4. Save it as `src/services/serviceAccountKey.json` (gitignored)
+At the default schedule, the bot creates an online SQLite snapshot daily at 03:30 in `APP_TIMEZONE`, compresses and encrypts it with `DATABASE_BACKUP_PASSPHRASE`, stores it under `DATABASE_BACKUP_PATH`, and sends it to `TG_ADMIN_UID`. Local archives use names like `nyarbot-20260812T193000Z.sqlite.gz.enc`; the newest seven are retained. A failed upload is reported by admin DM and retried after 15 minutes.
 
-Firestore collections used:
-
-| Collection               | Document ID      | Fields                                                                      |
-| ------------------------ | ---------------- | --------------------------------------------------------------------------- |
-| `users/{uid}`            | Telegram user ID | `uid`, `nickname`, `memories[]`, `nightyTimestamp?`, `lastMorningGreet?`    |
-| `diary/{date}`           | Date YYYY-MM-DD  | legacy `entries[]`, `diary?`, `generatedAt?`, `generationRecords[]`         |
-| `diaryObservations/{id}` | Observation ID   | structured event/reaction fields, subject identity, confidence/status       |
-| `runtime/group`          | Fixed document   | `summary`, `summaryCursorTs`, `lastProcessedMessageId?`, `lastCompactedAt?` |
-| `events/{autoId}`        | Auto ID          | Append-only chat events, bot outputs, ignored reasons, URL/media refs       |
-| `turns/{autoId}`         | Auto ID          | AI turn model, tool calls, action, token/cache usage, latency, errors       |
-| `compactions/{autoId}`   | Auto ID          | Working-memory summary snapshots with cursor/token usage                    |
+Production has no Firebase dependency or runtime credential mount. The gitignored `src/services/serviceAccountKey.json` is needed only before cutover by the independent `tools/firestore-to-sqlite` maintenance utility. See [Database Migration & Backup Maintenance](database-maintenance.md) for the one-shot command, checks, rollback, and restore procedure.
 
 ## DeepSeek Models
 
@@ -122,7 +113,7 @@ YouTube video understanding also uses Cloudflare AI Gateway with `gemini-3.5-fla
 
 Bilibili reading accepts BV URLs, legacy `av<number>` URLs, and `b23.tv` short links. Legacy AV IDs are resolved to BV IDs through Bilibili's public view API before the pinned local `@xzxzzx/bilibili-mcp` process calls only `get_video_transcript` and `get_video_metadata`. No download or account mutation tools are exposed. If subtitles are unavailable, the result contains metadata only. Login cookies are optional for public metadata but normally required for reliable subtitles.
 
-Media descriptions are cached only in-process for the current session. There is no runtime Firestore `images` cache.
+Media descriptions are cached only in-process for the current session. They are not persisted in SQLite.
 
 ## Tool-Call Architecture
 

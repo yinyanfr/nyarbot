@@ -1,0 +1,27 @@
+{
+  "name": "@nyarbot/firestore-to-sqlite",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "migrate": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "firebase-admin": "14.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "24.3.0",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}
