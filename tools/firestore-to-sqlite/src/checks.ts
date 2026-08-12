@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { FormalCollection, SourceDocument } from "./model.js";
-import { canonicalJson, collectionHash } from "./model.js";
+import { canonicalJson, collectionHash, compareDocumentIds } from "./model.js";
 import { FORMAL_TABLES, type SqliteDatabase, type WordcloudCounts } from "./sqlite.js";
 
 export interface CheckResult {
@@ -10,9 +10,11 @@ export interface CheckResult {
 }
 
 function sqliteCollectionHash(db: SqliteDatabase, table: string): string {
-  const rows = db
-    .prepare(`SELECT firestore_id, source_json FROM ${table} ORDER BY firestore_id`)
-    .all() as { firestore_id: string; source_json: string }[];
+  const rows = db.prepare(`SELECT firestore_id, source_json FROM ${table}`).all() as {
+    firestore_id: string;
+    source_json: string;
+  }[];
+  rows.sort((a, b) => compareDocumentIds(a.firestore_id, b.firestore_id));
   const hash = createHash("sha256");
   for (const row of rows) {
     hash.update(row.firestore_id);

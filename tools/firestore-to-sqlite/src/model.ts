@@ -67,9 +67,13 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(jsonSafe(value));
 }
 
+export function compareDocumentIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export function collectionHash(documents: SourceDocument[]): string {
   const hash = createHash("sha256");
-  for (const document of [...documents].sort((a, b) => a.id.localeCompare(b.id))) {
+  for (const document of [...documents].sort((a, b) => compareDocumentIds(a.id, b.id))) {
     hash.update(document.id);
     hash.update("\0");
     hash.update(canonicalJson(document.data));

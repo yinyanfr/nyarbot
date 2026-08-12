@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseArgs, parseServiceAccount } from "../src/cli.js";
-import { canonicalJson, collectionHash, jsonSafe } from "../src/model.js";
+import { canonicalJson, collectionHash, compareDocumentIds, jsonSafe } from "../src/model.js";
 import { validateFormalDocument } from "../src/validate.js";
 
 test("canonical JSON is key-order independent and hashes preserve document IDs", () => {
@@ -10,6 +10,10 @@ test("canonical JSON is key-order independent and hashes preserve document IDs",
     collectionHash([{ id: "a", data: { value: 1 } }]),
     collectionHash([{ id: "b", data: { value: 1 } }]),
   );
+});
+
+test("document ID ordering is locale-independent", () => {
+  assert.deepEqual(["a", "B", "b", "A"].sort(compareDocumentIds), ["A", "B", "a", "b"]);
 });
 
 test("JSON-safe conversion handles Firestore-like timestamps and bytes", () => {
