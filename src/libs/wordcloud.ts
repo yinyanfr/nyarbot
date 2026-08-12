@@ -246,7 +246,7 @@ const STOP_WORDS = new Set([
   "因为",
 ]);
 
-interface WordcloudCallbacks {
+export interface WordcloudCallbacks {
   sendPhoto: (photo: InputFile, caption: string) => Promise<void>;
 }
 
@@ -280,36 +280,12 @@ interface WordPlacement {
   color: string;
 }
 
-let callbacks: WordcloudCallbacks | null = null;
-let lastDate: string | null = null;
-const sameDayPublishInFlight = new Set<string>();
 let fontsLoaded = false;
 let jiebaLoaded = false;
 const globalFonts = GlobalFonts as typeof GlobalFonts & { loadSystemFonts?: () => number };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function retryWordcloudTask<T>(
-  label: string,
-  task: (attempt: number) => Promise<T>,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= WORDCLOUD_MAX_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      return await task(attempt);
-    } catch (err) {
-      lastErr = err;
-      if (attempt >= WORDCLOUD_MAX_RETRY_ATTEMPTS) break;
-      logger.warn(
-        { err, label, attempt, maxAttempts: WORDCLOUD_MAX_RETRY_ATTEMPTS },
-        "wordcloud: task failed, retrying",
-      );
-      await sleep(WORDCLOUD_RETRY_DELAY_MS);
-    }
-  }
-  throw lastErr;
 }
 
 function getWordcloudArtifactFileName(date: string): string {
@@ -424,25 +400,13 @@ function ensureJiebaLoaded(): void {
   }
 }
 
-function hasReachedPublishTime(): boolean {
-  const current = now();
-  return current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2);
-}
-
-function getCurrentSameDayPublicationSlot(): WordcloudPublicationSlot | null {
-  const hour = now().hour();
-  if (hour >= 18) return "same_day_evening";
-  if (hour >= 12) return "same_day_noon";
-  return null;
-}
-
 function isMostlyCjk(token: string): boolean {
   const chars = Array.from(token);
   const cjkCount = chars.filter((char) => /\p{Script=Han}/u.test(char)).length;
   return cjkCount > 0 && cjkCount >= Math.ceil(chars.length / 2);
 }
 
-function normalizeToken(token: string): string | null {
+export function normalizeToken(token: string): string | null {
   const trimmed = token.trim().toLowerCase();
   if (!trimmed) return null;
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return null;
@@ -466,7 +430,7 @@ function normalizeToken(token: string): string | null {
   return trimmed;
 }
 
-function getTokenRankingWeight(token: string, count: number): number {
+export function getTokenRankingWeight(token: string, count: number): number {
   const length = Array.from(token).length;
   if (isMostlyCjk(token) && length === 1) {
     if (!SINGLE_CHAR_KEEP_WORDS.has(token) && count < 3) return 0;
@@ -480,7 +444,7 @@ function getTokenRankingWeight(token: string, count: number): number {
   return count;
 }
 
-function getTokenSizeWeight(token: string, count: number): number {
+export function getTokenSizeWeight(token: string, count: number): number {
   const length = Array.from(token).length;
   if (isMostlyCjk(token) && length === 1) {
     return count * (SINGLE_CHAR_KEEP_WORDS.has(token) ? 0.58 : 0.42);
@@ -514,7 +478,9 @@ function getWordLimit(totalWords: number): number {
   return Math.ceil(totalWords * 0.5);
 }
 
-function buildVerticalLayoutIndexSet(words: { text: string; sizeWeight: number }[]): Set<number> {
+export function buildVerticalLayoutIndexSet(
+  words: { text: string; sizeWeight: number }[],
+): Set<number> {
   const maxWeight = words[0]?.sizeWeight ?? 1;
   const minWeight = words[words.length - 1]?.sizeWeight ?? maxWeight;
   const span = Math.max(1, maxWeight - minWeight);
@@ -541,7 +507,7 @@ function buildVerticalLayoutIndexSet(words: { text: string; sizeWeight: number }
   return selected;
 }
 
-function buildWordFrequencies(texts: string[]): { text: string; sizeWeight: number }[] {
+export function buildWordFrequencies(texts: string[]): { text: string; sizeWeight: number }[] {
   const counts = new Map<string, number>();
   for (const text of texts) {
     const uniqueTokens = new Set(extractTokens(text));
@@ -681,7 +647,7 @@ function buildPlacementCandidate(
   };
 }
 
-function buildPlacements(words: { text: string; sizeWeight: number }[]): WordPlacement[] {
+export function buildPlacements(words: { text: string; sizeWeight: number }[]): WordPlacement[] {
   ensureFontsLoaded();
   const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
   const ctx = canvas.getContext("2d");
@@ -778,7 +744,7 @@ function drawBackground(ctx: CanvasRenderingContext2D): void {
   }
 }
 
-function renderWordcloudImage(words: { text: string; sizeWeight: number }[]): Buffer {
+export function renderWordcloudImage(words: { text: string; sizeWeight: number }[]): Buffer {
   ensureFontsLoaded();
   const canvas = createCanvas(CANVAS_SIZE, CANVAS_SIZE);
   const ctx = canvas.getContext("2d");
@@ -812,7 +778,7 @@ function renderWordcloudImage(words: { text: string; sizeWeight: number }[]): Bu
   return canvas.toBuffer("image/png");
 }
 
-function buildCaption(params: {
+export function buildCaption(params: {
   date: string;
   topUsers: ActiveUserStat[];
   messageCount: number;
@@ -871,188 +837,283 @@ function buildCaption(params: {
   return lines.join("\n");
 }
 
-async function generateYesterdayWordcloud(date: string): Promise<void> {
-  if (await hasWordcloudRunForDate(date)) {
-    logger.info({ date }, "wordcloud: skipped already-published day");
-    return;
+export interface WordcloudDependencies {
+  listStoredMessagesForDate: typeof listStoredMessagesForDate;
+  listTopActiveUsersForDate: typeof listTopActiveUsersForDate;
+  hasWordcloudRunForDate: typeof hasWordcloudRunForDate;
+  hasWordcloudPublication: typeof hasWordcloudPublication;
+  markWordcloudPublication: typeof markWordcloudPublication;
+  markWordcloudRunForDate: typeof markWordcloudRunForDate;
+  pruneStoredMessages: typeof pruneStoredMessages;
+  readWordcloudArtifact: typeof readWordcloudArtifact;
+  writeWordcloudArtifact: typeof writeWordcloudArtifact;
+  buildWordFrequencies: typeof buildWordFrequencies;
+  renderWordcloudImage: typeof renderWordcloudImage;
+  buildCaption: typeof buildCaption;
+  todayDateStr: typeof todayDateStr;
+  yesterdayDateStr: typeof yesterdayDateStr;
+  now: typeof now;
+  sleep: (ms: number) => Promise<void>;
+  makeInputFile: (data: Buffer, fileName: string) => InputFile;
+  logger: typeof logger;
+}
+
+export function createWordcloudService(overrides: Partial<WordcloudDependencies> = {}) {
+  const dependencies: WordcloudDependencies = {
+    listStoredMessagesForDate,
+    listTopActiveUsersForDate,
+    hasWordcloudRunForDate,
+    hasWordcloudPublication,
+    markWordcloudPublication,
+    markWordcloudRunForDate,
+    pruneStoredMessages,
+    readWordcloudArtifact,
+    writeWordcloudArtifact,
+    buildWordFrequencies,
+    renderWordcloudImage,
+    buildCaption,
+    todayDateStr,
+    yesterdayDateStr,
+    now,
+    sleep,
+    makeInputFile: (data, fileName) => new InputFile(data, fileName),
+    logger,
+    ...overrides,
+  };
+  let callbacks: WordcloudCallbacks | null = null;
+  let lastDate: string | null = null;
+  const sameDayPublishInFlight = new Set<string>();
+
+  async function retryTask<T>(label: string, task: (attempt: number) => Promise<T>): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= WORDCLOUD_MAX_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        return await task(attempt);
+      } catch (err) {
+        lastErr = err;
+        if (attempt >= WORDCLOUD_MAX_RETRY_ATTEMPTS) break;
+        dependencies.logger.warn(
+          { err, label, attempt, maxAttempts: WORDCLOUD_MAX_RETRY_ATTEMPTS },
+          "wordcloud: task failed, retrying",
+        );
+        await dependencies.sleep(WORDCLOUD_RETRY_DELAY_MS);
+      }
+    }
+    throw lastErr;
   }
-  await publishWordcloudForDate({
-    date,
-    slot: "daily_rollup_yesterday",
-    markPublished: () => markWordcloudRunForDate(date),
-  });
-}
 
-export async function generateWordcloudPreviewForDate(date: string): Promise<{
-  image: Buffer;
-  caption: string;
-  messageCount: number;
-  wordCount: number;
-} | null> {
-  const messages = await listStoredMessagesForDate(date);
-  const topUsers = await listTopActiveUsersForDate(date, 5);
-  const wordcloudMessages = messages.filter((message) => !message.isForwarded);
-  const texts = wordcloudMessages
-    .map((message) => message.text)
-    .filter((text) => text.trim().length > 0);
-  if (messages.length === 0 || texts.length === 0) {
-    return null;
+  async function generateWordcloudPreviewForDate(date: string): Promise<{
+    image: Buffer;
+    caption: string;
+    messageCount: number;
+    wordCount: number;
+  } | null> {
+    const messages = await dependencies.listStoredMessagesForDate(date);
+    const topUsers = await dependencies.listTopActiveUsersForDate(date, 5);
+    const wordcloudMessages = messages.filter((message) => !message.isForwarded);
+    const texts = wordcloudMessages
+      .map((message) => message.text)
+      .filter((text) => text.trim().length > 0);
+    if (messages.length === 0 || texts.length === 0) {
+      return null;
+    }
+
+    const words = dependencies.buildWordFrequencies(texts);
+    if (words.length === 0) {
+      return null;
+    }
+
+    const image = dependencies.renderWordcloudImage(words);
+    const caption = dependencies.buildCaption({
+      date,
+      topUsers,
+      messageCount: messages.length,
+    });
+    return { image, caption, messageCount: messages.length, wordCount: words.length };
   }
 
-  const words = buildWordFrequencies(texts);
-  if (words.length === 0) {
-    return null;
+  async function generateWordcloudPreviewForDateWithRetry(date: string): Promise<{
+    image: Buffer;
+    caption: string;
+    messageCount: number;
+    wordCount: number;
+  } | null> {
+    return retryTask("generate wordcloud preview", async () => {
+      return await generateWordcloudPreviewForDate(date);
+    });
   }
 
-  const image = renderWordcloudImage(words);
-  const caption = buildCaption({
-    date,
-    topUsers,
-    messageCount: messages.length,
-  });
-  return { image, caption, messageCount: messages.length, wordCount: words.length };
-}
-
-export async function generateWordcloudPreviewForDateWithRetry(date: string): Promise<{
-  image: Buffer;
-  caption: string;
-  messageCount: number;
-  wordCount: number;
-} | null> {
-  return retryWordcloudTask("generate wordcloud preview", async () => {
-    return await generateWordcloudPreviewForDate(date);
-  });
-}
-
-export async function ensureWordcloudArtifactForDate(
-  date: string,
-): Promise<WordcloudArtifact | null> {
-  const existing = await readWordcloudArtifact(date);
-  if (existing) return existing;
-  const preview = await generateWordcloudPreviewForDate(date);
-  if (!preview) return null;
-  return writeWordcloudArtifact(date, preview);
-}
-
-export async function ensureWordcloudArtifactForDateWithRetry(
-  date: string,
-): Promise<WordcloudArtifact | null> {
-  return retryWordcloudTask("ensure wordcloud artifact", async () => {
-    return await ensureWordcloudArtifactForDate(date);
-  });
-}
-
-async function ensureWordcloudArtifactForPublication(
-  date: string,
-  slot: WordcloudPublicationSlot,
-): Promise<WordcloudArtifact | null> {
-  if (slot === "daily_rollup_yesterday") {
-    return ensureWordcloudArtifactForDate(date);
+  async function ensureWordcloudArtifactForDate(date: string): Promise<WordcloudArtifact | null> {
+    const existing = await dependencies.readWordcloudArtifact(date);
+    if (existing) return existing;
+    const preview = await generateWordcloudPreviewForDate(date);
+    if (!preview) return null;
+    return dependencies.writeWordcloudArtifact(date, preview);
   }
-  const preview = await generateWordcloudPreviewForDate(date);
-  if (!preview) return null;
-  return writeWordcloudArtifact(buildPublicationArtifactDate(date, slot), preview);
-}
 
-async function ensureWordcloudArtifactForPublicationWithRetry(
-  date: string,
-  slot: WordcloudPublicationSlot,
-): Promise<WordcloudArtifact | null> {
-  return retryWordcloudTask(`ensure wordcloud artifact ${slot}`, async () => {
-    return await ensureWordcloudArtifactForPublication(date, slot);
-  });
-}
+  async function ensureWordcloudArtifactForDateWithRetry(
+    date: string,
+  ): Promise<WordcloudArtifact | null> {
+    return retryTask("ensure wordcloud artifact", async () => {
+      return await ensureWordcloudArtifactForDate(date);
+    });
+  }
 
-async function publishWordcloudForDate(params: {
-  date: string;
-  slot: WordcloudPublicationSlot;
-  markPublished: () => Promise<void>;
-}): Promise<void> {
-  const { date, slot, markPublished } = params;
-  const artifact = await ensureWordcloudArtifactForPublicationWithRetry(date, slot);
-  if (!artifact) {
+  async function ensureWordcloudArtifactForPublication(
+    date: string,
+    slot: WordcloudPublicationSlot,
+  ): Promise<WordcloudArtifact | null> {
     if (slot === "daily_rollup_yesterday") {
-      const pruned = await pruneStoredMessages();
+      return ensureWordcloudArtifactForDate(date);
+    }
+    const preview = await generateWordcloudPreviewForDate(date);
+    if (!preview) return null;
+    return dependencies.writeWordcloudArtifact(buildPublicationArtifactDate(date, slot), preview);
+  }
+
+  async function ensureWordcloudArtifactForPublicationWithRetry(
+    date: string,
+    slot: WordcloudPublicationSlot,
+  ): Promise<WordcloudArtifact | null> {
+    return retryTask(`ensure wordcloud artifact ${slot}`, async () => {
+      return await ensureWordcloudArtifactForPublication(date, slot);
+    });
+  }
+
+  async function publishWordcloudForDate(params: {
+    date: string;
+    slot: WordcloudPublicationSlot;
+    markPublished: () => Promise<void>;
+  }): Promise<void> {
+    const { date, slot, markPublished } = params;
+    const artifact = await ensureWordcloudArtifactForPublicationWithRetry(date, slot);
+    if (!artifact) {
+      if (slot === "daily_rollup_yesterday") {
+        const pruned = await dependencies.pruneStoredMessages();
+        await markPublished();
+        dependencies.logger.info({ date, slot, pruned }, "wordcloud: skipped empty publication");
+        return;
+      }
       await markPublished();
-      logger.info({ date, slot, pruned }, "wordcloud: skipped empty publication");
+      dependencies.logger.info({ date, slot }, "wordcloud: skipped empty same-day publication");
       return;
     }
+
+    if (slot === "daily_rollup_yesterday") {
+      const pruned = await dependencies.pruneStoredMessages();
+      dependencies.logger.info(
+        { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount, pruned },
+        "wordcloud: generated image",
+      );
+    } else {
+      dependencies.logger.info(
+        { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount },
+        "wordcloud: generated same-day image",
+      );
+    }
+
+    const currentCallbacks = callbacks;
+    if (!currentCallbacks) return;
+    await retryTask(`publish wordcloud photo ${slot}`, async () => {
+      await currentCallbacks.sendPhoto(
+        dependencies.makeInputFile(artifact.image, artifact.fileName),
+        artifact.caption,
+      );
+    });
     await markPublished();
-    logger.info({ date, slot }, "wordcloud: skipped empty same-day publication");
-    return;
   }
 
-  if (slot === "daily_rollup_yesterday") {
-    const pruned = await pruneStoredMessages();
-    logger.info(
-      { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount, pruned },
-      "wordcloud: generated image",
-    );
-  } else {
-    logger.info(
-      { date, slot, messageCount: artifact.messageCount, wordCount: artifact.wordCount },
-      "wordcloud: generated same-day image",
-    );
-  }
-
-  const currentCallbacks = callbacks;
-  if (!currentCallbacks) return;
-  await retryWordcloudTask(`publish wordcloud photo ${slot}`, async () => {
-    await currentCallbacks.sendPhoto(
-      new InputFile(artifact.image, artifact.fileName),
-      artifact.caption,
-    );
-  });
-  await markPublished();
-}
-
-export function initWordcloudCallbacks(nextCallbacks: WordcloudCallbacks): void {
-  callbacks = nextCallbacks;
-}
-
-export function checkAndGenerateWordcloud(): void {
-  const today = todayDateStr();
-  if (lastDate === null) {
-    if (hasReachedPublishTime()) {
-      const yesterdayDate = yesterdayDateStr();
-      lastDate = today;
-      generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
-        logger.error({ err, yesterdayDate }, "wordcloud: startup catch-up failed");
-      });
+  async function generateYesterdayWordcloud(date: string): Promise<void> {
+    if (await dependencies.hasWordcloudRunForDate(date)) {
+      dependencies.logger.info({ date }, "wordcloud: skipped already-published day");
+      return;
     }
-    lastDate = today;
+    await publishWordcloudForDate({
+      date,
+      slot: "daily_rollup_yesterday",
+      markPublished: () => dependencies.markWordcloudRunForDate(date),
+    });
   }
 
-  const slot = getCurrentSameDayPublicationSlot();
-  if (slot) {
-    const sameDayCheckKey = `${today}:${slot}`;
-    if (!sameDayPublishInFlight.has(sameDayCheckKey)) {
-      sameDayPublishInFlight.add(sameDayCheckKey);
-      hasWordcloudPublication(today, slot)
-        .then((published) => {
-          if (published) return;
-          return publishWordcloudForDate({
-            date: today,
-            slot,
-            markPublished: () => markWordcloudPublication(today, slot),
-          });
-        })
-        .catch((err: unknown) => {
-          logger.error({ err, today, slot }, "wordcloud: same-day publish failed");
-        })
-        .finally(() => {
-          sameDayPublishInFlight.delete(sameDayCheckKey);
+  function initWordcloudCallbacks(nextCallbacks: WordcloudCallbacks): void {
+    callbacks = nextCallbacks;
+  }
+
+  function checkAndGenerateWordcloud(): void {
+    const today = dependencies.todayDateStr();
+    if (lastDate === null) {
+      const current = dependencies.now();
+      if (current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2)) {
+        const yesterdayDate = dependencies.yesterdayDateStr();
+        lastDate = today;
+        generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
+          dependencies.logger.error({ err, yesterdayDate }, "wordcloud: startup catch-up failed");
         });
+      }
+      lastDate = today;
     }
+
+    const hour = dependencies.now().hour();
+    const slot: WordcloudPublicationSlot | null =
+      hour >= 18 ? "same_day_evening" : hour >= 12 ? "same_day_noon" : null;
+    if (slot) {
+      const sameDayCheckKey = `${today}:${slot}`;
+      if (!sameDayPublishInFlight.has(sameDayCheckKey)) {
+        sameDayPublishInFlight.add(sameDayCheckKey);
+        dependencies
+          .hasWordcloudPublication(today, slot)
+          .then((published) => {
+            if (published) return;
+            return publishWordcloudForDate({
+              date: today,
+              slot,
+              markPublished: () => dependencies.markWordcloudPublication(today, slot),
+            });
+          })
+          .catch((err: unknown) => {
+            dependencies.logger.error({ err, today, slot }, "wordcloud: same-day publish failed");
+          })
+          .finally(() => {
+            sameDayPublishInFlight.delete(sameDayCheckKey);
+          });
+      }
+    }
+
+    if (lastDate === today) return;
+    const rolloverTime = dependencies.now();
+    if (!(rolloverTime.hour() > 0 || (rolloverTime.hour() === 0 && rolloverTime.minute() >= 2)))
+      return;
+
+    const yesterdayDate = lastDate;
+    lastDate = today;
+
+    generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
+      dependencies.logger.error(
+        { err, yesterdayDate },
+        "wordcloud: checkAndGenerateWordcloud failed",
+      );
+    });
   }
 
-  if (lastDate === today) return;
-  if (!hasReachedPublishTime()) return;
-
-  const yesterdayDate = lastDate;
-  lastDate = today;
-
-  generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
-    logger.error({ err, yesterdayDate }, "wordcloud: checkAndGenerateWordcloud failed");
-  });
+  return {
+    initWordcloudCallbacks,
+    generateWordcloudPreviewForDate,
+    generateWordcloudPreviewForDateWithRetry,
+    ensureWordcloudArtifactForDate,
+    ensureWordcloudArtifactForDateWithRetry,
+    publishWordcloudForDate,
+    checkAndGenerateWordcloud,
+  };
 }
+
+const defaultWordcloudService = createWordcloudService();
+export const initWordcloudCallbacks = defaultWordcloudService.initWordcloudCallbacks;
+export const generateWordcloudPreviewForDate =
+  defaultWordcloudService.generateWordcloudPreviewForDate;
+export const generateWordcloudPreviewForDateWithRetry =
+  defaultWordcloudService.generateWordcloudPreviewForDateWithRetry;
+export const ensureWordcloudArtifactForDate =
+  defaultWordcloudService.ensureWordcloudArtifactForDate;
+export const ensureWordcloudArtifactForDateWithRetry =
+  defaultWordcloudService.ensureWordcloudArtifactForDateWithRetry;
+export const checkAndGenerateWordcloud = defaultWordcloudService.checkAndGenerateWordcloud;

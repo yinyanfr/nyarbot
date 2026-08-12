@@ -1,6 +1,8 @@
 const PROMPT_INJECTION_PATTERNS = [
-  /ignore\s+(?:all|any|the|my|previous|above|prior)\s+(?:rules|instructions|prompts?|messages?|context)/i,
-  /forget\s+(?:all|any|the|my|previous|above|prior)\s+(?:rules|instructions|prompts?|messages?|context)/i,
+  /ignore\s+(?:(?:all|any|the|my)\s+)?(?:previous|above|prior)\s+(?:rules|instructions|prompts?|messages?|context)/i,
+  /ignore\s+(?:all|any|the|my)\s+(?:rules|instructions|prompts?|messages?|context)/i,
+  /forget\s+(?:(?:all|any|the|my)\s+)?(?:previous|above|prior)\s+(?:rules|instructions|prompts?|messages?|context)/i,
+  /forget\s+(?:all|any|the|my)\s+(?:rules|instructions|prompts?|messages?|context)/i,
   /system\s*prompt/i,
   /developer\s*message/i,
   /you\s+are\s+now/i,
@@ -55,7 +57,7 @@ export function safePromptValue(
 }
 
 export function safePromptList(values: string[], maxLen = 200): string[] {
-  return values.map((value) => safePromptValue(value, { maxLen })).filter(Boolean);
+  return values.map((value) => safePromptValue(value, { maxLen, fallback: "" })).filter(Boolean);
 }
 
 export function quoteAsUntrustedData(text: string, maxLen = 500): string {

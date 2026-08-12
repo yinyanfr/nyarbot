@@ -1,6 +1,5 @@
 import { Bot, InputFile } from "grammy";
 import type { Message } from "grammy/types";
-import OpenCC from "opencc-js";
 import config from "../configs/env.js";
 import {
   getDiaryObservation,
@@ -22,7 +21,6 @@ import {
   generateLoveResponse,
   generateShockResponse,
   generateStrokeResponse,
-  isTwitterStatusUrl,
   rescueSendMessagesFromDraft,
 } from "../libs/ai.js";
 import type { RichMediaRef } from "../libs/ai.js";
@@ -52,11 +50,19 @@ import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
-import { sanitizePromptText } from "../libs/prompt-safety.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
-import { isSupportedVideoUrl } from "../libs/video.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
+import { decideLocalAiRoute } from "./ai-routing.js";
+import { getDismissRetryCount } from "./ai-dispatch.js";
+import {
+  formatRollResult,
+  parseRollCommand,
+  parseShockCommand,
+  parseStrokeCommand,
+  rollDice,
+} from "./command-parsers.js";
+import { buildBufferLine, buildUserMessage, detectTrigger, xmlEscape } from "./message-builders.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -67,26 +73,6 @@ const RESET_REPLIES = [
   "脑袋重启完成喵 刚才聊到哪了",
   "咳 刚才那段我不记得了喵",
 ] as const;
-
-const SIMPLE_CASUAL_MESSAGE_REGEX =
-  /^(?:在吗|在嘛|早|早安|晚安|午安|下午好|晚上好|哈哈+|哈+|草+|6+|666+|笑死|绷不住|确实|懂了|好耶|好哦|好喔|好吧|谢谢|谢啦|牛|可爱|可爱捏|什么鬼|啥|这啥|真的假的|啊\??|哦+|喵+|？+|\?+|!+|！+|嗯+|呜+|欸+|诶+)$/u;
-const DETAILED_REQUEST_REGEX = /认真|详细|解释(?:一下|清楚|清楚点)?|展开讲|细说|具体说说|说详细点/u;
-const REALTIME_REQUEST_REGEX =
-  /最新|刚刚发生|实时(?:消息|资讯|信息|数据)?|新闻|版本(?:号)?|更新(?:了没|了吗|内容)?|价格|股价|汇率|天气|日期|几点|时间|几号|星期几|发布(?:了没|了吗|时间)?|官网/u;
-const CURRENT_FACT_QUESTION_REGEX =
-  /(?:现在(?:几点|几[号點]|是什么时间|幾點|幾號)|今天(?:几号|星期几|多少号|日期|天氣|天气)|(?:現在|今天).*(?:幾點|几點|幾號|几号|星期幾|星期几|天氣|天气))/u;
-const TECHNICAL_SIGNAL_REGEX =
-  /```|`[^`]+`|\b(?:api|sdk|json|sql|http|https|node|npm|pnpm|yarn|git|docker|typescript|javascript|python|java|rust|go|react|vue|astro|firebase|eslint|prettier|pm2|linux|nginx|redis)\b|(?:报错|报錯|错误|錯誤|异常|例外|堆栈|堆疊|代码|代碼|函数|函數|编译|編譯|语法|語法|类型|類型|接口|介面|实现|實現|性能|架构|原理|命令|脚本|日誌|日志|矩阵|矩陣|微积分|微積分|线代|線代|高数|高數|数学|數學|证明|證明|定理|极限|極限|导数|導數|积分|積分|概率|機率|統計|统计|traceback|exception|stack trace|tsconfig|package\.json|pnpm-lock|npm run|import |export |const |let |var |class )/iu;
-const traditionalToSimplified = OpenCC.Converter({ from: "t", to: "cn" });
-
-interface LocalAiRoute {
-  tier: "simple" | "complex" | "tech";
-  needsSearch: boolean;
-  preferAdvisor: boolean;
-  allowPersistentTools: boolean;
-  usedLocalRoute: boolean;
-  reason: string;
-}
 
 function pickResetReply(): string {
   const idx = Math.floor(Math.random() * RESET_REPLIES.length);
@@ -103,19 +89,22 @@ function isForwardedMessage(msg: Message): boolean {
   return msg.forward_origin != null || msg.is_automatic_forward === true;
 }
 
-async function persistWordcloudMessage(params: {
-  chatId: string;
-  messageId: number;
-  userId: string;
-  displayName: string;
-  username?: string;
-  isBot: boolean;
-  isForwarded: boolean;
-  text: string;
-  createdAt: number;
-  editedAt?: number;
-}): Promise<void> {
-  await upsertGroupMessage({
+async function persistWordcloudMessage(
+  params: {
+    chatId: string;
+    messageId: number;
+    userId: string;
+    displayName: string;
+    username?: string;
+    isBot: boolean;
+    isForwarded: boolean;
+    text: string;
+    createdAt: number;
+    editedAt?: number;
+  },
+  upsert: typeof upsertGroupMessage = upsertGroupMessage,
+): Promise<void> {
+  await upsert({
     chatId: params.chatId,
     messageId: params.messageId,
     userId: params.userId,
@@ -127,153 +116,6 @@ async function persistWordcloudMessage(params: {
     createdAt: params.createdAt,
     ...(params.editedAt ? { editedAt: params.editedAt } : {}),
   });
-}
-
-function countSentenceLikeSegments(text: string): number {
-  return text
-    .split(/[\n。！？!?]+/u)
-    .map((part) => part.trim())
-    .filter(Boolean).length;
-}
-
-function normalizeLocalRouteText(text: string): string {
-  return traditionalToSimplified(text);
-}
-
-function decideLocalAiRoute(params: {
-  rawText: string;
-  isMentioned: boolean;
-  isRepliedToBot: boolean;
-  urls: string[];
-  mediaRefs: RichMediaRef[];
-}): LocalAiRoute | null {
-  const { rawText, isMentioned, isRepliedToBot, urls, mediaRefs } = params;
-  const normalized = normalizeLocalRouteText(rawText).replace(/\s+/g, " ").trim();
-  const currentMedia = mediaRefs.filter((media) => media.source === "current");
-  const hasCurrentMedia = currentMedia.length > 0;
-  const hasNonStickerMedia = currentMedia.some((media) => media.type !== "sticker");
-  const hasUrls = urls.length > 0;
-  const hasOnlyVideoUrls = hasUrls && urls.every(isSupportedVideoUrl);
-  const asksCurrentFact = CURRENT_FACT_QUESTION_REGEX.test(normalized);
-  const needsSearch =
-    (hasUrls && !hasOnlyVideoUrls) || REALTIME_REQUEST_REGEX.test(normalized) || asksCurrentFact;
-  const looksTechnical = TECHNICAL_SIGNAL_REGEX.test(normalized);
-  const wantsDetailedAnswer = DETAILED_REQUEST_REGEX.test(normalized);
-  const isTriggered = isMentioned || isRepliedToBot;
-
-  if (looksTechnical) {
-    return {
-      tier: "tech",
-      needsSearch,
-      preferAdvisor: true,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "technical_signal",
-    };
-  }
-
-  if (wantsDetailedAnswer) {
-    return {
-      tier: "complex",
-      needsSearch,
-      preferAdvisor: true,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "explicit_detailed_request",
-    };
-  }
-
-  if (hasNonStickerMedia) {
-    return {
-      tier: "simple",
-      needsSearch,
-      preferAdvisor: true,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "current_non_sticker_media_present",
-    };
-  }
-
-  if (hasCurrentMedia && !hasUrls && normalized.length <= 16) {
-    return {
-      tier: "simple",
-      needsSearch,
-      preferAdvisor: false,
-      allowPersistentTools: false,
-      usedLocalRoute: true,
-      reason: "sticker_or_light_media_chat",
-    };
-  }
-
-  if (isTriggered && hasOnlyVideoUrls && !needsSearch) {
-    return {
-      tier: "simple",
-      needsSearch: false,
-      preferAdvisor: true,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "video_url_present",
-    };
-  }
-
-  const shortLen = normalized.length > 0 && normalized.length <= 24;
-  const mediumLen = normalized.length > 0 && normalized.length <= 48;
-  const shortSentenceCount = countSentenceLikeSegments(normalized) <= 2;
-  const mediumSentenceCount = countSentenceLikeSegments(normalized) <= 3;
-  const looksCasual = SIMPLE_CASUAL_MESSAGE_REGEX.test(normalized);
-  if (
-    isTriggered &&
-    !hasUrls &&
-    !needsSearch &&
-    !hasCurrentMedia &&
-    shortLen &&
-    shortSentenceCount &&
-    looksCasual
-  ) {
-    return {
-      tier: "simple",
-      needsSearch,
-      preferAdvisor: false,
-      allowPersistentTools: false,
-      usedLocalRoute: true,
-      reason: "short_casual_triggered_chat",
-    };
-  }
-
-  if (isTriggered && !hasUrls && !hasCurrentMedia && shortLen && shortSentenceCount) {
-    return {
-      tier: "simple",
-      needsSearch,
-      preferAdvisor: false,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "short_triggered_chat",
-    };
-  }
-
-  if (isTriggered && !hasUrls && !hasCurrentMedia && mediumLen && mediumSentenceCount) {
-    return {
-      tier: "simple",
-      needsSearch,
-      preferAdvisor: false,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "medium_triggered_chat",
-    };
-  }
-
-  if (needsSearch) {
-    return {
-      tier: "complex",
-      needsSearch: true,
-      preferAdvisor: true,
-      allowPersistentTools: true,
-      usedLocalRoute: true,
-      reason: "realtime_or_search_request",
-    };
-  }
-
-  return null;
 }
 
 function isReplyTargetMissingError(err: unknown): boolean {
@@ -396,300 +238,6 @@ function buildDiaryPatchFromJson(text: string): Record<string, unknown> | null {
   }
 }
 
-function findCommandEntity(
-  entities: { type: string; offset: number; length: number }[],
-  text: string,
-  command: string,
-  botUsername: string,
-): { offset: number; length: number } | null {
-  for (const entity of entities) {
-    if (entity.type !== "bot_command") continue;
-    const raw = text.slice(entity.offset, entity.offset + entity.length);
-    if (raw === command || raw === `${command}@${botUsername}`) {
-      return { offset: entity.offset, length: entity.length };
-    }
-  }
-  return null;
-}
-
-function parseShockCommand(
-  entities: { type: string; offset: number; length: number }[],
-  text: string,
-  botUsername: string,
-): { intensity?: number; extraText?: string } | null {
-  const commandEntity = findCommandEntity(entities, text, "/shock", botUsername);
-  if (!commandEntity) return null;
-
-  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
-  if (!remainder) return {};
-
-  const match = remainder.match(/^([+-]?\d+)(?:\s+(.*))?$/s);
-  if (match) {
-    const intensity = Number.parseInt(match[1] ?? "", 10);
-    const extraText = match[2]?.trim();
-    return {
-      intensity,
-      ...(extraText ? { extraText } : {}),
-    };
-  }
-
-  return { extraText: remainder };
-}
-
-function parseStrokeCommand(
-  entities: { type: string; offset: number; length: number }[],
-  text: string,
-  botUsername: string,
-): { intensity?: number; extraText?: string } | null {
-  const commandEntity = findCommandEntity(entities, text, "/stroke", botUsername);
-  if (!commandEntity) return null;
-
-  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
-  if (!remainder) return {};
-
-  const match = remainder.match(/^([+-]?\d+)(?:\s+(.*))?$/s);
-  if (match) {
-    const intensity = Number.parseInt(match[1] ?? "", 10);
-    const extraText = match[2]?.trim();
-    return {
-      intensity,
-      ...(extraText ? { extraText } : {}),
-    };
-  }
-
-  return { extraText: remainder };
-}
-
-type RollCommandParseResult =
-  | { kind: "ok"; count: number; sides: number; notation: string }
-  | { kind: "error"; message: string };
-
-function parseRollCommand(
-  entities: { type: string; offset: number; length: number }[],
-  text: string,
-  botUsername: string,
-): RollCommandParseResult | null {
-  const commandEntity = findCommandEntity(entities, text, "/roll", botUsername);
-  if (!commandEntity) return null;
-
-  const remainder = text.slice(commandEntity.offset + commandEntity.length).trim();
-  if (!remainder) {
-    return { kind: "ok", count: 1, sides: 20, notation: "1d20" };
-  }
-
-  const match = remainder.match(/^(\d+)d(\d+)$/iu);
-  if (!match) {
-    return { kind: "error", message: "用法是 /roll 或 /roll 2d6 这种格式喵~" };
-  }
-
-  const count = Number.parseInt(match[1] ?? "", 10);
-  const sides = Number.parseInt(match[2] ?? "", 10);
-
-  if (!Number.isInteger(count) || count <= 0 || count > 20) {
-    return { kind: "error", message: "骰子数量只能是 1 到 20 的正整数喵~" };
-  }
-  if (!Number.isInteger(sides) || sides < 2 || sides > 99999) {
-    return { kind: "error", message: "骰子面数只能是 2 到 99999 的正整数喵~" };
-  }
-
-  return { kind: "ok", count, sides, notation: `${count}d${sides}` };
-}
-
-function rollDice(params: { count: number; sides: number }): { results: number[]; total: number } {
-  const results = Array.from(
-    { length: params.count },
-    () => Math.floor(Math.random() * params.sides) + 1,
-  );
-  const total = results.reduce((sum, value) => sum + value, 0);
-  return { results, total };
-}
-
-function formatRollResult(params: { notation: string; results: number[]; total: number }): string {
-  if (params.results.length === 1) {
-    return `掷出了 ${params.notation}：${params.results[0]}`;
-  }
-  return `掷出了 ${params.notation}：${params.results.join(" + ")} = ${params.total}`;
-}
-
-function xmlEscape(text: string): string {
-  return sanitizePromptText(text)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-/**
- * Build the user-facing text for the AI call by stitching together the raw
- * text with raw media/link references and reply-to context.
- */
-function buildUserMessage(params: {
-  rawText: string;
-  displayName: string;
-  mediaRefs: MediaRef[];
-  replyTo: Message | undefined;
-  isRepliedToBot: boolean;
-  isMentioned?: boolean;
-  urls: string[];
-}): string {
-  const { rawText, displayName, mediaRefs, replyTo, isRepliedToBot, isMentioned, urls } = params;
-
-  const sections: string[] = [];
-  sections.push("<current_turn>");
-  sections.push(`  <speaker name="${xmlEscape(displayName)}" />`);
-  sections.push(
-    `  <trigger mode="${isMentioned || isRepliedToBot ? "passive_triggered" : "not_triggered"}" mentioned="${isMentioned ? "true" : "false"}" replied_to_bot="${isRepliedToBot ? "true" : "false"}" />`,
-  );
-
-  if (replyTo && !isRepliedToBot) {
-    const replyUid = replyTo.from?.id?.toString() ?? "";
-    const replyFirstName = replyTo.from?.first_name ?? "某人";
-    const replyUsername = replyTo.from?.username;
-    const replyName = replyUsername ? `${replyFirstName} (@${replyUsername})` : replyFirstName;
-    sections.push(`  <reply_to uid="${xmlEscape(replyUid)}" name="${xmlEscape(replyName)}">`);
-    const replyText = replyTo.text ?? replyTo.caption ?? "";
-    if (replyText) {
-      sections.push(`    <quoted_text>${xmlEscape(replyText)}</quoted_text>`);
-    } else if (replyTo.photo?.length) {
-      const photo = replyTo.photo[replyTo.photo.length - 1];
-      sections.push(
-        `    <quoted_media type="image" file_id="${xmlEscape(photo?.file_id ?? "")}" />`,
-      );
-    } else if (replyTo.sticker) {
-      sections.push(
-        `    <quoted_media type="sticker" file_id="${xmlEscape(replyTo.sticker.file_id)}" emoji="${xmlEscape(replyTo.sticker.emoji ?? "")}" />`,
-      );
-    } else if (replyTo.video) {
-      const thumb =
-        replyTo.video.cover?.[replyTo.video.cover.length - 1] ?? replyTo.video.thumbnail;
-      sections.push(
-        `    <quoted_media type="video" file_id="${xmlEscape(replyTo.video.file_id)}" thumbnail_file_id="${xmlEscape(thumb?.file_id ?? "")}" />`,
-      );
-    } else if (replyTo.animation) {
-      sections.push(
-        `    <quoted_media type="animation" file_id="${xmlEscape(replyTo.animation.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.animation.thumbnail?.file_id ?? "")}" />`,
-      );
-    } else if (replyTo.video_note) {
-      sections.push(
-        `    <quoted_media type="video_note" file_id="${xmlEscape(replyTo.video_note.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.video_note.thumbnail?.file_id ?? "")}" />`,
-      );
-    } else if (replyTo.document) {
-      sections.push(
-        `    <quoted_media type="document" file_id="${xmlEscape(replyTo.document.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.document.thumbnail?.file_id ?? "")}" filename="${xmlEscape(replyTo.document.file_name ?? "")}" />`,
-      );
-    } else if (replyTo.audio) {
-      sections.push(
-        `    <quoted_media type="audio" file_id="${xmlEscape(replyTo.audio.file_id)}" thumbnail_file_id="${xmlEscape(replyTo.audio.thumbnail?.file_id ?? "")}" title="${xmlEscape(replyTo.audio.title || replyTo.audio.file_name || "")}" />`,
-      );
-    }
-    sections.push("    <note>reply_to 内容是被回复消息，不是当前说话人的新消息</note>");
-    sections.push("  </reply_to>");
-  }
-
-  if (rawText) {
-    sections.push(`  <text>${xmlEscape(rawText)}</text>`);
-  }
-
-  const currentMedia = mediaRefs.filter((m) => m.source === "current");
-  if (currentMedia.length > 0) {
-    sections.push("  <media>");
-    for (const media of currentMedia) {
-      if (media.type === "image") {
-        sections.push(`    <image file_id="${xmlEscape(media.fileId ?? "")}" />`);
-      } else if (media.type === "sticker") {
-        sections.push(
-          `    <sticker file_id="${xmlEscape(media.fileId ?? "")}" emoji="${xmlEscape(media.emoji ?? "")}" />`,
-        );
-      } else if (media.type === "video") {
-        sections.push(
-          `    <video file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
-        );
-      } else if (media.type === "animation") {
-        sections.push(
-          `    <animation file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
-        );
-      } else if (media.type === "video_note") {
-        sections.push(
-          `    <video_note file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" />`,
-        );
-      } else if (media.type === "document") {
-        sections.push(
-          `    <document file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" filename="${xmlEscape(media.filename ?? "")}" />`,
-        );
-      } else if (media.type === "audio") {
-        sections.push(
-          `    <audio file_id="${xmlEscape(media.fileId ?? "")}" thumbnail_file_id="${xmlEscape(media.thumbnailFileId ?? "")}" title="${xmlEscape(media.title ?? "")}" />`,
-        );
-      }
-    }
-    sections.push("  </media>");
-  }
-
-  if (urls.length > 0) {
-    sections.push("  <links>");
-    for (const url of urls) {
-      sections.push(`    <link url="${xmlEscape(url)}" />`);
-    }
-    sections.push("  </links>");
-  }
-
-  sections.push("</current_turn>");
-  return sections.join("\n");
-}
-
-/**
- * Compute the rolling buffer line for the user's message — a compact string
- * combining text, media markers, and URLs. Pushed to the conversation buffer
- * exactly once per update, at the top of the handler.
- */
-function buildBufferLine(params: {
-  rawText: string;
-  mediaRefs: MediaRef[];
-  urls: string[];
-  replyToInfo?: { uid: string; name: string; username?: string; text: string };
-}): string {
-  const parts: string[] = [];
-  if (params.replyToInfo?.text) {
-    const ri = params.replyToInfo;
-    const userLabel = ri.username ? `${ri.name} (@${ri.username})` : ri.name;
-    parts.push(`[回复 ${ri.uid} ${userLabel}: "${ri.text.slice(0, 100)}"]`);
-  }
-  if (params.urls.length > 0) {
-    const prioritizedUrls = [
-      ...params.urls.filter(isTwitterStatusUrl),
-      ...params.urls.filter((url) => !isTwitterStatusUrl(url)),
-    ];
-    for (const url of prioritizedUrls) {
-      const compact = url.length > 120 ? `${url.slice(0, 117)}...` : url;
-      parts.push(`[链接: ${compact}]`);
-    }
-  }
-  if (params.rawText) parts.push(params.rawText);
-  const currentMedia = params.mediaRefs.filter((m) => m.source === "current");
-  if (currentMedia.length > 0) {
-    for (const media of currentMedia) {
-      if (media.type === "image") parts.push(`[图片 file_id=${media.fileId ?? ""}]`);
-      if (media.type === "sticker") parts.push(`[贴纸: ${media.emoji ?? ""}]`);
-      if (media.type === "video")
-        parts.push(`[视频 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
-      if (media.type === "animation")
-        parts.push(`[GIF file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
-      if (media.type === "video_note")
-        parts.push(`[视频消息 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""}]`);
-      if (media.type === "document")
-        parts.push(
-          `[文件 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""} ${media.filename ?? ""}]`,
-        );
-      if (media.type === "audio")
-        parts.push(
-          `[音频 file_id=${media.fileId ?? ""} thumb=${media.thumbnailFileId ?? ""} ${media.title ?? ""}]`,
-        );
-    }
-  }
-  return parts.join(" ").slice(0, MAX_BUFFER_TEXT);
-}
-
 const MEMORY_CANDIDATE_PATTERNS: { type: string; regex: RegExp; hint: string }[] = [
   {
     type: "nickname",
@@ -802,15 +350,18 @@ function parseMediaRefsFromBufferText(text: string): MediaRef[] {
   return refs;
 }
 
-function maybeAttachRecentMediaRefs(params: {
-  groupId: string;
-  rawText: string;
-  mediaRefs: MediaRef[];
-}): MediaRef[] {
+function maybeAttachRecentMediaRefs(
+  params: {
+    groupId: string;
+    rawText: string;
+    mediaRefs: MediaRef[];
+  },
+  loadHistory: typeof getHistory = getHistory,
+): MediaRef[] {
   if (params.mediaRefs.length > 0) return params.mediaRefs;
   if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
 
-  const history = getHistory(params.groupId);
+  const history = loadHistory(params.groupId);
   for (let i = history.length - 1; i >= 0; i--) {
     const entry = history[i];
     if (!entry || entry.uid === "bot" || entry.uid === "system") continue;
@@ -867,16 +418,32 @@ function mapRuntimeMediaRefToMediaRef(ref: {
   };
 }
 
-async function attachRecentMediaRefs(params: {
-  groupId: string;
-  rawText: string;
-  mediaRefs: MediaRef[];
-}): Promise<MediaRef[]> {
+export interface RecentMediaDependencies {
+  loadRecentRuntimeEvents: typeof loadRecentRuntimeEvents;
+  getHistory: typeof getHistory;
+}
+
+const defaultRecentMediaDependencies: RecentMediaDependencies = {
+  loadRecentRuntimeEvents,
+  getHistory,
+};
+
+export async function attachRecentMediaRefs(
+  params: {
+    groupId: string;
+    rawText: string;
+    mediaRefs: MediaRef[];
+  },
+  dependencies: RecentMediaDependencies = defaultRecentMediaDependencies,
+): Promise<MediaRef[]> {
   if (params.mediaRefs.length > 0) return params.mediaRefs;
   if (!RECENT_MEDIA_FOLLOWUP_REGEX.test(params.rawText)) return params.mediaRefs;
 
   try {
-    const recentEvents = await loadRecentRuntimeEvents({ limit: 20, newestFirst: true });
+    const recentEvents = await dependencies.loadRecentRuntimeEvents({
+      limit: 20,
+      newestFirst: true,
+    });
     for (let i = recentEvents.length - 1; i >= 0; i--) {
       const event = recentEvents[i];
       if (!event || event.uid === "bot" || event.uid === "system") continue;
@@ -896,16 +463,19 @@ async function attachRecentMediaRefs(params: {
     logger.warn({ err }, "failed to recover recent media refs from runtime events");
   }
 
-  return maybeAttachRecentMediaRefs(params);
+  return maybeAttachRecentMediaRefs(params, dependencies.getHistory);
 }
 
 /**
  * Aggregate distinct recent participants from the in-memory buffer for prompt context.
  */
-function collectRecentMembers(groupId: string): {
+function collectRecentMembers(
+  groupId: string,
+  loadHistory: typeof getHistory = getHistory,
+): {
   recentMembers: { uid: string; name: string; username?: string }[];
 } {
-  const history = getHistory(groupId);
+  const history = loadHistory(groupId);
   const map = new Map<string, { name: string; username?: string }>();
   for (const entry of history) {
     if (entry.uid === "bot" || entry.uid === "system") continue;
@@ -926,8 +496,12 @@ function collectRecentMembers(groupId: string): {
 /**
  * Collect recent bot messages from the buffer for human-likeness feedback.
  */
-function collectRecentBotMessages(groupId: string, count: number): string[] {
-  const history = getHistory(groupId);
+function collectRecentBotMessages(
+  groupId: string,
+  count: number,
+  loadHistory: typeof getHistory = getHistory,
+): string[] {
+  const history = loadHistory(groupId);
   const botMessages: string[] = [];
   for (let i = history.length - 1; i >= 0 && botMessages.length < count; i--) {
     const entry = history[i];
@@ -942,28 +516,77 @@ function collectRecentBotMessages(groupId: string, count: number): string[] {
  * Send one or more messages from the AI turn to Telegram, formatting as HTML
  * where appropriate and dispatching any sticker selected by the model.
  */
-async function sendAiMessages(params: {
-  ctx: BotContext;
-  chatId: number;
-  replyToMessageId: number;
-  messages: string[];
-  stickerFileId: string | null;
-}): Promise<{ messages: string[]; stickerFileId: string | null }> {
+export interface AiTurnDependencies {
+  classifyMessage: typeof classifyMessage;
+  generateAiTurn: typeof generateAiTurn;
+  rescueSendMessagesFromDraft: typeof rescueSendMessagesFromDraft;
+  getHistory: typeof getHistory;
+  formatHistoryAsContext: typeof formatHistoryAsContext;
+  pushMessage: typeof pushMessage;
+  touchBotActivity: typeof touchBotActivity;
+  getStickerEmojiByFileId: typeof getStickerEmojiByFileId;
+  getStickerFileId: typeof getStickerFileId;
+  pickRandomStickerEmoji: typeof pickRandomStickerEmoji;
+  downloadTelegramFileAsDataUrl: typeof downloadTelegramFileAsDataUrl;
+  formatForTelegramHtml: typeof formatForTelegramHtml;
+  replyAndTrack: typeof replyAndTrack;
+  runtime: Pick<typeof groupRuntime, "loadContext" | "recordBotMessages" | "recordTurn">;
+  delay: (ms: number) => Promise<void>;
+}
+
+const defaultAiTurnDependencies: AiTurnDependencies = {
+  classifyMessage,
+  generateAiTurn,
+  rescueSendMessagesFromDraft,
+  getHistory,
+  formatHistoryAsContext,
+  pushMessage,
+  touchBotActivity,
+  getStickerEmojiByFileId,
+  getStickerFileId,
+  pickRandomStickerEmoji,
+  downloadTelegramFileAsDataUrl,
+  formatForTelegramHtml,
+  replyAndTrack,
+  runtime: groupRuntime,
+  delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+async function sendAiMessages(
+  params: {
+    ctx: BotContext;
+    chatId: number;
+    replyToMessageId: number;
+    messages: string[];
+    stickerFileId: string | null;
+  },
+  dependencies: AiTurnDependencies,
+): Promise<{ messages: string[]; stickerFileId: string | null }> {
   const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
   const sentMessages: string[] = [];
   let sentStickerFileId: string | null = null;
 
   const trackText = async (text: string): Promise<void> => {
-    touchBotActivity();
-    pushMessage(config.tgGroupId, "bot", config.botUsername, text.slice(0, MAX_BUFFER_TEXT));
-    await groupRuntime.recordBotMessages({ messages: [text] });
+    dependencies.touchBotActivity();
+    dependencies.pushMessage(
+      config.tgGroupId,
+      "bot",
+      config.botUsername,
+      text.slice(0, MAX_BUFFER_TEXT),
+    );
+    await dependencies.runtime.recordBotMessages({ messages: [text] });
   };
 
   const trackSticker = async (fileId: string): Promise<void> => {
-    touchBotActivity();
-    const emoji = getStickerEmojiByFileId(fileId) ?? "🐱";
-    pushMessage(config.tgGroupId, "bot", config.botUsername, `[贴纸 ${emoji}: ${fileId}]`);
-    await groupRuntime.recordBotMessages({ messages: [], stickerFileId: fileId });
+    dependencies.touchBotActivity();
+    const emoji = dependencies.getStickerEmojiByFileId(fileId) ?? "🐱";
+    dependencies.pushMessage(
+      config.tgGroupId,
+      "bot",
+      config.botUsername,
+      `[贴纸 ${emoji}: ${fileId}]`,
+    );
+    await dependencies.runtime.recordBotMessages({ messages: [], stickerFileId: fileId });
   };
 
   if (messages.length === 0) {
@@ -990,7 +613,7 @@ async function sendAiMessages(params: {
   let textDispatchFailed = false;
   for (let i = 0; i < messages.length; i++) {
     const text = messages[i]!;
-    const formatted = formatForTelegramHtml(text);
+    const formatted = dependencies.formatForTelegramHtml(text);
 
     try {
       await sendTextMessageWithReplyFallback({
@@ -1010,7 +633,7 @@ async function sendAiMessages(params: {
 
     // Stagger messages to mimic human typing rhythm, but not after the last one
     if (i < messages.length - 1) {
-      await new Promise((resolve) => setTimeout(resolve, MESSAGE_DELAY_MS));
+      await dependencies.delay(MESSAGE_DELAY_MS);
     }
   }
 
@@ -1041,272 +664,325 @@ const MANDATORY_REPLY_HINT =
  *   - simple/complex: 1 retry, then fallback if still dismissed
  *   - proactive: no retry (dismiss = silence)
  */
-async function handleAiTurn(params: {
-  ctx: BotContext;
-  replyToMessageId: number;
-  user: User;
-  userMessage: string;
-  systemHint: string | null;
-  isMentioned: boolean;
-  isRepliedToBot: boolean;
-  mediaRefs: RichMediaRef[];
-  urls: string[];
-  sourceRefs?: string[];
-  senderUsername?: string;
-  runtimeStatus?: string;
-  allowWebSearch?: boolean;
-  allowMediaTools?: boolean;
-  memoryCandidateHints?: string[];
-  forceReply?: boolean;
-  dismissFallbackMessages?: string[];
-}): Promise<void> {
-  const {
-    ctx,
-    replyToMessageId,
-    user,
-    userMessage,
-    systemHint,
-    isMentioned,
-    isRepliedToBot,
-    mediaRefs,
-    urls,
-    sourceRefs,
-    senderUsername,
-    runtimeStatus,
-    allowWebSearch,
-    allowMediaTools,
-    memoryCandidateHints,
-    forceReply,
-    dismissFallbackMessages,
-  } = params;
-
-  const chatId = ctx.chatId;
-  if (chatId === undefined) throw new Error("no chat in context");
-
-  // Signal "typing..." while the AI generates.
-  // Because DeepSeek can take 10-20s, refresh the typing action every 4.5s.
-  const typingTimer = setInterval(() => {
-    ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
-  }, 4500);
-  await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
-
-  const history = getHistory(config.tgGroupId);
-  const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
-    logger.warn({ err }, "load runtime context failed, falling back to buffer");
-    return null;
-  });
-  const recentConversation = runtimeContext?.recentEventsText || formatHistoryAsContext(history);
-  const { recentMembers } = collectRecentMembers(config.tgGroupId);
-  if (!recentMembers.some((m) => m.uid === user.uid)) {
-    recentMembers.push({
-      uid: user.uid,
-      name: user.nickname || "大哥哥",
-      ...(senderUsername ? { username: senderUsername } : {}),
-    });
-  }
-  const replyTo = ctx.msg?.reply_to_message;
-  if (replyTo && replyTo.from && replyTo.from.id !== ctx.me.id) {
-    const replyUid = replyTo.from.id.toString();
-    if (!recentMembers.some((m) => m.uid === replyUid)) {
-      recentMembers.push({
-        uid: replyUid,
-        name: replyTo.from.first_name ?? "某人",
-        ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
-      });
-    }
-  }
-
-  const recentBotMessages = collectRecentBotMessages(config.tgGroupId, 5);
-
-  const localRoute = decideLocalAiRoute({
-    rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
-    isMentioned,
-    isRepliedToBot,
-    urls: urls ?? [],
-    mediaRefs: (mediaRefs ?? []) as MediaRef[],
-  });
-  const { tier, needsSearch } = localRoute ?? (await classifyMessage(userMessage));
-  if (localRoute) {
-    logger.info(
-      {
-        tier: localRoute.tier,
-        needsSearch: localRoute.needsSearch,
-        preferAdvisor: localRoute.preferAdvisor,
-        allowPersistentTools: localRoute.allowPersistentTools,
-        reason: localRoute.reason,
-      },
-      "handleAiTurn: applied local AI routing",
-    );
-  }
-  const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
-
-  try {
-    const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
-      try {
-        const file = await ctx.api.getFile(fileId);
-        if (!file.file_path) return null;
-        return await downloadTelegramFileAsDataUrl(file.file_path);
-      } catch (err) {
-        logger.warn({ err, fileId }, "resolveTelegramFileAsDataUrl failed");
-        return null;
-      }
-    };
-
-    // Build the base systemHint, appending the mandatory-reply hint for
-    // retries when the user explicitly triggered the bot.
-    let currentHint = systemHint;
-    let result = await generateAiTurn({
-      userContext: user,
+export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiTurnDependencies) {
+  return async function handleAiTurn(params: {
+    ctx: BotContext;
+    replyToMessageId: number;
+    user: User;
+    userMessage: string;
+    systemHint: string | null;
+    isMentioned: boolean;
+    isRepliedToBot: boolean;
+    mediaRefs: RichMediaRef[];
+    urls: string[];
+    sourceRefs?: string[];
+    senderUsername?: string;
+    runtimeStatus?: string;
+    allowWebSearch?: boolean;
+    allowMediaTools?: boolean;
+    memoryCandidateHints?: string[];
+    forceReply?: boolean;
+    dismissFallbackMessages?: string[];
+  }): Promise<void> {
+    const {
+      ctx,
+      replyToMessageId,
+      user,
       userMessage,
-      recentConversation,
-      recentMembers,
-      tier,
-      needsSearch,
-      systemHint: currentHint,
-      wasMentioned: isMentioned,
-      wasRepliedTo: isRepliedToBot,
-      recentBotMessages,
+      systemHint,
+      isMentioned,
+      isRepliedToBot,
       mediaRefs,
       urls,
-      ...(sourceRefs ? { sourceRefs } : {}),
-      resolveTelegramFileAsDataUrl,
-      allowRichContentTools: isTriggered,
-      ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
-      ...(runtimeStatus ? { runtimeStatus } : {}),
-      ...(allowWebSearch != null ? { allowWebSearch } : {}),
-      ...(allowMediaTools != null ? { allowMediaTools } : {}),
-      ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
-      isRetryTurn: false,
-      allowPersistentTools: localRoute?.allowPersistentTools ?? true,
-      ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
+      sourceRefs,
+      senderUsername,
+      runtimeStatus,
+      allowWebSearch,
+      allowMediaTools,
+      memoryCandidateHints,
+      forceReply,
+      dismissFallbackMessages,
+    } = params;
+
+    const chatId = ctx.chatId;
+    if (chatId === undefined) throw new Error("no chat in context");
+
+    // Signal "typing..." while the AI generates.
+    // Because DeepSeek can take 10-20s, refresh the typing action every 4.5s.
+    const typingTimer = setInterval(() => {
+      ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+    }, 4500);
+    await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+
+    const history = dependencies.getHistory(config.tgGroupId);
+    const runtimeContext = await dependencies.runtime.loadContext().catch((err: unknown) => {
+      logger.warn({ err }, "load runtime context failed, falling back to buffer");
+      return null;
     });
+    const recentConversation =
+      runtimeContext?.recentEventsText || dependencies.formatHistoryAsContext(history);
+    const { recentMembers } = collectRecentMembers(config.tgGroupId, dependencies.getHistory);
+    if (!recentMembers.some((m) => m.uid === user.uid)) {
+      recentMembers.push({
+        uid: user.uid,
+        name: user.nickname || "大哥哥",
+        ...(senderUsername ? { username: senderUsername } : {}),
+      });
+    }
+    const replyTo = ctx.msg?.reply_to_message;
+    if (replyTo && replyTo.from && replyTo.from.id !== ctx.me.id) {
+      const replyUid = replyTo.from.id.toString();
+      if (!recentMembers.some((m) => m.uid === replyUid)) {
+        recentMembers.push({
+          uid: replyUid,
+          name: replyTo.from.first_name ?? "某人",
+          ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
+        });
+      }
+    }
 
-    // Retry on dismiss when the user explicitly triggered the bot.
-    // tech tier: no retry, just send the fallback.
-    // simple/complex tier: 1 retry, then fallback.
-    if (
-      result.action === "dismiss" &&
-      isTriggered &&
-      result.dismissReason !== "twitter_fetch_failed"
-    ) {
-      let retries = 0;
-      const maxRetries = tier === "tech" ? 0 : 1;
+    const recentBotMessages = collectRecentBotMessages(
+      config.tgGroupId,
+      5,
+      dependencies.getHistory,
+    );
 
-      while (retries < maxRetries) {
-        retries++;
-        logger.info({ retries, tier }, "handleAiTurn: dismissing, retrying");
+    const localRoute = decideLocalAiRoute({
+      rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
+      isMentioned,
+      isRepliedToBot,
+      urls: urls ?? [],
+      mediaRefs: (mediaRefs ?? []) as MediaRef[],
+    });
+    const { tier, needsSearch } = localRoute ?? (await dependencies.classifyMessage(userMessage));
+    if (localRoute) {
+      logger.info(
+        {
+          tier: localRoute.tier,
+          needsSearch: localRoute.needsSearch,
+          preferAdvisor: localRoute.preferAdvisor,
+          allowPersistentTools: localRoute.allowPersistentTools,
+          reason: localRoute.reason,
+        },
+        "handleAiTurn: applied local AI routing",
+      );
+    }
+    const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
 
-        await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+    try {
+      const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
+        try {
+          const file = await ctx.api.getFile(fileId);
+          if (!file.file_path) return null;
+          return await dependencies.downloadTelegramFileAsDataUrl(file.file_path);
+        } catch (err) {
+          logger.warn({ err, fileId }, "resolveTelegramFileAsDataUrl failed");
+          return null;
+        }
+      };
 
-        currentHint = currentHint
-          ? `${currentHint}\n${MANDATORY_REPLY_HINT}`
-          : MANDATORY_REPLY_HINT;
+      // Build the base systemHint, appending the mandatory-reply hint for
+      // retries when the user explicitly triggered the bot.
+      let currentHint = systemHint;
+      let result = await dependencies.generateAiTurn({
+        userContext: user,
+        userMessage,
+        recentConversation,
+        recentMembers,
+        tier,
+        needsSearch,
+        systemHint: currentHint,
+        wasMentioned: isMentioned,
+        wasRepliedTo: isRepliedToBot,
+        recentBotMessages,
+        mediaRefs,
+        urls,
+        ...(sourceRefs ? { sourceRefs } : {}),
+        resolveTelegramFileAsDataUrl,
+        allowRichContentTools: isTriggered,
+        ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+        ...(runtimeStatus ? { runtimeStatus } : {}),
+        ...(allowWebSearch != null ? { allowWebSearch } : {}),
+        ...(allowMediaTools != null ? { allowMediaTools } : {}),
+        ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+        isRetryTurn: false,
+        allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+        ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
+      });
 
-        result = await generateAiTurn({
-          userContext: user,
-          userMessage,
-          recentConversation,
-          recentMembers,
+      // Retry on dismiss when the user explicitly triggered the bot.
+      // tech tier: no retry, just send the fallback.
+      // simple/complex tier: 1 retry, then fallback.
+      if (
+        result.action === "dismiss" &&
+        isTriggered &&
+        result.dismissReason !== "twitter_fetch_failed"
+      ) {
+        let retries = 0;
+        const maxRetries = getDismissRetryCount({
+          action: result.action,
           tier,
-          needsSearch,
-          systemHint: currentHint,
-          wasMentioned: isMentioned,
-          wasRepliedTo: isRepliedToBot,
-          recentBotMessages,
-          mediaRefs,
-          urls,
-          ...(sourceRefs ? { sourceRefs } : {}),
-          resolveTelegramFileAsDataUrl,
-          allowRichContentTools: isTriggered,
-          ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
-          ...(runtimeStatus ? { runtimeStatus } : {}),
-          ...(allowWebSearch != null ? { allowWebSearch } : {}),
-          ...(allowMediaTools != null ? { allowMediaTools } : {}),
-          ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
-          isRetryTurn: true,
-          allowPersistentTools: localRoute?.allowPersistentTools ?? true,
-          ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
+          triggered: isTriggered,
+          ...(result.dismissReason ? { dismissReason: result.dismissReason } : {}),
         });
 
-        if (
-          result.action === "send" ||
-          (result.action === "dismiss" && result.dismissReason === "twitter_fetch_failed")
-        ) {
-          break;
-        }
-      }
+        while (retries < maxRetries) {
+          retries++;
+          logger.info({ retries, tier }, "handleAiTurn: dismissing, retrying");
 
-      if (result.action === "dismiss" && result.dismissReason !== "twitter_fetch_failed") {
-        clearInterval(typingTimer);
-        logger.info("handleAiTurn: dismissed after retries, sending fallback");
-        const fallbackEmoji = pickRandomStickerEmoji();
-        let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
-        let sentFallback: { messages: string[]; stickerFileId: string | null } = {
-          messages: [],
-          stickerFileId: null,
-        };
+          await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
 
-        if (dismissFallbackMessages?.length) {
-          sentFallback = await sendAiMessages({
-            ctx,
-            chatId,
-            replyToMessageId,
-            messages: dismissFallbackMessages,
-            stickerFileId: null,
-          });
-        } else if (result.rawText) {
-          const rescued = await rescueSendMessagesFromDraft({
+          currentHint = currentHint
+            ? `${currentHint}\n${MANDATORY_REPLY_HINT}`
+            : MANDATORY_REPLY_HINT;
+
+          result = await dependencies.generateAiTurn({
             userContext: user,
             userMessage,
             recentConversation,
             recentMembers,
+            tier,
+            needsSearch,
+            systemHint: currentHint,
+            wasMentioned: isMentioned,
+            wasRepliedTo: isRepliedToBot,
             recentBotMessages,
-            rawDraft: result.rawText,
+            mediaRefs,
+            urls,
+            ...(sourceRefs ? { sourceRefs } : {}),
+            resolveTelegramFileAsDataUrl,
+            allowRichContentTools: isTriggered,
+            ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+            ...(runtimeStatus ? { runtimeStatus } : {}),
+            ...(allowWebSearch != null ? { allowWebSearch } : {}),
+            ...(allowMediaTools != null ? { allowMediaTools } : {}),
+            ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+            isRetryTurn: true,
+            allowPersistentTools: localRoute?.allowPersistentTools ?? true,
+            ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
           });
-          const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
-          if (rescued?.messages.length) {
-            finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
-            logger.info(
-              {
-                rescuedMessages: rescued.messages.length,
-                rescueToolCalls: rescued.toolCalls.length,
-              },
-              "handleAiTurn: rescued raw draft via send_message",
-            );
+
+          if (
+            result.action === "send" ||
+            (result.action === "dismiss" && result.dismissReason === "twitter_fetch_failed")
+          ) {
+            break;
           }
-          sentFallback = await sendAiMessages({
-            ctx,
-            chatId,
-            replyToMessageId,
-            messages: fallbackMessages,
-            stickerFileId: rescued?.messages.length ? null : getStickerFileId(fallbackEmoji),
-          });
-        } else {
-          const stickerFileId = getStickerFileId(fallbackEmoji);
-          sentFallback = await sendAiMessages({
-            ctx,
-            chatId,
-            replyToMessageId,
-            messages: [],
-            stickerFileId,
-          });
         }
 
-        const sentFallbackOutput =
-          sentFallback.messages.length > 0 || sentFallback.stickerFileId !== null;
+        if (result.action === "dismiss" && result.dismissReason !== "twitter_fetch_failed") {
+          clearInterval(typingTimer);
+          logger.info("handleAiTurn: dismissed after retries, sending fallback");
+          const fallbackEmoji = dependencies.pickRandomStickerEmoji();
+          let finalFallbackToolCalls = result.metrics?.toolCalls ?? [];
+          let sentFallback: { messages: string[]; stickerFileId: string | null } = {
+            messages: [],
+            stickerFileId: null,
+          };
 
-        await groupRuntime.recordTurn({
+          if (dismissFallbackMessages?.length) {
+            sentFallback = await sendAiMessages(
+              {
+                ctx,
+                chatId,
+                replyToMessageId,
+                messages: dismissFallbackMessages,
+                stickerFileId: null,
+              },
+              dependencies,
+            );
+          } else if (result.rawText) {
+            const rescued = await dependencies.rescueSendMessagesFromDraft({
+              userContext: user,
+              userMessage,
+              recentConversation,
+              recentMembers,
+              recentBotMessages,
+              rawDraft: result.rawText,
+            });
+            const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
+            if (rescued?.messages.length) {
+              finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
+              logger.info(
+                {
+                  rescuedMessages: rescued.messages.length,
+                  rescueToolCalls: rescued.toolCalls.length,
+                },
+                "handleAiTurn: rescued raw draft via send_message",
+              );
+            }
+            sentFallback = await sendAiMessages(
+              {
+                ctx,
+                chatId,
+                replyToMessageId,
+                messages: fallbackMessages,
+                stickerFileId: rescued?.messages.length
+                  ? null
+                  : dependencies.getStickerFileId(fallbackEmoji),
+              },
+              dependencies,
+            );
+          } else {
+            const stickerFileId = dependencies.getStickerFileId(fallbackEmoji);
+            sentFallback = await sendAiMessages(
+              {
+                ctx,
+                chatId,
+                replyToMessageId,
+                messages: [],
+                stickerFileId,
+              },
+              dependencies,
+            );
+          }
+
+          const sentFallbackOutput =
+            sentFallback.messages.length > 0 || sentFallback.stickerFileId !== null;
+
+          await dependencies.runtime.recordTurn({
+            kind: "passive",
+            startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
+            completedAt: Date.now(),
+            model: result.metrics?.model ?? "unknown",
+            tier,
+            needsSearch,
+            toolCalls: finalFallbackToolCalls,
+            action: sentFallbackOutput ? "send" : "error",
+            messages: sentFallback.messages,
+            stickerFileId: sentFallback.stickerFileId,
+            ...(!sentFallbackOutput ? { error: "telegram fallback dispatch failed" } : {}),
+            ...(result.metrics?.inputTokens != null
+              ? { inputTokens: result.metrics.inputTokens }
+              : {}),
+            ...(result.metrics?.outputTokens != null
+              ? { outputTokens: result.metrics.outputTokens }
+              : {}),
+            ...(result.metrics?.cachedInputTokens != null
+              ? { cachedInputTokens: result.metrics.cachedInputTokens }
+              : {}),
+            ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
+          });
+          return;
+        }
+      }
+
+      if (result.action === "dismiss") {
+        clearInterval(typingTimer);
+        logger.info(
+          { dismissReason: result.dismissReason ?? "model_dismissed" },
+          "handleAiTurn: turn dismissed (silence)",
+        );
+        await dependencies.runtime.recordTurn({
           kind: "passive",
           startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
           completedAt: Date.now(),
           model: result.metrics?.model ?? "unknown",
           tier,
           needsSearch,
-          toolCalls: finalFallbackToolCalls,
-          action: sentFallbackOutput ? "send" : "error",
-          messages: sentFallback.messages,
-          stickerFileId: sentFallback.stickerFileId,
-          ...(!sentFallbackOutput ? { error: "telegram fallback dispatch failed" } : {}),
+          toolCalls: result.metrics?.toolCalls ?? [],
+          action: "dismiss",
+          messages: [],
           ...(result.metrics?.inputTokens != null
             ? { inputTokens: result.metrics.inputTokens }
             : {}),
@@ -1320,15 +996,22 @@ async function handleAiTurn(params: {
         });
         return;
       }
-    }
 
-    if (result.action === "dismiss") {
+      // result.action === "send"
       clearInterval(typingTimer);
-      logger.info(
-        { dismissReason: result.dismissReason ?? "model_dismissed" },
-        "handleAiTurn: turn dismissed (silence)",
+
+      const sent = await sendAiMessages(
+        {
+          ctx,
+          chatId,
+          replyToMessageId,
+          messages: result.messages,
+          stickerFileId: result.stickerFileId,
+        },
+        dependencies,
       );
-      await groupRuntime.recordTurn({
+      const sentOutput = sent.messages.length > 0 || sent.stickerFileId !== null;
+      await dependencies.runtime.recordTurn({
         kind: "passive",
         startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
         completedAt: Date.now(),
@@ -1336,8 +1019,10 @@ async function handleAiTurn(params: {
         tier,
         needsSearch,
         toolCalls: result.metrics?.toolCalls ?? [],
-        action: "dismiss",
-        messages: [],
+        action: sentOutput ? "send" : "error",
+        messages: sent.messages,
+        stickerFileId: sent.stickerFileId,
+        ...(!sentOutput ? { error: "telegram dispatch failed" } : {}),
         ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
         ...(result.metrics?.outputTokens != null
           ? { outputTokens: result.metrics.outputTokens }
@@ -1347,101 +1032,157 @@ async function handleAiTurn(params: {
           : {}),
         ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
       });
-      return;
+    } catch (err) {
+      clearInterval(typingTimer);
+      logger.error({ err }, "handleAiTurn: AI turn failed");
+      await dependencies.replyAndTrack(ctx, "呜喵...出了点问题喵...", replyToMessageId);
+      await dependencies.runtime.recordTurn({
+        kind: "passive",
+        startedAt: Date.now(),
+        completedAt: Date.now(),
+        model: "unknown",
+        needsSearch: false,
+        toolCalls: [],
+        action: "error",
+        messages: [],
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
-
-    // result.action === "send"
-    clearInterval(typingTimer);
-
-    const sent = await sendAiMessages({
-      ctx,
-      chatId,
-      replyToMessageId,
-      messages: result.messages,
-      stickerFileId: result.stickerFileId,
-    });
-    const sentOutput = sent.messages.length > 0 || sent.stickerFileId !== null;
-    await groupRuntime.recordTurn({
-      kind: "passive",
-      startedAt: Date.now() - (result.metrics?.latencyMs ?? 0),
-      completedAt: Date.now(),
-      model: result.metrics?.model ?? "unknown",
-      tier,
-      needsSearch,
-      toolCalls: result.metrics?.toolCalls ?? [],
-      action: sentOutput ? "send" : "error",
-      messages: sent.messages,
-      stickerFileId: sent.stickerFileId,
-      ...(!sentOutput ? { error: "telegram dispatch failed" } : {}),
-      ...(result.metrics?.inputTokens != null ? { inputTokens: result.metrics.inputTokens } : {}),
-      ...(result.metrics?.outputTokens != null
-        ? { outputTokens: result.metrics.outputTokens }
-        : {}),
-      ...(result.metrics?.cachedInputTokens != null
-        ? { cachedInputTokens: result.metrics.cachedInputTokens }
-        : {}),
-      ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
-    });
-  } catch (err) {
-    clearInterval(typingTimer);
-    logger.error({ err }, "handleAiTurn: AI turn failed");
-    await replyAndTrack(ctx, "呜喵...出了点问题喵...", replyToMessageId);
-    await groupRuntime.recordTurn({
-      kind: "passive",
-      startedAt: Date.now(),
-      completedAt: Date.now(),
-      model: "unknown",
-      needsSearch: false,
-      toolCalls: [],
-      action: "error",
-      messages: [],
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  };
 }
+
+const handleAiTurn = createHandleAiTurn();
 
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
-async function buildStatusText(): Promise<string> {
-  const historyLen = getHistory(config.tgGroupId).length;
-  const uptime = process.uptime();
-  const mins = Math.floor(uptime / 60);
-  const hours = Math.floor(mins / 60);
-  const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
-  const mem = process.memoryUsage();
-  const rssMb = Math.round(mem.rss / 1024 / 1024);
-  const memUsers = await countUsersWithMemories().catch((err: unknown) => {
-    logger.warn({ err }, "countUsersWithMemories failed");
-    return null;
-  });
-  const runtimeStatus = groupRuntime.getStatusSnapshot();
-  const proactiveHealth = getProactiveHealthSnapshot();
-  const formatHealthTime = (timestamp: number | null) =>
-    timestamp == null ? "never" : formatTimestamp(timestamp, "MM-DD HH:mm:ss");
-  const proactiveError = proactiveHealth.lastError?.replace(/\s+/g, " ").slice(0, 200) ?? "none";
-  const runtimeContext = await groupRuntime.loadContext().catch((err: unknown) => {
-    logger.warn({ err }, "status runtime context failed");
-    return null;
-  });
-  return [
-    `📊 ${config.botPersonaName} 状态`,
-    `运行时间: ${uptimeStr}`,
-    `缓冲区消息数: ${historyLen}`,
-    `Runtime: running=${runtimeStatus.running} debouncing=${runtimeStatus.debouncing} dirty=${runtimeStatus.dirty}`,
-    `Quiet 剩余: ${Math.ceil(runtimeStatus.quietRemainingMs / 1000)}s`,
-    `Proactive: running=${proactiveHealth.running} scheduled=${proactiveHealth.scheduled} stopped=${proactiveHealth.stopped} failures=${proactiveHealth.consecutiveFailures}`,
-    `Proactive checks: last=${formatHealthTime(proactiveHealth.lastCheckAt)} success=${formatHealthTime(proactiveHealth.lastSuccessAt)} failure=${formatHealthTime(proactiveHealth.lastFailureAt)}`,
-    `Proactive error: ${proactiveError}`,
-    `Summary cursor: ${runtimeContext?.summaryCursorTs ?? 0}`,
-    `Recent events: ${runtimeContext?.recentEvents.length ?? "?"}`,
-    `记忆用户数: ${memUsers ?? "?"}`,
-    `内存 RSS: ${rssMb} MB`,
-  ].join("\n");
+export interface StatusDependencies {
+  getHistory: typeof getHistory;
+  countUsersWithMemories: typeof countUsersWithMemories;
+  getRuntimeStatus: typeof groupRuntime.getStatusSnapshot;
+  loadRuntimeContext: typeof groupRuntime.loadContext;
+  getProactiveHealthSnapshot: typeof getProactiveHealthSnapshot;
+  uptime: () => number;
+  memoryUsage: () => NodeJS.MemoryUsage;
 }
 
-export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
+const defaultStatusDependencies: StatusDependencies = {
+  getHistory,
+  countUsersWithMemories,
+  getRuntimeStatus: () => groupRuntime.getStatusSnapshot(),
+  loadRuntimeContext: () => groupRuntime.loadContext(),
+  getProactiveHealthSnapshot,
+  uptime: () => process.uptime(),
+  memoryUsage: () => process.memoryUsage(),
+};
+
+export function createBuildStatusText(
+  dependencies: StatusDependencies = defaultStatusDependencies,
+) {
+  return async function buildStatusText(): Promise<string> {
+    const historyLen = dependencies.getHistory(config.tgGroupId).length;
+    const uptime = dependencies.uptime();
+    const mins = Math.floor(uptime / 60);
+    const hours = Math.floor(mins / 60);
+    const uptimeStr = hours > 0 ? `${hours}h${mins % 60}m` : `${mins}m`;
+    const mem = dependencies.memoryUsage();
+    const rssMb = Math.round(mem.rss / 1024 / 1024);
+    const memUsers = await dependencies.countUsersWithMemories().catch((err: unknown) => {
+      logger.warn({ err }, "countUsersWithMemories failed");
+      return null;
+    });
+    const runtimeStatus = dependencies.getRuntimeStatus();
+    const proactiveHealth = dependencies.getProactiveHealthSnapshot();
+    const formatHealthTime = (timestamp: number | null) =>
+      timestamp == null ? "never" : formatTimestamp(timestamp, "MM-DD HH:mm:ss");
+    const proactiveError = proactiveHealth.lastError?.replace(/\s+/g, " ").slice(0, 200) ?? "none";
+    const runtimeContext = await dependencies.loadRuntimeContext().catch((err: unknown) => {
+      logger.warn({ err }, "status runtime context failed");
+      return null;
+    });
+    return [
+      `📊 ${config.botPersonaName} 状态`,
+      `运行时间: ${uptimeStr}`,
+      `缓冲区消息数: ${historyLen}`,
+      `Runtime: running=${runtimeStatus.running} debouncing=${runtimeStatus.debouncing} dirty=${runtimeStatus.dirty}`,
+      `Quiet 剩余: ${Math.ceil(runtimeStatus.quietRemainingMs / 1000)}s`,
+      `Proactive: running=${proactiveHealth.running} scheduled=${proactiveHealth.scheduled} stopped=${proactiveHealth.stopped} failures=${proactiveHealth.consecutiveFailures}`,
+      `Proactive checks: last=${formatHealthTime(proactiveHealth.lastCheckAt)} success=${formatHealthTime(proactiveHealth.lastSuccessAt)} failure=${formatHealthTime(proactiveHealth.lastFailureAt)}`,
+      `Proactive error: ${proactiveError}`,
+      `Summary cursor: ${runtimeContext?.summaryCursorTs ?? 0}`,
+      `Recent events: ${runtimeContext?.recentEvents.length ?? "?"}`,
+      `记忆用户数: ${memUsers ?? "?"}`,
+      `内存 RSS: ${rssMb} MB`,
+    ].join("\n");
+  };
+}
+
+const buildStatusText = createBuildStatusText();
+
+export interface HandlerDependencies {
+  isDuplicateUpdate: typeof isDuplicateUpdate;
+  getOrCreateUser: typeof getOrCreateUser;
+  extractContent: typeof extractContent;
+  replyAndTrack: typeof replyAndTrack;
+  pushMessage: typeof pushMessage;
+  generateLoveResponse: typeof generateLoveResponse;
+  generateMorningGreeting: typeof generateMorningGreeting;
+  generateShockResponse: typeof generateShockResponse;
+  generateStrokeResponse: typeof generateStrokeResponse;
+  setMorningGreeted: typeof setMorningGreeted;
+  setNightyTimestamp: typeof setNightyTimestamp;
+  buildStatusText: typeof buildStatusText;
+  generateDiaryForDate: typeof generateDiaryForDate;
+  generateWordcloudPreviewForDateWithRetry: typeof generateWordcloudPreviewForDateWithRetry;
+  listDiaryObservationsByDate: typeof listDiaryObservationsByDate;
+  retractDiaryObservation: typeof retractDiaryObservation;
+  updateDiaryObservation: typeof updateDiaryObservation;
+  getDiaryObservation: typeof getDiaryObservation;
+  resetRuntimeConversationSummary: typeof resetRuntimeConversationSummary;
+  upsertGroupMessage: typeof upsertGroupMessage;
+  deleteStoredMessage: typeof deleteStoredMessage;
+  recentMedia: RecentMediaDependencies;
+  runtime: Pick<
+    typeof groupRuntime,
+    "beginIncomingActivity" | "ingestUserMessage" | "schedulePassiveTurn" | "scheduleCommandTurn"
+  >;
+  handleAiTurn: typeof handleAiTurn;
+}
+
+const defaultHandlerDependencies: HandlerDependencies = {
+  isDuplicateUpdate,
+  getOrCreateUser,
+  extractContent,
+  replyAndTrack,
+  pushMessage,
+  generateLoveResponse,
+  generateMorningGreeting,
+  generateShockResponse,
+  generateStrokeResponse,
+  setMorningGreeted,
+  setNightyTimestamp,
+  buildStatusText,
+  generateDiaryForDate,
+  generateWordcloudPreviewForDateWithRetry,
+  listDiaryObservationsByDate,
+  retractDiaryObservation,
+  updateDiaryObservation,
+  getDiaryObservation,
+  resetRuntimeConversationSummary,
+  upsertGroupMessage,
+  deleteStoredMessage,
+  recentMedia: defaultRecentMediaDependencies,
+  runtime: groupRuntime,
+  handleAiTurn,
+};
+
+export function setupHandlers(
+  bot: Bot<BotContext>,
+  botInfo: BotInfo,
+  overrides: Partial<HandlerDependencies> = {},
+): void {
+  const dependencies = { ...defaultHandlerDependencies, ...overrides };
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
 
@@ -1451,7 +1192,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       await next();
       return;
     }
-    const release = groupRuntime.beginIncomingActivity();
+    const release = dependencies.runtime.beginIncomingActivity();
     try {
       await next();
     } finally {
@@ -1460,7 +1201,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
   });
 
   bot.on("message", async (ctx) => {
-    if (isDuplicateUpdate(ctx.update.update_id)) return;
+    if (dependencies.isDuplicateUpdate(ctx.update.update_id)) return;
     const msg = ctx.message;
     if (!msg) return;
 
@@ -1471,7 +1212,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       const privEntities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
       if (matchCommand(privEntities, privText, "/status", botUsername)) {
-        const statusText = await buildStatusText();
+        const statusText = await dependencies.buildStatusText();
         await ctx.reply(statusText).catch((err: unknown) => {
           logger.warn({ err }, "private /status reply failed");
         });
@@ -1480,7 +1221,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
       if (matchCommand(privEntities, privText, "/reset", botUsername)) {
         clearHistory(config.tgGroupId);
-        await resetRuntimeConversationSummary().catch((err: unknown) => {
+        await dependencies.resetRuntimeConversationSummary().catch((err: unknown) => {
           logger.warn({ err }, "private /reset runtime summary clear failed");
         });
         await ctx.reply(pickResetReply()).catch((err: unknown) => {
@@ -1492,7 +1233,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       if (matchCommand(privEntities, privText, "/diary", botUsername)) {
         await ctx.reply("正在生成今日日记...").catch(() => void 0);
         try {
-          const diary = await generateDiaryForDate(todayDateStr());
+          const diary = await dependencies.generateDiaryForDate(todayDateStr());
           if (!diary) {
             await ctx.reply("今天还没有日记记录喵~");
             return;
@@ -1509,7 +1250,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         const date = privText.replace(/^\/wordcloud(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         await ctx.reply(`正在生成词云 ${date}...`).catch(() => void 0);
         try {
-          const preview = await generateWordcloudPreviewForDateWithRetry(date);
+          const preview = await dependencies.generateWordcloudPreviewForDateWithRetry(date);
           if (!preview) {
             await ctx.reply("这一天没有足够的聊天记录可生成词云喵。").catch(() => void 0);
             return;
@@ -1531,7 +1272,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       if (matchCommand(privEntities, privText, "/diaryobs", botUsername)) {
         const date = privText.replace(/^\/diaryobs(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         try {
-          const observations = await listDiaryObservationsByDate(date);
+          const observations = await dependencies.listDiaryObservationsByDate(date);
           await ctx.reply(formatDiaryObservationSummary(date, observations));
         } catch (err) {
           logger.error({ err, date }, "private /diaryobs failed");
@@ -1548,7 +1289,10 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           return;
         }
         try {
-          const result = await retractDiaryObservation(targetId, reasonParts.join(" "));
+          const result = await dependencies.retractDiaryObservation(
+            targetId,
+            reasonParts.join(" "),
+          );
           await ctx.reply(
             result.action === "retracted"
               ? `已撤销 ${targetId}`
@@ -1576,7 +1320,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           return;
         }
         try {
-          const result = await updateDiaryObservation(
+          const result = await dependencies.updateDiaryObservation(
             targetId,
             patch as Partial<DiaryObservationDraft>,
           );
@@ -1599,7 +1343,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           return;
         }
         try {
-          const item = await getDiaryObservation(targetId);
+          const item = await dependencies.getDiaryObservation(targetId);
           if (!item) {
             await ctx.reply("没找到这条 observation").catch(() => void 0);
             return;
@@ -1616,7 +1360,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         const date = privText.replace(/^\/diaryregen(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         await ctx.reply(`正在重生日记 ${date}...`).catch(() => void 0);
         try {
-          const diary = await generateDiaryForDate(date);
+          const diary = await dependencies.generateDiaryForDate(date);
           await ctx.reply(diary ?? "生成失败或返回空内容").catch(() => void 0);
         } catch (err) {
           logger.error({ err, date }, "private /diaryregen failed");
@@ -1639,9 +1383,16 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     if (matchCommand(entities, rawText, "/nighty", botUsername)) {
       const replyName = from.first_name || "大哥哥";
-      await replyAndTrack(ctx, `晚安安 ${replyName}~ 🌙`, msg.message_id, false, "command_nighty");
-      void getOrCreateUser(from.id.toString(), from.first_name)
-        .then((user) => setNightyTimestamp(user.uid, Date.now()))
+      await dependencies.replyAndTrack(
+        ctx,
+        `晚安安 ${replyName}~ 🌙`,
+        msg.message_id,
+        false,
+        "command_nighty",
+      );
+      void dependencies
+        .getOrCreateUser(from.id.toString(), from.first_name)
+        .then((user) => dependencies.setNightyTimestamp(user.uid, Date.now()))
         .catch((err: unknown) => {
           logger.warn({ err, uid: from.id.toString() }, "failed to persist /nighty timestamp");
         });
@@ -1668,32 +1419,32 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
         dismissFallbackMessages = ["连骰子格式都能写歪，你是想先把我绕晕吗喵。"];
       }
 
-      await replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
+      await dependencies.replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
 
-      const releaseRollActivity = groupRuntime.beginIncomingActivity();
+      const releaseRollActivity = dependencies.runtime.beginIncomingActivity();
       void (async () => {
-        const user = await getOrCreateUser(from.id.toString(), from.first_name);
+        const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
         const displayName = user.nickname || from.first_name || "大哥哥";
         const replyTo = msg.reply_to_message;
-        const isRepliedToBot =
-          replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
-          replyTo?.from?.id === botId;
-        const isMentioned = entities.some((e) => {
-          if (e.type !== "mention") return false;
-          const mention = rawText.slice(e.offset, e.offset + e.length);
-          return (
-            mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
-            mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
-          );
-        });
-        const extracted = await extractContent(ctx, msg, { rawText, entities });
-        const urls = extracted.urls;
-        const mediaRefs = await attachRecentMediaRefs({
-          groupId: config.tgGroupId,
+        const { isMentioned, isRepliedToBot } = detectTrigger({
           rawText,
-          mediaRefs: extracted.mediaRefs,
+          entities,
+          replyTo,
+          botUsername,
+          configuredBotUsername: config.botUsername,
+          botId,
         });
-        const runtimeDecision = await groupRuntime.ingestUserMessage({
+        const extracted = await dependencies.extractContent(ctx, msg, { rawText, entities });
+        const urls = extracted.urls;
+        const mediaRefs = await attachRecentMediaRefs(
+          {
+            groupId: config.tgGroupId,
+            rawText,
+            mediaRefs: extracted.mediaRefs,
+          },
+          dependencies.recentMedia,
+        );
+        const runtimeDecision = await dependencies.runtime.ingestUserMessage({
           chatId: config.tgGroupId,
           messageId: msg.message_id,
           updateId: ctx.update.update_id,
@@ -1729,10 +1480,10 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
           urls,
         });
 
-        groupRuntime.scheduleCommandTurn({
+        dependencies.runtime.scheduleCommandTurn({
           label: `roll:${msg.message_id}`,
           execute: () =>
-            handleAiTurn({
+            dependencies.handleAiTurn({
               ctx,
               replyToMessageId: msg.message_id,
               user,
@@ -1762,30 +1513,30 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     }
 
     // 2. Resolve user
-    const user = await getOrCreateUser(from.id.toString(), from.first_name);
+    const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
     // 3. Extract content references (text, URLs, media file_ids, sticker emoji)
-    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await dependencies.extractContent(ctx, msg, { rawText, entities });
     const urls = extracted.urls;
-    const mediaRefs = await attachRecentMediaRefs({
-      groupId: config.tgGroupId,
-      rawText,
-      mediaRefs: extracted.mediaRefs,
-    });
+    const mediaRefs = await attachRecentMediaRefs(
+      {
+        groupId: config.tgGroupId,
+        rawText,
+        mediaRefs: extracted.mediaRefs,
+      },
+      dependencies.recentMedia,
+    );
 
     // 3b. Trigger detection (@mention or reply-to-bot) — needed for buffer and later logic
     const replyTo = msg.reply_to_message;
-    const isRepliedToBot =
-      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
-      replyTo?.from?.id === botId;
-    const isMentioned = entities.some((e) => {
-      if (e.type !== "mention") return false;
-      const mention = rawText.slice(e.offset, e.offset + e.length);
-      return (
-        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
-        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
-      );
+    const { isMentioned, isRepliedToBot } = detectTrigger({
+      rawText,
+      entities,
+      replyTo,
+      botUsername,
+      configuredBotUsername: config.botUsername,
+      botId,
     });
 
     // 4. Push user's message into the buffer ONCE, up front.
@@ -1809,21 +1560,24 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     });
     const isCommandMessage = isCommandLikeMessage(entities);
     if (!from.is_bot && !isCommandMessage) {
-      await persistWordcloudMessage({
-        chatId: config.tgGroupId,
-        messageId: msg.message_id,
-        userId: from.id.toString(),
-        displayName,
-        ...(from.username ? { username: from.username } : {}),
-        isBot: false,
-        isForwarded: isForwardedMessage(msg),
-        text: rawText,
-        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
-      }).catch((err: unknown) => {
+      await persistWordcloudMessage(
+        {
+          chatId: config.tgGroupId,
+          messageId: msg.message_id,
+          userId: from.id.toString(),
+          displayName,
+          ...(from.username ? { username: from.username } : {}),
+          isBot: false,
+          isForwarded: isForwardedMessage(msg),
+          text: rawText,
+          createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+        },
+        dependencies.upsertGroupMessage,
+      ).catch((err: unknown) => {
         logger.warn({ err, messageId: msg.message_id }, "wordcloud: persist group message failed");
       });
     }
-    const runtimeDecision = await groupRuntime.ingestUserMessage({
+    const runtimeDecision = await dependencies.runtime.ingestUserMessage({
       chatId: config.tgGroupId,
       messageId: msg.message_id,
       updateId: ctx.update.update_id,
@@ -1850,7 +1604,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     });
 
     if (bufferLine && runtimeDecision.accepted) {
-      pushMessage(
+      dependencies.pushMessage(
         config.tgGroupId,
         from.id.toString(),
         displayName,
@@ -1878,52 +1632,58 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 • 让我「记住XXX」— 我会记住关于你的事情
 
 遇到编程/技术问题也可以认真问我，我会收起步猫娘模式帮你喵~`;
-      await replyAndTrack(ctx, helpText, msg.message_id, false, "command_help");
+      await dependencies.replyAndTrack(ctx, helpText, msg.message_id, false, "command_help");
       return;
     }
 
     // 6. /love — public
     if (matchCommand(entities, rawText, "/love", botUsername)) {
-      const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      const rejection = await dependencies.generateLoveResponse(user);
+      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
       return;
     }
 
     const shockArgs = parseShockCommand(entities, rawText, botUsername);
     if (shockArgs) {
-      const shocked = await generateShockResponse(user, shockArgs);
-      await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      const shocked = await dependencies.generateShockResponse(user, shockArgs);
+      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
 
     const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
     if (strokeArgs) {
-      const stroked = await generateStrokeResponse(user, strokeArgs);
-      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
+      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
       return;
     }
 
     // 7. Admin-only: /status, /reset
     if (matchCommand(entities, rawText, "/status", botUsername)) {
       if (from.id.toString() !== config.tgAdminUid) {
-        await replyAndTrack(ctx, "哼，这是主人才能用的命令喵~", msg.message_id);
+        await dependencies.replyAndTrack(ctx, "哼，这是主人才能用的命令喵~", msg.message_id);
         return;
       }
-      const statusText = await buildStatusText();
-      await replyAndTrack(ctx, statusText, msg.message_id, false, "command_status");
+      const statusText = await dependencies.buildStatusText();
+      await dependencies.replyAndTrack(ctx, statusText, msg.message_id, false, "command_status");
       return;
     }
 
     if (matchCommand(entities, rawText, "/reset", botUsername)) {
       if (from.id.toString() !== config.tgAdminUid) {
-        await replyAndTrack(ctx, "哼，这是主人才能用的命令喵~", msg.message_id);
+        await dependencies.replyAndTrack(ctx, "哼，这是主人才能用的命令喵~", msg.message_id);
         return;
       }
       clearHistory(config.tgGroupId);
-      await resetRuntimeConversationSummary().catch((err: unknown) => {
+      await dependencies.resetRuntimeConversationSummary().catch((err: unknown) => {
         logger.warn({ err }, "group /reset runtime summary clear failed");
       });
-      await replyAndTrack(ctx, pickResetReply(), msg.message_id, false, "command_reset");
+      await dependencies.replyAndTrack(
+        ctx,
+        pickResetReply(),
+        msg.message_id,
+        false,
+        "command_reset",
+      );
       return;
     }
 
@@ -1938,15 +1698,15 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     if (needsMorningGreet) {
       if (isMentioned || isRepliedToBot) {
         // Merged path: AI reply will include the greeting opener.
-        await setMorningGreeted(user.uid, now);
+        await dependencies.setMorningGreeted(user.uid, now);
         systemHint =
           "<system_hint><event>user_just_woke_up</event><rule>回答开头先说一句傲娇早安，再回答问题</rule></system_hint>";
       } else {
         // Standalone path: send greeting, then fall through to return.
         try {
-          const greeting = await generateMorningGreeting(user);
-          await setMorningGreeted(user.uid, now);
-          await replyAndTrack(ctx, greeting, msg.message_id, true, "morning_greeting");
+          const greeting = await dependencies.generateMorningGreeting(user);
+          await dependencies.setMorningGreeted(user.uid, now);
+          await dependencies.replyAndTrack(ctx, greeting, msg.message_id, true, "morning_greeting");
         } catch (err) {
           logger.error({ err, uid: user.uid }, "failed to send morning greeting");
         }
@@ -1971,8 +1731,8 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // 12. Love confession → memory-based affection scoring
     if (LOVE_REGEX.test(rawText)) {
-      const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      const rejection = await dependencies.generateLoveResponse(user);
+      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
       return;
     }
 
@@ -1988,10 +1748,10 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     });
     const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
-    groupRuntime.schedulePassiveTurn({
+    dependencies.runtime.schedulePassiveTurn({
       label: `message:${msg.message_id}`,
       execute: () =>
-        handleAiTurn({
+        dependencies.handleAiTurn({
           ctx,
           replyToMessageId: msg.message_id,
           user,
@@ -2019,7 +1779,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
   // handled when they map to explicit handlers like /shock.
   // -------------------------------------------------------------------------
   bot.on("edited_message", async (ctx) => {
-    if (isDuplicateUpdate(ctx.update.update_id)) return;
+    if (dependencies.isDuplicateUpdate(ctx.update.update_id)) return;
     const msg = ctx.editedMessage;
     if (!msg) return;
     if (ctx.chat.id.toString() !== config.tgGroupId) return;
@@ -2035,27 +1795,32 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
     const isCommandMessage = isCommandLikeMessage(entities);
     if (!from.is_bot && isCommandMessage) {
-      await deleteStoredMessage(config.tgGroupId, msg.message_id).catch((err: unknown) => {
-        logger.warn(
-          { err, messageId: msg.message_id },
-          "wordcloud: delete edited command message failed",
-        );
-      });
+      await dependencies
+        .deleteStoredMessage(config.tgGroupId, msg.message_id)
+        .catch((err: unknown) => {
+          logger.warn(
+            { err, messageId: msg.message_id },
+            "wordcloud: delete edited command message failed",
+          );
+        });
     } else if (!from.is_bot && !isCommandMessage) {
-      const user = await getOrCreateUser(from.id.toString(), from.first_name);
+      const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
       const displayName = user.nickname || from.first_name || "大哥哥";
-      await persistWordcloudMessage({
-        chatId: config.tgGroupId,
-        messageId: msg.message_id,
-        userId: from.id.toString(),
-        displayName,
-        ...(from.username ? { username: from.username } : {}),
-        isBot: false,
-        isForwarded: isForwardedMessage(msg),
-        text: rawText,
-        createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
-        ...(msg.edit_date != null ? { editedAt: msg.edit_date * 1000 } : {}),
-      }).catch((err: unknown) => {
+      await persistWordcloudMessage(
+        {
+          chatId: config.tgGroupId,
+          messageId: msg.message_id,
+          userId: from.id.toString(),
+          displayName,
+          ...(from.username ? { username: from.username } : {}),
+          isBot: false,
+          isForwarded: isForwardedMessage(msg),
+          text: rawText,
+          createdAt: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
+          ...(msg.edit_date != null ? { editedAt: msg.edit_date * 1000 } : {}),
+        },
+        dependencies.upsertGroupMessage,
+      ).catch((err: unknown) => {
         logger.warn(
           { err, messageId: msg.message_id },
           "wordcloud: persist edited group message failed",
@@ -2063,39 +1828,39 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       });
     }
 
-    const isMentioned = entities.some((e) => {
-      if (e.type !== "mention") return false;
-      const mention = rawText.slice(e.offset, e.offset + e.length);
-      return (
-        mention.toLowerCase() === `@${botUsername.toLowerCase()}` ||
-        mention.toLowerCase() === `@${config.botUsername.toLowerCase()}`
-      );
-    });
     const replyTo = msg.reply_to_message;
-    const isRepliedToBot =
-      replyTo?.from?.username?.toLowerCase() === botUsername.toLowerCase() ||
-      replyTo?.from?.id === botId;
+    const { isMentioned, isRepliedToBot } = detectTrigger({
+      rawText,
+      entities,
+      replyTo,
+      botUsername,
+      configuredBotUsername: config.botUsername,
+      botId,
+    });
 
     const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
     if (strokeArgs) {
-      const user = await getOrCreateUser(from.id.toString(), from.first_name);
-      const stroked = await generateStrokeResponse(user, strokeArgs);
-      await replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
+      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
+      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
       return;
     }
 
     if (!isMentioned && !isRepliedToBot) return;
 
-    const user = await getOrCreateUser(from.id.toString(), from.first_name);
+    const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
 
-    const extracted = await extractContent(ctx, msg, { rawText, entities });
+    const extracted = await dependencies.extractContent(ctx, msg, { rawText, entities });
     const urls = extracted.urls;
-    const mediaRefs = await attachRecentMediaRefs({
-      groupId: config.tgGroupId,
-      rawText,
-      mediaRefs: extracted.mediaRefs,
-    });
+    const mediaRefs = await attachRecentMediaRefs(
+      {
+        groupId: config.tgGroupId,
+        rawText,
+        mediaRefs: extracted.mediaRefs,
+      },
+      dependencies.recentMedia,
+    );
     let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
     if (replyTo && !isRepliedToBot) {
       replyToInfo = {
@@ -2113,7 +1878,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
       urls,
       ...(replyToInfo ? { replyToInfo } : {}),
     });
-    const runtimeDecision = await groupRuntime.ingestUserMessage({
+    const runtimeDecision = await dependencies.runtime.ingestUserMessage({
       chatId: config.tgGroupId,
       messageId: msg.message_id,
       updateId: ctx.update.update_id,
@@ -2142,7 +1907,7 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     if (runtimeDecision.ignoredReason === "non_content_edit") return;
 
     if (editedBuffer && runtimeDecision.accepted) {
-      pushMessage(
+      dependencies.pushMessage(
         config.tgGroupId,
         from.id.toString(),
         displayName,
@@ -2155,15 +1920,15 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
 
     // Love confession in edit
     if (LOVE_REGEX.test(rawText)) {
-      const rejection = await generateLoveResponse(user);
-      await replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      const rejection = await dependencies.generateLoveResponse(user);
+      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
       return;
     }
 
     const shockArgs = parseShockCommand(entities, rawText, botUsername);
     if (shockArgs) {
-      const shocked = await generateShockResponse(user, shockArgs);
-      await replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      const shocked = await dependencies.generateShockResponse(user, shockArgs);
+      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
       return;
     }
 
@@ -2191,10 +1956,10 @@ export function setupHandlers(bot: Bot<BotContext>, botInfo: BotInfo): void {
     });
     const memoryCandidateHints = detectMemoryCandidateHints(rawText);
 
-    groupRuntime.schedulePassiveTurn({
+    dependencies.runtime.schedulePassiveTurn({
       label: `edited:${msg.message_id}`,
       execute: () =>
-        handleAiTurn({
+        dependencies.handleAiTurn({
           ctx,
           replyToMessageId: msg.message_id,
           user,

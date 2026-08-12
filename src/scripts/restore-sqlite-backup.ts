@@ -1,8 +1,8 @@
-import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { access, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { decryptSqliteBackup } from "../libs/database-backup-crypto.js";
 import { SCHEMA_VERSION } from "../services/schema-version.js";
@@ -31,12 +31,14 @@ function usage(): never {
   );
 }
 
-function parseArgs(args: string[]): {
+export interface RestoreArgs {
   archivePath: string;
   outputPath: string;
   force: boolean;
   requiredTables: string[];
-} {
+}
+
+export function parseArgs(args: string[]): RestoreArgs {
   const positional: string[] = [];
   const requiredTables: string[] = [];
   let force = false;
@@ -58,7 +60,7 @@ function parseArgs(args: string[]): {
   return { archivePath, outputPath, force, requiredTables };
 }
 
-function verifyDatabase(databasePath: string, requiredTables: string[]): string[] {
+export function verifyDatabase(databasePath: string, requiredTables: string[] = []): string[] {
   const database = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
     const integrity = database.pragma("integrity_check") as { integrity_check: string }[];
@@ -94,10 +96,7 @@ function verifyDatabase(databasePath: string, requiredTables: string[]): string[
   }
 }
 
-async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  const passphrase = process.env.DATABASE_BACKUP_PASSPHRASE;
-  if (!passphrase) throw new Error("DATABASE_BACKUP_PASSPHRASE is required");
+export async function runRestore(args: RestoreArgs, passphrase: string): Promise<string[]> {
   if (path.resolve(args.archivePath) === path.resolve(args.outputPath)) {
     throw new Error("Archive and output paths must be different");
   }
@@ -118,14 +117,27 @@ async function main(): Promise<void> {
     await decryptSqliteBackup(args.archivePath, stagingPath, passphrase);
     const tables = verifyDatabase(stagingPath, args.requiredTables);
     await rename(stagingPath, resolvedOutput);
-    process.stdout.write(`Restored and verified ${resolvedOutput}\nTables: ${tables.join(", ")}\n`);
+    return tables;
   } catch (err) {
     await rm(stagingPath, { force: true });
     throw err;
   }
 }
 
-main().catch((err: unknown) => {
-  process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-  process.exitCode = 1;
-});
+export async function main(args = process.argv.slice(2)): Promise<void> {
+  await import("dotenv/config");
+  const parsed = parseArgs(args);
+  const passphrase = process.env.DATABASE_BACKUP_PASSPHRASE;
+  if (!passphrase) throw new Error("DATABASE_BACKUP_PASSPHRASE is required");
+  const tables = await runRestore(parsed, passphrase);
+  process.stdout.write(
+    `Restored and verified ${path.resolve(parsed.outputPath)}\nTables: ${tables.join(", ")}\n`,
+  );
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}

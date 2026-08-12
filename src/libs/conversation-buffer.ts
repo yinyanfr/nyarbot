@@ -28,13 +28,10 @@ export interface HistoryEntry {
   mediaRefs?: RuntimeMediaRef[];
 }
 
-const SAVE_PATH = path.resolve(config.conversationBufferPath);
 const STALE_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 const MAX_HISTORY = 30;
 const MAX_TEXT_LEN = 500;
-const buffers = new Map<string, HistoryEntry[]>();
-
 function xmlEscape(text: string): string {
   return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
@@ -44,35 +41,76 @@ function xmlEscape(text: string): string {
     .replaceAll("'", "&apos;");
 }
 
-export function pushMessage(
-  groupId: string,
-  uid: string,
-  name: string,
-  text: string,
-  username?: string,
-  kind: HistoryEntryKind = "normal",
-  mediaRefs: RuntimeMediaRef[] = [],
-): void {
-  if (!buffers.has(groupId)) {
-    buffers.set(groupId, []);
-  }
-  const buffer = buffers.get(groupId)!;
-  buffer.push({
-    uid,
-    name,
-    ...(username ? { username } : {}),
-    text: text.slice(0, MAX_TEXT_LEN),
-    timestamp: Date.now(),
-    ...(kind !== "normal" ? { kind } : {}),
-    ...(mediaRefs.length > 0 ? { mediaRefs } : {}),
-  });
-  while (buffer.length > MAX_HISTORY) {
-    buffer.shift();
-  }
-}
+export function createConversationBuffer(savePath: string) {
+  const buffers = new Map<string, HistoryEntry[]>();
 
-export function getHistory(groupId: string): HistoryEntry[] {
-  return buffers.get(groupId) ?? [];
+  function pushMessage(
+    groupId: string,
+    uid: string,
+    name: string,
+    text: string,
+    username?: string,
+    kind: HistoryEntryKind = "normal",
+    mediaRefs: RuntimeMediaRef[] = [],
+  ): void {
+    if (!buffers.has(groupId)) buffers.set(groupId, []);
+    const buffer = buffers.get(groupId)!;
+    buffer.push({
+      uid,
+      name,
+      ...(username ? { username } : {}),
+      text: text.slice(0, MAX_TEXT_LEN),
+      timestamp: Date.now(),
+      ...(kind !== "normal" ? { kind } : {}),
+      ...(mediaRefs.length > 0 ? { mediaRefs } : {}),
+    });
+    while (buffer.length > MAX_HISTORY) buffer.shift();
+  }
+
+  function getHistory(groupId: string): HistoryEntry[] {
+    return buffers.get(groupId) ?? [];
+  }
+
+  function clearHistory(groupId: string): void {
+    buffers.delete(groupId);
+  }
+
+  async function saveConversationBuffer(): Promise<void> {
+    try {
+      await fs.mkdir(path.dirname(savePath), { recursive: true });
+      const data = JSON.stringify(Array.from(buffers.entries()), null, 2);
+      await fs.writeFile(savePath, data, "utf-8");
+    } catch (err) {
+      logger.warn({ err }, "failed to save conversation buffer");
+    }
+  }
+
+  async function loadConversationBuffer(): Promise<void> {
+    try {
+      const data = await fs.readFile(savePath, "utf-8");
+      const entries: [string, HistoryEntry[]][] = JSON.parse(data);
+      const now = Date.now();
+      for (const [groupId, history] of entries) {
+        if (!Array.isArray(history)) continue;
+        const fresh = history.filter(
+          (e: HistoryEntry) =>
+            typeof e.uid === "string" &&
+            typeof e.name === "string" &&
+            typeof e.text === "string" &&
+            typeof e.timestamp === "number" &&
+            (e.kind === undefined || typeof e.kind === "string") &&
+            now - e.timestamp < STALE_MS,
+        );
+        if (fresh.length > 0) buffers.set(groupId, fresh.slice(-MAX_HISTORY));
+      }
+      const total = Array.from(buffers.values()).reduce((sum, history) => sum + history.length, 0);
+      logger.info({ total, groups: buffers.size }, "conversation buffer loaded from disk");
+    } catch {
+      // File doesn't exist or is corrupted - start fresh.
+    }
+  }
+
+  return { pushMessage, getHistory, clearHistory, saveConversationBuffer, loadConversationBuffer };
 }
 
 export function formatHistoryAsContext(history: HistoryEntry[]): string {
@@ -87,43 +125,9 @@ export function formatHistoryAsContext(history: HistoryEntry[]): string {
   return lines.join("\n");
 }
 
-export function clearHistory(groupId: string): void {
-  buffers.delete(groupId);
-}
-
-export async function saveConversationBuffer(): Promise<void> {
-  try {
-    await fs.mkdir(path.dirname(SAVE_PATH), { recursive: true });
-    const data = JSON.stringify(Array.from(buffers.entries()), null, 2);
-    await fs.writeFile(SAVE_PATH, data, "utf-8");
-  } catch (err) {
-    logger.warn({ err }, "failed to save conversation buffer");
-  }
-}
-
-export async function loadConversationBuffer(): Promise<void> {
-  try {
-    const data = await fs.readFile(SAVE_PATH, "utf-8");
-    const entries: [string, HistoryEntry[]][] = JSON.parse(data);
-    const now = Date.now();
-    for (const [groupId, history] of entries) {
-      if (!Array.isArray(history)) continue;
-      const fresh = history.filter(
-        (e: HistoryEntry) =>
-          typeof e.uid === "string" &&
-          typeof e.name === "string" &&
-          typeof e.text === "string" &&
-          typeof e.timestamp === "number" &&
-          (e.kind === undefined || typeof e.kind === "string") &&
-          now - e.timestamp < STALE_MS,
-      );
-      if (fresh.length > 0) {
-        buffers.set(groupId, fresh.slice(-MAX_HISTORY));
-      }
-    }
-    const total = Array.from(buffers.values()).reduce((s, h) => s + h.length, 0);
-    logger.info({ total, groups: buffers.size }, "conversation buffer loaded from disk");
-  } catch {
-    // File doesn't exist or is corrupted — start fresh
-  }
-}
+const defaultBuffer = createConversationBuffer(path.resolve(config.conversationBufferPath));
+export const pushMessage = defaultBuffer.pushMessage;
+export const getHistory = defaultBuffer.getHistory;
+export const clearHistory = defaultBuffer.clearHistory;
+export const saveConversationBuffer = defaultBuffer.saveConversationBuffer;
+export const loadConversationBuffer = defaultBuffer.loadConversationBuffer;

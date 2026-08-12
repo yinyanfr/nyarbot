@@ -9,12 +9,18 @@ const isDev = process.env.NODE_ENV !== "production";
 // Admin DM stream — forwards warn/error logs to the admin via Telegram
 // ---------------------------------------------------------------------------
 
-const MIN_DM_INTERVAL_MS = config.adminDmMinIntervalMs;
+export interface AdminDmHandlerOptions {
+  adminUid: string;
+  minIntervalMs: number;
+  now?: () => number;
+}
 
-class AdminDmHandler {
+export class AdminDmHandler {
   private botApi: Api<RawApi> | null = null;
   private lastDmTime = 0;
   private pending: string[] = [];
+
+  constructor(private readonly options: AdminDmHandlerOptions) {}
 
   setBot(api: Api<RawApi>): void {
     this.botApi = api;
@@ -76,19 +82,22 @@ class AdminDmHandler {
   }
 
   private async send(text: string): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastDmTime < MIN_DM_INTERVAL_MS) return;
+    const now = this.options.now?.() ?? Date.now();
+    if (now - this.lastDmTime < this.options.minIntervalMs) return;
     this.lastDmTime = now;
 
     try {
-      await this.botApi!.sendMessage(config.tgAdminUid, text);
+      await this.botApi!.sendMessage(this.options.adminUid, text);
     } catch {
       // Admin DM is best-effort
     }
   }
 }
 
-const adminDm = new AdminDmHandler();
+const adminDm = new AdminDmHandler({
+  adminUid: config.tgAdminUid,
+  minIntervalMs: config.adminDmMinIntervalMs,
+});
 
 /**
  * Return a writable stream-compatible object for pino's multistream.

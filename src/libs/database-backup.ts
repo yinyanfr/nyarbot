@@ -22,27 +22,73 @@ export interface DatabaseBackupOptions {
   timeZone: string;
 }
 
+export interface DatabaseBackupDependencies {
+  now: () => number;
+  date: () => Date;
+  setTimeout: typeof setTimeout;
+  clearTimeout: typeof clearTimeout;
+  mkdir: typeof mkdir;
+  chmod: typeof chmod;
+  rename: typeof rename;
+  rm: typeof rm;
+  stat: typeof stat;
+  readdir: typeof readdir;
+  encrypt: typeof encryptSqliteBackup;
+  scheduleState: typeof getBackupScheduleState;
+}
+
+const productionDependencies: DatabaseBackupDependencies = {
+  now: Date.now,
+  date: () => new Date(),
+  setTimeout,
+  clearTimeout,
+  mkdir,
+  chmod,
+  rename,
+  rm,
+  stat,
+  readdir,
+  encrypt: encryptSqliteBackup,
+  scheduleState: getBackupScheduleState,
+};
+
 interface CompletionRow {
   schedule_date: string;
 }
 
 export class DatabaseBackupService {
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private checking: Promise<void> | undefined;
   private running: Promise<void> | undefined;
   private stopped = false;
+  private readonly dependencies: DatabaseBackupDependencies;
 
-  constructor(private readonly options: DatabaseBackupOptions) {}
+  constructor(
+    private readonly options: DatabaseBackupOptions,
+    dependencies: Partial<DatabaseBackupDependencies> = {},
+  ) {
+    this.dependencies = { ...productionDependencies, ...dependencies };
+  }
 
   start(): void {
     this.stopped = false;
-    void this.checkAndScheduleSafely();
+    this.launchCheck();
   }
 
   async close(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
+    if (this.timer) this.dependencies.clearTimeout(this.timer);
     this.timer = undefined;
+    await this.checking?.catch(() => void 0);
     await this.running?.catch(() => void 0);
+  }
+
+  private launchCheck(): void {
+    const checking = this.checkAndScheduleSafely();
+    this.checking = checking;
+    void checking.finally(() => {
+      if (this.checking === checking) this.checking = undefined;
+    });
   }
 
   private latestCompletedDate(): string | undefined {
@@ -54,8 +100,8 @@ export class DatabaseBackupService {
 
   private async checkAndSchedule(): Promise<void> {
     if (this.stopped) return;
-    const nowMs = Date.now();
-    const state = getBackupScheduleState(
+    const nowMs = this.dependencies.now();
+    const state = this.dependencies.scheduleState(
       nowMs,
       this.options.schedule,
       this.options.timeZone,
@@ -70,16 +116,16 @@ export class DatabaseBackupService {
       this.running = undefined;
     }
     if (this.stopped) return;
-    const next = getBackupScheduleState(
-      Date.now(),
+    const next = this.dependencies.scheduleState(
+      this.dependencies.now(),
       this.options.schedule,
       this.options.timeZone,
       this.latestCompletedDate(),
     );
     const delay = failed
       ? FAILURE_RETRY_MS
-      : Math.max(1_000, Math.min(TIMER_MAX_MS, next.nextRunMs - Date.now()));
-    this.timer = setTimeout(() => void this.checkAndScheduleSafely(), delay);
+      : Math.max(1_000, Math.min(TIMER_MAX_MS, next.nextRunMs - this.dependencies.now()));
+    this.timer = this.dependencies.setTimeout(() => this.launchCheck(), delay);
     this.timer.unref?.();
   }
 
@@ -89,14 +135,15 @@ export class DatabaseBackupService {
     } catch (err) {
       if (this.stopped) return;
       logger.error({ err }, "database backup scheduler failed");
-      this.timer = setTimeout(() => void this.checkAndScheduleSafely(), FAILURE_RETRY_MS);
+      this.timer = this.dependencies.setTimeout(() => this.launchCheck(), FAILURE_RETRY_MS);
       this.timer.unref?.();
     }
   }
 
   private async run(scheduleDate: string): Promise<void> {
-    await mkdir(this.options.archiveDirectory, { recursive: true, mode: 0o700 });
-    const timestamp = new Date()
+    await this.dependencies.mkdir(this.options.archiveDirectory, { recursive: true, mode: 0o700 });
+    const timestamp = this.dependencies
+      .date()
       .toISOString()
       .replace(/[-:]/g, "")
       .replace(/\.\d{3}/, "");
@@ -106,10 +153,11 @@ export class DatabaseBackupService {
     const snapshotPath = path.join(this.options.archiveDirectory, `.${archiveName}.sqlite.tmp`);
     try {
       await this.options.database.backup(snapshotPath);
-      await chmod(snapshotPath, 0o600);
-      await encryptSqliteBackup(snapshotPath, partialArchivePath, this.options.passphrase);
-      await rename(partialArchivePath, archivePath);
-      const archiveStat = await stat(archivePath);
+      await this.dependencies.chmod(snapshotPath, 0o600);
+      await this.dependencies.encrypt(snapshotPath, partialArchivePath, this.options.passphrase);
+      await this.dependencies.rename(partialArchivePath, archivePath);
+      await this.dependencies.chmod(archivePath, 0o600);
+      const archiveStat = await this.dependencies.stat(archivePath);
       if (archiveStat.size > MAX_TELEGRAM_FILE_BYTES) {
         throw new Error(
           `Encrypted database backup is ${archiveStat.size} bytes, exceeding Telegram's 50 MB limit`,
@@ -131,7 +179,7 @@ export class DatabaseBackupService {
               archive_bytes = excluded.archive_bytes
           `,
         )
-        .run(scheduleDate, Date.now(), archiveName, archiveStat.size);
+        .run(scheduleDate, this.dependencies.now(), archiveName, archiveStat.size);
       logger.info(
         { scheduleDate, archiveName, bytes: archiveStat.size },
         "database backup completed",
@@ -149,8 +197,8 @@ export class DatabaseBackupService {
         .catch(() => void 0);
       throw err;
     } finally {
-      await rm(snapshotPath, { force: true }).catch(() => void 0);
-      await rm(partialArchivePath, { force: true }).catch(() => void 0);
+      await this.dependencies.rm(snapshotPath, { force: true }).catch(() => void 0);
+      await this.dependencies.rm(partialArchivePath, { force: true }).catch(() => void 0);
       await this.pruneArchives().catch((err: unknown) => {
         logger.warn({ err }, "database backup archive pruning failed");
       });
@@ -158,13 +206,17 @@ export class DatabaseBackupService {
   }
 
   private async pruneArchives(): Promise<void> {
-    const entries = await readdir(this.options.archiveDirectory, { withFileTypes: true });
+    const entries = await this.dependencies.readdir(this.options.archiveDirectory, {
+      withFileTypes: true,
+    });
     const archives = await Promise.all(
       entries
         .filter((entry) => entry.isFile() && ARCHIVE_PATTERN.test(entry.name))
         .map(async (entry) => ({
           name: entry.name,
-          mtimeMs: (await stat(path.join(this.options.archiveDirectory, entry.name))).mtimeMs,
+          mtimeMs: (
+            await this.dependencies.stat(path.join(this.options.archiveDirectory, entry.name))
+          ).mtimeMs,
         })),
     );
     const successfulRows = this.options.database
@@ -175,7 +227,9 @@ export class DatabaseBackupService {
       successfulRows.map((row) => row.archive_name),
     );
     await Promise.all(
-      toDelete.map((name) => rm(path.join(this.options.archiveDirectory, name), { force: true })),
+      toDelete.map((name) =>
+        this.dependencies.rm(path.join(this.options.archiveDirectory, name), { force: true }),
+      ),
     );
   }
 }

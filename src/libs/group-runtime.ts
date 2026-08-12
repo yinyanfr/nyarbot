@@ -9,6 +9,7 @@ import {
   loadRecentTurnRecords,
   loadRuntimeGroupState,
   type RuntimeEventRecord,
+  type RuntimeGroupStateDoc,
   type RuntimeMediaRef,
   type RuntimeReplyRef,
   type RuntimeTurnRecord,
@@ -18,6 +19,70 @@ import { logger } from "./logger.js";
 
 type Timer = ReturnType<typeof setTimeout>;
 const MESSAGE_CONTENT_SIGNATURE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+type RuntimeConfig = Pick<
+  typeof config,
+  | "botUsername"
+  | "tgGroupId"
+  | "runtimeDuplicateTextWindowMs"
+  | "runtimeHotChatThreshold"
+  | "runtimeInitialDelayMs"
+  | "runtimeMaxContextEstTokens"
+  | "runtimeMaxDelayMs"
+  | "runtimeMaxRecentEvents"
+  | "runtimeMediaFloodCooldownMs"
+  | "runtimeMediaFloodThreshold"
+  | "runtimeMediaFloodWindowMs"
+  | "runtimeQuietDurationMs"
+  | "runtimeQuietWindowMs"
+  | "runtimeRetainRecentEvents"
+  | "runtimeTypingExtendMs"
+  | "runtimeUrlFloodThreshold"
+  | "runtimeUrlFloodWindowMs"
+  | "runtimeUserBurstThreshold"
+  | "runtimeUserBurstWindowMs"
+  | "runtimeUserCooldownMs"
+>;
+
+interface RuntimeLogger {
+  info(data: object, message: string): void;
+  warn(data: object, message: string): void;
+  error(data: object, message: string): void;
+}
+
+export interface GroupRuntimeDependencies {
+  config: RuntimeConfig;
+  appendRuntimeEvent: typeof appendRuntimeEvent;
+  appendRuntimeEventAndAdvance: typeof appendRuntimeEventAndAdvance;
+  appendTurnRecord: typeof appendTurnRecord;
+  commitRuntimeCompaction: typeof commitRuntimeCompaction;
+  generateConversationCompaction: typeof generateConversationCompaction;
+  loadRecentRuntimeEvents: typeof loadRecentRuntimeEvents;
+  loadRecentTurnRecords: typeof loadRecentTurnRecords;
+  loadRuntimeGroupState: () => Promise<RuntimeGroupStateDoc>;
+  logger: RuntimeLogger;
+  now: () => number;
+  setTimeout: (callback: () => void, delay: number) => Timer;
+  clearTimeout: (timer: Timer) => void;
+  queueMicrotask: (callback: () => void) => void;
+}
+
+const productionDependencies: GroupRuntimeDependencies = {
+  config,
+  appendRuntimeEvent,
+  appendRuntimeEventAndAdvance,
+  appendTurnRecord,
+  commitRuntimeCompaction,
+  generateConversationCompaction,
+  loadRecentRuntimeEvents,
+  loadRecentTurnRecords,
+  loadRuntimeGroupState,
+  logger,
+  now: Date.now,
+  setTimeout,
+  clearTimeout,
+  queueMicrotask,
+};
 
 export interface GroupRuntimeState {
   running: boolean;
@@ -152,15 +217,17 @@ class SingleGroupRuntime {
   private activeIngestions = 0;
   private initialized = false;
 
+  constructor(private readonly dependencies: GroupRuntimeDependencies) {}
+
   async init(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
     try {
-      const runtime = await loadRuntimeGroupState();
+      const runtime = await this.dependencies.loadRuntimeGroupState();
       this.state.lastProcessedMessageId = runtime.lastProcessedMessageId ?? null;
       this.state.lastProcessedEventTs = runtime.summaryCursorTs;
     } catch (err) {
-      logger.warn({ err }, "group runtime init failed");
+      this.dependencies.logger.warn({ err }, "group runtime init failed");
     }
   }
 
@@ -172,7 +239,7 @@ class SingleGroupRuntime {
     quietRemainingMs: number;
     pendingSinceMs: number | null;
   } {
-    const now = Date.now();
+    const now = this.dependencies.now();
     return {
       running: this.state.running,
       dirty: this.state.dirty,
@@ -185,10 +252,12 @@ class SingleGroupRuntime {
 
   async loadContext(): Promise<RuntimeContext> {
     await this.init();
-    const runtime = await loadRuntimeGroupState();
-    const recentEvents = await loadRecentRuntimeEvents({
+    const runtime = await this.dependencies.loadRuntimeGroupState();
+    const recentEvents = await this.dependencies.loadRecentRuntimeEvents({
       afterTs: runtime.summaryCursorTs,
-      limit: config.runtimeMaxRecentEvents + config.runtimeRetainRecentEvents,
+      limit:
+        this.dependencies.config.runtimeMaxRecentEvents +
+        this.dependencies.config.runtimeRetainRecentEvents,
       newestFirst: true,
     });
     return {
@@ -211,7 +280,7 @@ class SingleGroupRuntime {
 
   private async ingestUserMessageInternal(input: IngestMessageInput): Promise<IngestDecision> {
     await this.init();
-    const now = input.ts ?? Date.now();
+    const now = input.ts ?? this.dependencies.now();
     const messageKey = `${input.chatId}:${input.messageId ?? "none"}:${input.editDate ?? "none"}`;
     const contentKey = input.messageId != null ? `${input.chatId}:${input.messageId}` : null;
     const oldSeenCutoff = now - 10 * 60 * 1000;
@@ -242,53 +311,61 @@ class SingleGroupRuntime {
     const stats = this.getUserStats(input.uid);
     stats.recentMessageTs = pruneOlderThan(
       [...stats.recentMessageTs, now],
-      now - config.runtimeUserBurstWindowMs,
+      now - this.dependencies.config.runtimeUserBurstWindowMs,
     );
     stats.recentUrlTs = pruneOlderThan(
       [...stats.recentUrlTs, ...input.urls.map(() => now)],
-      now - config.runtimeUrlFloodWindowMs,
+      now - this.dependencies.config.runtimeUrlFloodWindowMs,
     );
     stats.recentMediaTs = pruneOlderThan(
       [...stats.recentMediaTs, ...input.mediaRefs.map(() => now)],
-      now - config.runtimeMediaFloodWindowMs,
+      now - this.dependencies.config.runtimeMediaFloodWindowMs,
     );
 
     const normalizedText = input.text.trim();
     if (!ignoredReason && normalizedText) {
       const lastSameTextTs = stats.recentTextByText.get(normalizedText);
-      if (lastSameTextTs && now - lastSameTextTs <= config.runtimeDuplicateTextWindowMs) {
+      if (
+        lastSameTextTs &&
+        now - lastSameTextTs <= this.dependencies.config.runtimeDuplicateTextWindowMs
+      ) {
         ignoredReason = "duplicate_text";
       }
       stats.recentTextByText.set(normalizedText, now);
       for (const [text, ts] of stats.recentTextByText) {
-        if (now - ts > config.runtimeDuplicateTextWindowMs) stats.recentTextByText.delete(text);
+        if (now - ts > this.dependencies.config.runtimeDuplicateTextWindowMs)
+          stats.recentTextByText.delete(text);
       }
     }
 
-    if (!ignoredReason && stats.recentMessageTs.length > config.runtimeUserBurstThreshold) {
-      stats.cooldownUntilMs = now + config.runtimeUserCooldownMs;
+    if (
+      !ignoredReason &&
+      stats.recentMessageTs.length > this.dependencies.config.runtimeUserBurstThreshold
+    ) {
+      stats.cooldownUntilMs = now + this.dependencies.config.runtimeUserCooldownMs;
       ignoredReason = "user_rate_limited";
     } else if (!ignoredReason && stats.cooldownUntilMs > now) {
       ignoredReason = "user_rate_limited";
     }
 
-    const allowWebSearch = stats.recentUrlTs.length <= config.runtimeUrlFloodThreshold;
-    if (stats.recentMediaTs.length > config.runtimeMediaFloodThreshold) {
-      stats.mediaDisabledUntilMs = now + config.runtimeMediaFloodCooldownMs;
+    const allowWebSearch =
+      stats.recentUrlTs.length <= this.dependencies.config.runtimeUrlFloodThreshold;
+    if (stats.recentMediaTs.length > this.dependencies.config.runtimeMediaFloodThreshold) {
+      stats.mediaDisabledUntilMs = now + this.dependencies.config.runtimeMediaFloodCooldownMs;
     }
     const allowMediaTools = stats.mediaDisabledUntilMs <= now;
 
     this.recentRealUserEvents.push(now);
     while (
       this.recentRealUserEvents.length > 0 &&
-      this.recentRealUserEvents[0]! < now - config.runtimeQuietWindowMs
+      this.recentRealUserEvents[0]! < now - this.dependencies.config.runtimeQuietWindowMs
     ) {
       this.recentRealUserEvents.shift();
     }
-    if (this.recentRealUserEvents.length >= config.runtimeHotChatThreshold) {
+    if (this.recentRealUserEvents.length >= this.dependencies.config.runtimeHotChatThreshold) {
       this.state.quietUntilMs = Math.max(
         this.state.quietUntilMs,
-        now + config.runtimeQuietDurationMs,
+        now + this.dependencies.config.runtimeQuietDurationMs,
       );
     }
 
@@ -318,9 +395,9 @@ class SingleGroupRuntime {
     this.state.lastProcessedEventTs = now;
     if (input.messageId != null) {
       this.state.lastProcessedMessageId = input.messageId;
-      await appendRuntimeEventAndAdvance(event, input.messageId);
+      await this.dependencies.appendRuntimeEventAndAdvance(event, input.messageId);
     } else {
-      await appendRuntimeEvent(event);
+      await this.dependencies.appendRuntimeEvent(event);
     }
 
     const disabledReasons: string[] = [];
@@ -346,13 +423,13 @@ class SingleGroupRuntime {
     kind?: RuntimeEventRecord["kind"];
   }): Promise<void> {
     try {
-      const now = Date.now();
+      const now = this.dependencies.now();
       for (const message of params.messages) {
-        await appendRuntimeEvent({
-          chatId: config.tgGroupId,
+        await this.dependencies.appendRuntimeEvent({
+          chatId: this.dependencies.config.tgGroupId,
           kind: params.kind ?? "bot_message",
           uid: "bot",
-          name: config.botUsername,
+          name: this.dependencies.config.botUsername,
           text: message,
           mediaRefs: [],
           urls: [],
@@ -360,11 +437,11 @@ class SingleGroupRuntime {
         });
       }
       if (params.messages.length === 0 && params.stickerFileId) {
-        await appendRuntimeEvent({
-          chatId: config.tgGroupId,
+        await this.dependencies.appendRuntimeEvent({
+          chatId: this.dependencies.config.tgGroupId,
           kind: params.kind ?? "bot_message",
           uid: "bot",
-          name: config.botUsername,
+          name: this.dependencies.config.botUsername,
           text: `[贴纸: ${params.stickerFileId}]`,
           mediaRefs: [{ type: "sticker", fileId: params.stickerFileId }],
           urls: [],
@@ -372,19 +449,19 @@ class SingleGroupRuntime {
         });
       }
     } catch (err) {
-      logger.warn({ err }, "runtime bot event persistence failed");
+      this.dependencies.logger.warn({ err }, "runtime bot event persistence failed");
     }
   }
 
   async recordTurn(record: RuntimeTurnRecord): Promise<void> {
     try {
-      await appendTurnRecord(record);
+      await this.dependencies.appendTurnRecord(record);
     } catch (err) {
-      logger.warn({ err }, "runtime turn persistence failed");
+      this.dependencies.logger.warn({ err }, "runtime turn persistence failed");
       return;
     }
     await this.maybeCompact().catch((err: unknown) => {
-      logger.warn({ err }, "runtime compaction trigger failed");
+      this.dependencies.logger.warn({ err }, "runtime compaction trigger failed");
     });
   }
 
@@ -402,13 +479,13 @@ class SingleGroupRuntime {
     if (this.state.running) return;
     if (this.pendingTurn || this.state.debounceTimer !== null || this.state.maxDelayTimer !== null)
       return;
-    queueMicrotask(() => {
+    this.dependencies.queueMicrotask(() => {
       void this.runQueuedCommandTurn();
     });
   }
 
   canRunProactive(): boolean {
-    const now = Date.now();
+    const now = this.dependencies.now();
     return (
       !this.state.running &&
       this.state.debounceTimer === null &&
@@ -447,7 +524,7 @@ class SingleGroupRuntime {
         this.scheduleDebounce();
       } else if (this.queuedCommandTurns.length > 0) {
         this.state.dirty = false;
-        queueMicrotask(() => {
+        this.dependencies.queueMicrotask(() => {
           void this.runQueuedCommandTurn();
         });
       } else {
@@ -460,23 +537,33 @@ class SingleGroupRuntime {
     if (this.compacting) return;
     this.compacting = true;
     try {
-      const runtime = await loadRuntimeGroupState();
-      const recentEvents = await loadRecentRuntimeEvents({
+      const runtime = await this.dependencies.loadRuntimeGroupState();
+      const recentEvents = await this.dependencies.loadRecentRuntimeEvents({
         afterTs: runtime.summaryCursorTs,
-        limit: config.runtimeMaxRecentEvents + config.runtimeRetainRecentEvents + 80,
+        limit:
+          this.dependencies.config.runtimeMaxRecentEvents +
+          this.dependencies.config.runtimeRetainRecentEvents +
+          80,
       });
       const recentText = recentEvents.map(formatRuntimeEvent).join("\n");
       const shouldCompact =
-        recentEvents.length > config.runtimeMaxRecentEvents ||
-        estimateTokens(recentText) > config.runtimeMaxContextEstTokens;
-      if (!shouldCompact || recentEvents.length <= config.runtimeRetainRecentEvents) return;
+        recentEvents.length > this.dependencies.config.runtimeMaxRecentEvents ||
+        estimateTokens(recentText) > this.dependencies.config.runtimeMaxContextEstTokens;
+      if (
+        !shouldCompact ||
+        recentEvents.length <= this.dependencies.config.runtimeRetainRecentEvents
+      )
+        return;
 
-      const compactUntilIndex = Math.max(0, recentEvents.length - config.runtimeRetainRecentEvents);
+      const compactUntilIndex = Math.max(
+        0,
+        recentEvents.length - this.dependencies.config.runtimeRetainRecentEvents,
+      );
       const eventsToCompact = recentEvents.slice(0, compactUntilIndex);
       const newCursorTs = eventsToCompact.at(-1)?.ts;
       if (!newCursorTs) return;
 
-      const turns = await loadRecentTurnRecords({
+      const turns = await this.dependencies.loadRecentTurnRecords({
         afterTs: runtime.summaryCursorTs,
         limit: 120,
       });
@@ -488,13 +575,13 @@ class SingleGroupRuntime {
 
       let result: Awaited<ReturnType<typeof generateConversationCompaction>>;
       try {
-        result = await generateConversationCompaction({
+        result = await this.dependencies.generateConversationCompaction({
           previousSummary: runtime.summary,
           eventText,
           turnText,
         });
       } catch (err) {
-        logger.warn(
+        this.dependencies.logger.warn(
           {
             oldCursorTs: runtime.summaryCursorTs,
             newCursorTs,
@@ -517,8 +604,8 @@ class SingleGroupRuntime {
         throw err;
       }
 
-      const completedAt = Date.now();
-      await commitRuntimeCompaction(
+      const completedAt = this.dependencies.now();
+      await this.dependencies.commitRuntimeCompaction(
         {
           oldCursorTs: runtime.summaryCursorTs,
           newCursorTs,
@@ -533,7 +620,7 @@ class SingleGroupRuntime {
           lastCompactedAt: completedAt,
         },
       );
-      logger.info(
+      this.dependencies.logger.info(
         {
           oldCursorTs: runtime.summaryCursorTs,
           newCursorTs,
@@ -563,28 +650,34 @@ class SingleGroupRuntime {
   }
 
   private scheduleDebounce(): void {
-    const now = Date.now();
+    const now = this.dependencies.now();
     const isFirstSchedule = this.state.pendingSinceMs === null;
     if (this.state.pendingSinceMs === null) {
       this.state.pendingSinceMs = now;
-      this.state.maxDelayTimer = setTimeout(() => this.runPendingTurn(), config.runtimeMaxDelayMs);
+      this.state.maxDelayTimer = this.dependencies.setTimeout(
+        () => void this.runPendingTurn(),
+        this.dependencies.config.runtimeMaxDelayMs,
+      );
       this.state.maxDelayTimer.unref?.();
     }
 
-    if (this.state.debounceTimer) clearTimeout(this.state.debounceTimer);
+    if (this.state.debounceTimer) this.dependencies.clearTimeout(this.state.debounceTimer);
     const delay =
       this.state.quietUntilMs > now
-        ? config.runtimeMaxDelayMs
+        ? this.dependencies.config.runtimeMaxDelayMs
         : isFirstSchedule
-          ? config.runtimeInitialDelayMs
-          : config.runtimeTypingExtendMs;
-    this.state.debounceTimer = setTimeout(() => this.runPendingTurn(), delay);
+          ? this.dependencies.config.runtimeInitialDelayMs
+          : this.dependencies.config.runtimeTypingExtendMs;
+    this.state.debounceTimer = this.dependencies.setTimeout(
+      () => void this.runPendingTurn(),
+      delay,
+    );
     this.state.debounceTimer.unref?.();
   }
 
   private clearTimers(): void {
-    if (this.state.debounceTimer) clearTimeout(this.state.debounceTimer);
-    if (this.state.maxDelayTimer) clearTimeout(this.state.maxDelayTimer);
+    if (this.state.debounceTimer) this.dependencies.clearTimeout(this.state.debounceTimer);
+    if (this.state.maxDelayTimer) this.dependencies.clearTimeout(this.state.maxDelayTimer);
     this.state.debounceTimer = null;
     this.state.maxDelayTimer = null;
     this.state.pendingSinceMs = null;
@@ -605,10 +698,13 @@ class SingleGroupRuntime {
     this.pendingTurn = null;
     this.state.running = true;
     try {
-      logger.info({ label: turn.label }, "group runtime starting AI turn");
+      this.dependencies.logger.info({ label: turn.label }, "group runtime starting AI turn");
       await turn.execute();
     } catch (err) {
-      logger.error({ err, label: turn.label }, "group runtime scheduled turn failed");
+      this.dependencies.logger.error(
+        { err, label: turn.label },
+        "group runtime scheduled turn failed",
+      );
     } finally {
       this.state.running = false;
       if (this.state.dirty && this.pendingTurn) {
@@ -632,10 +728,13 @@ class SingleGroupRuntime {
 
     this.state.running = true;
     try {
-      logger.info({ label: turn.label }, "group runtime starting command turn");
+      this.dependencies.logger.info({ label: turn.label }, "group runtime starting command turn");
       await turn.execute();
     } catch (err) {
-      logger.error({ err, label: turn.label }, "group runtime command turn failed");
+      this.dependencies.logger.error(
+        { err, label: turn.label },
+        "group runtime command turn failed",
+      );
     } finally {
       this.state.running = false;
       if (this.state.dirty && this.pendingTurn) {
@@ -643,7 +742,7 @@ class SingleGroupRuntime {
         this.scheduleDebounce();
       } else if (this.queuedCommandTurns.length > 0) {
         this.state.dirty = false;
-        queueMicrotask(() => {
+        this.dependencies.queueMicrotask(() => {
           void this.runQueuedCommandTurn();
         });
       } else {
@@ -653,4 +752,10 @@ class SingleGroupRuntime {
   }
 }
 
-export const groupRuntime = new SingleGroupRuntime();
+export function createGroupRuntime(
+  dependencies: GroupRuntimeDependencies = productionDependencies,
+): SingleGroupRuntime {
+  return new SingleGroupRuntime(dependencies);
+}
+
+export const groupRuntime = createGroupRuntime();

@@ -22,4 +22,14 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
+      - run: npm run test:coverage
+      - run: npm run test:random
+
+      - run: npm ci
+        working-directory: tools/firestore-to-sqlite
+      - run: npm run typecheck
+        working-directory: tools/firestore-to-sqlite
+      - run: npm run coverage
+        working-directory: tools/firestore-to-sqlite
+
       - run: docker build --tag nyarbot:ci .

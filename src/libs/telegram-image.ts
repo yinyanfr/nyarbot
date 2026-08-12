@@ -38,41 +38,57 @@ function detectImageContentType(buffer: Buffer): string | null {
  *
  * Returns null on failure (network error, non-2xx response, oversized payload).
  */
-export async function downloadTelegramFileAsDataUrl(filePath: string): Promise<string | null> {
-  const url = `https://api.telegram.org/file/bot${config.botApiKey}/${filePath}`;
-
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) {
-      logger.warn({ status: res.status, filePath }, "telegram file download non-2xx");
-      return null;
-    }
-    const buf = Buffer.from(await res.arrayBuffer());
-    // DeepSeek / OpenAI vision have multi-MB limits; Telegram photos are typically < 2MB after compression.
-    const MAX_BYTES = 10 * 1024 * 1024;
-    if (buf.length > MAX_BYTES) {
-      logger.warn({ bytes: buf.length, filePath }, "telegram file too large for vision");
-      return null;
-    }
-    const detectedContentType = detectImageContentType(buf);
-    const responseContentType = res.headers
-      .get("content-type")
-      ?.split(";", 1)[0]
-      ?.trim()
-      .toLowerCase();
-    const contentType =
-      detectedContentType ??
-      (responseContentType?.startsWith("image/") ? responseContentType : null);
-    if (!contentType) {
-      logger.warn(
-        { responseContentType: responseContentType ?? null, filePath },
-        "telegram file is not a supported image",
-      );
-      return null;
-    }
-    return `data:${contentType};base64,${buf.toString("base64")}`;
-  } catch (err) {
-    logger.warn({ err, filePath }, "telegram file download failed");
-    return null;
-  }
+export interface TelegramImageDependencies {
+  fetch: typeof fetch;
+  timeout: (milliseconds: number) => AbortSignal;
+  botApiKey: string;
 }
+
+export function createTelegramImageDownloader(
+  dependencies: TelegramImageDependencies,
+): (filePath: string) => Promise<string | null> {
+  return async (filePath: string): Promise<string | null> => {
+    const url = `https://api.telegram.org/file/bot${dependencies.botApiKey}/${filePath}`;
+
+    try {
+      const res = await dependencies.fetch(url, { signal: dependencies.timeout(15_000) });
+      if (!res.ok) {
+        logger.warn({ status: res.status, filePath }, "telegram file download non-2xx");
+        return null;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      // DeepSeek / OpenAI vision have multi-MB limits; Telegram photos are typically < 2MB after compression.
+      const MAX_BYTES = 10 * 1024 * 1024;
+      if (buf.length > MAX_BYTES) {
+        logger.warn({ bytes: buf.length, filePath }, "telegram file too large for vision");
+        return null;
+      }
+      const detectedContentType = detectImageContentType(buf);
+      const responseContentType = res.headers
+        .get("content-type")
+        ?.split(";", 1)[0]
+        ?.trim()
+        .toLowerCase();
+      const contentType =
+        detectedContentType ??
+        (responseContentType?.startsWith("image/") ? responseContentType : null);
+      if (!contentType) {
+        logger.warn(
+          { responseContentType: responseContentType ?? null, filePath },
+          "telegram file is not a supported image",
+        );
+        return null;
+      }
+      return `data:${contentType};base64,${buf.toString("base64")}`;
+    } catch (err) {
+      logger.warn({ err, filePath }, "telegram file download failed");
+      return null;
+    }
+  };
+}
+
+export const downloadTelegramFileAsDataUrl = createTelegramImageDownloader({
+  fetch: globalThis.fetch,
+  timeout: AbortSignal.timeout,
+  botApiKey: config.botApiKey,
+});

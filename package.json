@@ -15,7 +15,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && node --import=./dist/test-setup.js --test \"dist/**/*.test.js\"",
+    "test:coverage": "npm run build && node --import=./dist/test-setup.js --test --experimental-test-coverage --test-coverage-include=dist/**/*.js --test-coverage-exclude=dist/**/*.test.js --test-coverage-lines=85 --test-coverage-functions=90 --test-coverage-branches=82 \"dist/**/*.test.js\"",
+    "test:random": "npm run build && node --import=./dist/test-setup.js --test --test-randomize \"dist/**/*.test.js\"",
     "backup:restore": "npm run build && node dist/scripts/restore-sqlite-backup.js"
   },
   "repository": {

@@ -43,7 +43,7 @@ export function dateRangeForTimezone(
 
 export function parseTimestampInputForTimezone(value: string, timeZone: string): number | null {
   const trimmed = value.trim();
-  if (!trimmed) return null;
+  if (!trimmed || !isValidTimezone(timeZone)) return null;
 
   // If the input already carries an explicit offset/Z, trust that absolute time.
   if (/[zZ]$|[+-]\d{2}:\d{2}$/.test(trimmed)) {
@@ -51,8 +51,12 @@ export function parseTimestampInputForTimezone(value: string, timeZone: string):
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  const zoned = dayjs.tz(trimmed, timeZone);
-  return zoned.isValid() ? zoned.valueOf() : null;
+  try {
+    const zoned = dayjs.tz(trimmed, timeZone);
+    return zoned.isValid() ? zoned.valueOf() : null;
+  } catch {
+    return null;
+  }
 }
 
 export function formatTimestampInputForTimezone(
