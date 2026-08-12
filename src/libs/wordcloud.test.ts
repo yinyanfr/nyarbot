@@ -15,6 +15,7 @@ Object.assign(process.env, {
 });
 
 const wordcloud = await import("./wordcloud.js");
+const time = await import("./time.js");
 
 function wcFixture(overrides: Partial<WordcloudDependencies> = {}) {
   const writes: string[] = [];
@@ -122,7 +123,7 @@ test("layout is bounded and non-colliding, with a small real canvas PNG integrat
 
 test("caption handles relative dates, aligned rankings, and empty activity", () => {
   const caption = wordcloud.buildCaption({
-    date: "2026-08-12",
+    date: time.todayDateStr(),
     messageCount: 12,
     topUsers: [
       { userId: "1", displayName: "猫", messageCount: 12 },
@@ -136,7 +137,7 @@ test("caption handles relative dates, aligned rankings, and empty activity", () 
     /没有可统计/,
   );
   assert.match(
-    wordcloud.buildCaption({ date: "2026-08-11", messageCount: 3, topUsers: [] }),
+    wordcloud.buildCaption({ date: time.yesterdayDateStr(), messageCount: 3, topUsers: [] }),
     /昨天的热门话题 🐾/u,
   );
   assert.match(
