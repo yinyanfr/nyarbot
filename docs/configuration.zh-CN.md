@@ -92,7 +92,7 @@
 
 ## 对话模型
 
-`qwen3.7-flash` 负责所有对话 tier、分类、主动探测、压缩、记忆整理和 Telegram/推文视觉理解，并显式发送 `enable_thinking: false`。Telegram 图片与原消息文本在同一条 user message 中发送；包含 WebM 视频贴纸的轮次直接交给 Gemini 3.5 Flash-Lite，并发送原始 `video/webm`，普通视频和 TGS 贴纸仍使用 Telegram 缩略图。
+`qwen3.7-flash` 负责所有对话 tier、分类、主动探测、压缩、记忆整理和 Telegram/推文视觉理解，并显式发送 `enable_thinking: false`。Telegram 图片与原消息文本在同一条 user message 中发送；包含 WebM 视频贴纸的轮次会先把动画循环转为三秒 MP4，再直接交给 Gemini 3.5 Flash-Lite，普通视频和 TGS 贴纸仍使用 Telegram 缩略图。
 
 可选 `startSubagent` advisor 仅使用开启思考的 `deepseek-v4-flash`；项目不再使用 DeepSeek V4 Pro。Qwen 首次调用遇到网络、超时、认证、限流或 5xx 错误时可回退到 Gemini 3.5 Flash-Lite，工具调用开始后不跨 provider 切换。
 

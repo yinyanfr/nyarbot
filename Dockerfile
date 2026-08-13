@@ -26,7 +26,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends dumb-init \
+  && apt-get install -y --no-install-recommends dumb-init ffmpeg \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /app/data \
   && chown node:node /app/data

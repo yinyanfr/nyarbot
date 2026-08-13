@@ -831,7 +831,7 @@ export interface GenerateOptions {
   sourceRefs?: string[];
   /** Resolve Telegram file_id to data URL for vision description. */
   resolveTelegramFileAsDataUrl?: (fileId: string) => Promise<string | null>;
-  /** Resolve a Telegram video sticker to its original WebM data URL. */
+  /** Resolve a Telegram video sticker to a Gemini-compatible looped MP4 data URL. */
   resolveTelegramVideoStickerAsDataUrl?: (fileId: string) => Promise<string | null>;
   /** Allow media/url tools for this turn (passive only). */
   allowRichContentTools?: boolean;
@@ -896,8 +896,8 @@ async function resolveTurnMedia(params: {
       if (seen.has(ref.fileId) || !params.resolveTelegramVideoStickerAsDataUrl) continue;
       seen.add(ref.fileId);
       const video = await params.resolveTelegramVideoStickerAsDataUrl(ref.fileId);
-      if (video?.startsWith("data:video/webm;base64,")) {
-        content.push({ type: "file", data: video, mediaType: "video/webm" });
+      if (video?.startsWith("data:video/mp4;base64,")) {
+        content.push({ type: "file", data: video, mediaType: "video/mp4" });
         continue;
       }
     }
