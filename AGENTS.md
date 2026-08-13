@@ -45,7 +45,7 @@ node dist/app.js   # run the compiled bot
 - `src/libs/conversation-buffer.ts` — in-memory hot ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
 - `src/libs/stickers.ts` — sticker facade: emoji-based lookup only (`getStickerFileId`), random fallback (`pickRandomStickerEmoji`), emoji-by-file-id reverse lookup (`getStickerEmojiByFileId`)
-- `src/libs/telegram-image.ts` — Telegram image download plus validated WebM video-sticker looping/transcoding for Gemini
+- `src/libs/telegram-image.ts` — Telegram image download plus validated WebM video-sticker looping/transcoding for vision
 - `src/libs/video.ts` — stable video reader backend: native Gemini YouTube understanding and read-only Bilibili MCP transcript/metadata access
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
 - `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini 3.5 Flash-Lite group notice
@@ -71,7 +71,7 @@ node dist/app.js   # run the compiled bot
 - User nicknames and memories are stored in the unified SQLite database at `DATABASE_PATH` (default `data/nyarbot.sqlite`).
 - The bot is meant to reply naturally, memorize users, understand images/stickers, and proactively join conversations — not just respond to commands.
 - **Language**: The group chat is in Simplified Chinese. System prompt, classification prompt, and bot responses are in Chinese. Match the user's language if they switch.
-- **Model routing**: Qwen `qwen3.7-flash` is the non-thinking multimodal primary; Telegram WebM video-sticker turns route directly to Gemini 3.5 Flash-Lite with a looped three-second MP4; DeepSeek `deepseek-v4-flash` thinking is optional advisor only; DeepSeek V4 Pro is not used.
+- **Model routing**: Qwen `qwen3.7-flash` is the non-thinking multimodal primary; Telegram WebM video stickers are looped to a 2.1-second MP4 before being sent to Qwen; DeepSeek `deepseek-v4-flash` thinking is optional advisor only; DeepSeek V4 Pro is not used.
 - **Auto-retry**: `@grammyjs/auto-retry` is applied on `bot.api.config` before stream middleware to handle 429 rate limits.
 - **Tool-call architecture**: The model must call `send_message` to speak; raw text output is invisible inner monologue. The `dismiss` tool is a binary speak/silence choice.
 - **Dismiss retry**: When triggered (@/reply) but model chooses dismiss, simple/complex retry once; tech does not retry. Falls back to raw text or sticker.

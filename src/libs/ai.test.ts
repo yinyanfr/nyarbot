@@ -545,10 +545,10 @@ describe("main turn architecture", () => {
     }
   });
 
-  test("routes compatible video sticker MP4s to Gemini and keeps ordinary videos on thumbnails", async () => {
+  test("routes compatible video sticker MP4s to Qwen and keeps ordinary videos on thumbnails", async () => {
     const fake = scripted([
       (call) => {
-        assert.equal(call.model, models.geminiFlashLite);
+        assert.equal(call.model, models.replyQwenFast);
         const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
         assert.deepEqual(content.slice(1), [
           { type: "file", data: "data:video/mp4;base64,dmlkZW8=", mediaType: "video/mp4" },
@@ -581,7 +581,7 @@ describe("main turn architecture", () => {
   test("falls back to sticker thumbnails when MP4 conversion is unavailable", async () => {
     const fake = scripted([
       (call) => {
-        assert.equal(call.model, models.geminiFlashLite);
+        assert.equal(call.model, models.replyQwenFast);
         const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
         assert.deepEqual(content[1], {
           type: "image",

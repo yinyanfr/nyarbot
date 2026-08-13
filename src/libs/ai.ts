@@ -831,7 +831,7 @@ export interface GenerateOptions {
   sourceRefs?: string[];
   /** Resolve Telegram file_id to data URL for vision description. */
   resolveTelegramFileAsDataUrl?: (fileId: string) => Promise<string | null>;
-  /** Resolve a Telegram video sticker to a Gemini-compatible looped MP4 data URL. */
+  /** Resolve a Telegram video sticker to a vision-compatible looped MP4 data URL. */
   resolveTelegramVideoStickerAsDataUrl?: (fileId: string) => Promise<string | null>;
   /** Allow media/url tools for this turn (passive only). */
   allowRichContentTools?: boolean;
@@ -1148,12 +1148,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     conversationSummary,
   );
 
-  const hasVideoSticker = (mediaRefs ?? []).some(
-    (ref) => ref.type === "sticker" && ref.isVideo === true,
-  );
-  const model = hasVideoSticker
-    ? dependencies.models.geminiFlashLite
-    : dependencies.models.replyQwenFast;
+  const model = dependencies.models.replyQwenFast;
 
   const maxTokens = MAX_TOKENS_BY_TIER[tier];
   const requireImageUnderstanding = (mediaRefs ?? []).some((ref) => ref.type === "image");

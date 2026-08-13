@@ -59,7 +59,7 @@ handlers/index.ts (setupHandlers)
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
     │     ├─ Direct multimodal input plus on-demand tools; session-only cache
-    │     │     ├─ Photos enter the original user message; looped video-sticker MP4 turns use Gemini Flash-Lite
+    │     │     ├─ Photos enter the original user message; video stickers are looped to 2.1-second MP4s for Qwen
     │     │     ├─ Other videos and TGS/static stickers use thumbnails
     │     │     └─ Known signatures win; image/* headers are accepted as fallback
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search

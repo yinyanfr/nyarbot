@@ -117,7 +117,7 @@ test("returns null for non-2xx, malformed non-image, oversized, timeout, and abo
   }
 });
 
-test("loops WebM video stickers into three-second MP4 for Gemini", async () => {
+test("loops WebM video stickers into 2.1-second MP4 for vision", async () => {
   const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]);
   const writes: { path: string; data: Buffer }[] = [];
   const download = createTelegramVideoStickerDownloader({
@@ -139,7 +139,7 @@ test("loops WebM video stickers into three-second MP4 for Gemini", async () => {
         "/tmp/nyarbot-sticker-test/sticker.webm",
         "-t",
       ]);
-      assert.equal(args[8], "3");
+      assert.equal(args[8], "2.1");
       assert.deepEqual(options.stdio, ["ignore", "ignore", "pipe"]);
     }),
   });
@@ -188,7 +188,7 @@ test("rejects failed and oversized Telegram video sticker downloads", async () =
   }
 });
 
-test("rejects failed, empty, and oversized Gemini MP4 conversions", async () => {
+test("rejects failed, empty, and oversized vision MP4 conversions", async () => {
   const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]);
   for (const fixture of [
     { code: 1, output: Buffer.from("bad") },

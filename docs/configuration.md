@@ -92,7 +92,7 @@ Production has no Firebase dependency or runtime credential mount. The gitignore
 
 ## Chat Models
 
-`qwen3.7-flash` is the primary model for every conversation tier, classification, proactive probing, compaction, memory compression, and Telegram/tweet vision. Requests explicitly set `enable_thinking: false`. Telegram photos are included in the same user message as its text. Turns containing WebM video stickers route directly to Gemini 3.5 Flash-Lite after the animation is looped into a three-second MP4; ordinary videos and TGS stickers continue to use Telegram thumbnails.
+`qwen3.7-flash` is the primary model for every conversation tier, classification, proactive probing, compaction, memory compression, and Telegram/tweet vision. Requests explicitly set `enable_thinking: false`. Telegram photos are included in the same user message as its text. WebM video stickers are looped into a 2.1-second MP4 before being sent to Qwen; ordinary videos and TGS stickers continue to use Telegram thumbnails.
 
 The optional `startSubagent` advisor uses only `deepseek-v4-flash` with thinking enabled. The project does not use DeepSeek V4 Pro. Network/timeouts, auth/rate-limit errors, and 5xx responses can switch an initial Qwen reply to Gemini 3.5 Flash-Lite; a reply never changes provider after a tool call.
 

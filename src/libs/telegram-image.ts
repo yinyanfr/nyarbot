@@ -110,7 +110,7 @@ function isWebm(buffer: Buffer): boolean {
   return hasBytesAt(buffer, 0, [0x1a, 0x45, 0xdf, 0xa3]);
 }
 
-async function convertWebmStickerForGemini(
+async function convertWebmStickerForVision(
   input: Buffer,
   dependencies: Pick<
     TelegramVideoDependencies,
@@ -136,7 +136,7 @@ async function convertWebmStickerForGemini(
           "-i",
           inputPath,
           "-t",
-          "3",
+          "2.1",
           "-an",
           "-c:v",
           "libx264",
@@ -182,7 +182,7 @@ export function createTelegramVideoStickerDownloader(
       if (!res.ok) return null;
       const webm = Buffer.from(await res.arrayBuffer());
       if (webm.length > 5 * 1024 * 1024 || !isWebm(webm)) return null;
-      const mp4 = await convertWebmStickerForGemini(webm, dependencies);
+      const mp4 = await convertWebmStickerForVision(webm, dependencies);
       return mp4 ? `data:video/mp4;base64,${mp4.toString("base64")}` : null;
     } catch (err) {
       logger.warn({ err, filePath }, "telegram video sticker conversion failed");
