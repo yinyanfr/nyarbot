@@ -15,6 +15,8 @@ export interface MediaRef {
   source: "current" | "reply_to";
   fileId?: string;
   thumbnailFileId?: string;
+  isAnimated?: boolean;
+  isVideo?: boolean;
   emoji?: string;
   filename?: string;
   title?: string;
@@ -95,6 +97,8 @@ export async function extractContent(
         source,
         fileId: m.sticker.file_id,
         ...(m.sticker.thumbnail?.file_id ? { thumbnailFileId: m.sticker.thumbnail.file_id } : {}),
+        ...(m.sticker.is_animated ? { isAnimated: true } : {}),
+        ...(m.sticker.is_video ? { isVideo: true } : {}),
         emoji: m.sticker.emoji ?? "",
       });
     }

@@ -56,15 +56,15 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` �
 
 ### 为什么分类用 `generateText` 而不是 `generateObject`？
 
-DeepSeek 的 Chat Completions API 不支持 `json_schema` response_format（返回 400 `This response_format type is unavailable now`）。分类提示词指示模型以原始 JSON 格式回复，然后用 Zod 解析。
+分类要求 Qwen 返回一个很小的原始 JSON 对象，再用 Zod 校验；这一无 schema 依赖路径便于确定性处理失败。
 
 ### 为什么用 `.chat()` 而不是默认的模型工厂方法？
 
-`@ai-sdk/openai` v3 默认使用 Responses API（`/responses` 端点）。DeepSeek 只支持 Chat Completions API（`/chat/completions`）。使用 `provider.chat("model-id")` 显式选择 Chat Completions API。
+Qwen 使用 AI SDK Alibaba chat adapter；可选 DeepSeek advisor 显式使用 OpenAI-compatible Chat Completions API。
 
 ### 为什么用两阶段主动探测？
 
-每次主动检查都运行完整模型很昂贵。探测门使用 `flashNoThinkModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
+每次主动检查都运行完整 turn 很浪费。探测门使用 Qwen 3.7 Flash 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整 turn。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新活动时取消结果。
 
 ### 为什么用 `formatForTelegramHtml`？
 
@@ -149,7 +149,7 @@ Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描
 
 `fetchUrlContent()`（`ai.ts`）使用三级策略：
 
-1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Gemini 配图描述
+1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Qwen 配图描述
 2. **直接抓取** → HTML title/meta 提取
 3. **Tavily Extract** → 回退
 

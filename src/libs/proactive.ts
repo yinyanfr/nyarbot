@@ -52,6 +52,7 @@ export interface ProactiveCallbacks {
   ) => Promise<void>;
   /** Resolve a Telegram file_id to a data URL so proactive turns can inspect images. */
   resolveTelegramFileAsDataUrl: (fileId: string) => Promise<string | null>;
+  resolveTelegramVideoStickerAsDataUrl?: (fileId: string) => Promise<string | null>;
 }
 
 export interface ProactiveDependencies {
@@ -293,7 +294,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
         }
 
         // Signal "typing..." to the group while the full model runs
-        // Use an interval to keep it alive during long DeepSeek thinking phases
+        // Keep the typing action alive during model and tool calls.
         const typingTimer = dependencies.setInterval(() => {
           callbacks.sendChatAction("typing").catch(() => void 0);
         }, 4500);
@@ -329,6 +330,12 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             allowPersistentTools: false,
             ...(recentImageMediaRefs.length > 0 ? { mediaRefs: recentImageMediaRefs } : {}),
             resolveTelegramFileAsDataUrl: callbacks.resolveTelegramFileAsDataUrl,
+            ...(callbacks.resolveTelegramVideoStickerAsDataUrl
+              ? {
+                  resolveTelegramVideoStickerAsDataUrl:
+                    callbacks.resolveTelegramVideoStickerAsDataUrl,
+                }
+              : {}),
             allowRichContentTools: recentImageMediaRefs.length > 0,
             ...(recentImageMediaRefs.length > 0 ? { allowMediaTools: true } : {}),
           });

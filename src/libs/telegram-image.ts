@@ -1,5 +1,9 @@
 import config from "../configs/env.js";
 import { logger } from "./logger.js";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 function hasBytesAt(buffer: Buffer, offset: number, expected: readonly number[]): boolean {
   return expected.every((byte, index) => buffer[offset + index] === byte);
@@ -44,6 +48,14 @@ export interface TelegramImageDependencies {
   botApiKey: string;
 }
 
+export interface TelegramVideoDependencies extends TelegramImageDependencies {
+  spawn: typeof spawn;
+  mkdtemp: (prefix: string) => Promise<string>;
+  readFile: (filePath: string) => Promise<Buffer>;
+  rm: (targetPath: string, options: { recursive: true; force: true }) => Promise<unknown>;
+  tmpdir: () => string;
+}
+
 export function createTelegramImageDownloader(
   dependencies: TelegramImageDependencies,
 ): (filePath: string) => Promise<string | null> {
@@ -57,7 +69,7 @@ export function createTelegramImageDownloader(
         return null;
       }
       const buf = Buffer.from(await res.arrayBuffer());
-      // DeepSeek / OpenAI vision have multi-MB limits; Telegram photos are typically < 2MB after compression.
+      // Qwen Base64 vision input is capped; Telegram photos are typically < 2MB after compression.
       const MAX_BYTES = 10 * 1024 * 1024;
       if (buf.length > MAX_BYTES) {
         logger.warn({ bytes: buf.length, filePath }, "telegram file too large for vision");
@@ -91,4 +103,94 @@ export const downloadTelegramFileAsDataUrl = createTelegramImageDownloader({
   fetch: globalThis.fetch,
   timeout: AbortSignal.timeout,
   botApiKey: config.botApiKey,
+});
+
+function isWebm(buffer: Buffer): boolean {
+  return hasBytesAt(buffer, 0, [0x1a, 0x45, 0xdf, 0xa3]);
+}
+
+function transcodeWebmToMp4(
+  input: Buffer,
+  dependencies: Pick<TelegramVideoDependencies, "spawn" | "mkdtemp" | "readFile" | "rm" | "tmpdir">,
+): Promise<Buffer | null> {
+  return dependencies
+    .mkdtemp(path.join(dependencies.tmpdir(), "nyarbot-sticker-"))
+    .then(async (directory) => {
+      const outputPath = path.join(directory, "sticker.mp4");
+      try {
+        const succeeded = await new Promise<boolean>((resolve) => {
+          const child = dependencies.spawn(
+            "ffmpeg",
+            [
+              "-hide_banner",
+              "-loglevel",
+              "error",
+              "-i",
+              "pipe:0",
+              "-an",
+              "-c:v",
+              "libx264",
+              "-pix_fmt",
+              "yuv420p",
+              "-movflags",
+              "+faststart",
+              "-y",
+              outputPath,
+            ],
+            { stdio: ["pipe", "ignore", "pipe"] },
+          );
+          let settled = false;
+          const finish = (value: boolean) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(value);
+          };
+          const timer = setTimeout(() => {
+            child.kill("SIGKILL");
+            finish(false);
+          }, 15_000);
+          child.on("error", () => finish(false));
+          child.on("close", (code) => finish(code === 0));
+          child.stderr?.resume();
+          child.stdin.on("error", () => finish(false));
+          child.stdin.end(input);
+        });
+        if (!succeeded) return null;
+        const output = await dependencies.readFile(outputPath);
+        return output.length <= 7 * 1024 * 1024 ? output : null;
+      } finally {
+        await dependencies.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    });
+}
+
+export function createTelegramVideoStickerDownloader(
+  dependencies: TelegramVideoDependencies,
+): (filePath: string) => Promise<string | null> {
+  return async (filePath: string): Promise<string | null> => {
+    const url = `https://api.telegram.org/file/bot${dependencies.botApiKey}/${filePath}`;
+    try {
+      const res = await dependencies.fetch(url, { signal: dependencies.timeout(15_000) });
+      if (!res.ok) return null;
+      const webm = Buffer.from(await res.arrayBuffer());
+      if (webm.length > 5 * 1024 * 1024 || !isWebm(webm)) return null;
+      const mp4 = await transcodeWebmToMp4(webm, dependencies);
+      return mp4?.length ? `data:video/mp4;base64,${mp4.toString("base64")}` : null;
+    } catch (err) {
+      logger.warn({ err, filePath }, "telegram video sticker conversion failed");
+      return null;
+    }
+  };
+}
+
+export const downloadTelegramVideoStickerAsDataUrl = createTelegramVideoStickerDownloader({
+  fetch: globalThis.fetch,
+  timeout: AbortSignal.timeout,
+  botApiKey: config.botApiKey,
+  spawn,
+  mkdtemp,
+  readFile,
+  rm,
+  tmpdir,
 });

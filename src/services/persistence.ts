@@ -708,6 +708,8 @@ export interface RuntimeMediaRef {
   source?: string;
   fileId?: string;
   thumbnailFileId?: string;
+  isAnimated?: boolean;
+  isVideo?: boolean;
   emoji?: string;
   filename?: string;
   title?: string;

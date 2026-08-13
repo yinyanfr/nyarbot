@@ -48,9 +48,7 @@ handlers/index.ts（setupHandlers）
     ├─ 触发检测（@提及 / 回复bot）
     ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
-    │     └─ simple → flashNoThinkModel
-    │     └─ complex → flashThinkModel
-    │     └─ tech → proThinkModel
+    │     └─ simple / complex / tech → Qwen 3.7 Flash
     ├─ Runtime 调度（group-runtime.ts）
     │     ├─ 事件写入 SQLite、去重、限流、debounce、running lock
     │     └─ 构造 summary + recent events 上下文
@@ -124,17 +122,17 @@ type AiTurnResult =
 
 | Provider/model                                  | 用途                                                   |
 | ----------------------------------------------- | ------------------------------------------------------ |
-| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测               |
-| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                                 |
-| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次                          |
-| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | DeepSeek 回复回退、Telegram/推文图片理解、完整日记导读 |
+| Qwen 3.7 Flash，无思考                          | 全部对话 tier、工具、后台任务、Telegram/推文多模态理解 |
+| DeepSeek v4 Flash，有思考                       | 可选 `startSubagent` advisor                           |
+| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | Qwen 回复回退、YouTube 理解、完整日记导读              |
 | Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                     |
 
 ### 为什么用两个提供商？
 
-- **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 3.5 Flash-Lite** 经 Cloudflare AI Gateway 处理 DeepSeek 不可用时的回复回退、图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
-- 一轮回复会粘在同一提供商上：如果首个 DeepSeek step 触发回退，后续工具 step 全部继续使用 Gemini，以保留有效 thought signature；DeepSeek 已经发出工具调用后不会再中途切换。网络/超时、401–403、408/409/429 和 5xx 会触发回退；错误请求 400 和正常 `dismiss` 不会触发。
+- **Qwen 3.7 Flash** 同时接收文本和视觉媒体，日常对话显式关闭思考。
+- **DeepSeek V4 Flash Thinking** 仅作为可选 advisor；项目不使用 DeepSeek V4 Pro。
+- **Gemini 3.5 Flash-Lite** 保留回复回退、YouTube 和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- 工具调用后 provider 保持粘性；Qwen 首次调用的网络、认证、限流和服务端错误可回退到 Gemini。
 
 ## 本地路由
 

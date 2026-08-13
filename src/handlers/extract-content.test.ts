@@ -34,7 +34,13 @@ test("extracts and deduplicates entity, text-link, bare, caption, state, and rep
 test("collects current and replied media with preferred thumbnails and metadata", async () => {
   const msg = message({
     photo: [{ file_id: "small" }, { file_id: "large" }],
-    sticker: { file_id: "sticker", emoji: "🐱", thumbnail: { file_id: "sticker-thumb" } },
+    sticker: {
+      file_id: "sticker",
+      emoji: "🐱",
+      is_video: true,
+      is_animated: false,
+      thumbnail: { file_id: "sticker-thumb" },
+    },
     video: {
       file_id: "video",
       cover: [{ file_id: "cover-small" }, { file_id: "cover-large" }],
@@ -58,6 +64,7 @@ test("collects current and replied media with preferred thumbnails and metadata"
       source: "current",
       fileId: "sticker",
       thumbnailFileId: "sticker-thumb",
+      isVideo: true,
       emoji: "🐱",
     },
     { type: "video", source: "current", fileId: "video", thumbnailFileId: "cover-large" },

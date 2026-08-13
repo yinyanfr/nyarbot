@@ -12,6 +12,7 @@
 | `BOT_PERSONA_READING`        | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
 | `TG_ADMIN_UID`               | ✅   | 管理员 ID，用于私聊状态/重置、日记观察管理和词云命令                        |
 | `TG_GROUP_ID`                | ✅   | 目标群组 ID；其他聊天被忽略，但支持的管理员私聊命令除外                     |
+| `QWEN_API_KEY`               | ✅   | 千问 AI 平台 API Key，用于主对话与多模态理解                                |
 | `DEEPSEEK_API_KEY`           | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
 | `TAVILY_API_KEY`             | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
 | `CF_AIG_TOKEN`               | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
@@ -33,6 +34,7 @@
 其他可选变量（带默认值）：
 
 - `DEEPSEEK_BASE_URL`（`https://api.deepseek.com`）
+- `QWEN_BASE_URL`（`https://dashscope.aliyuncs.com/compatible-mode/v1`）
 - `CF_AIG_GATEWAY`（`gem`）
 - `BILIBILI_REQUEST_TIMEOUT_MS`（`10000`）、`BILIBILI_RATE_LIMIT_MS`（`500`）、
   `BILIBILI_CACHE_SIZE`（`100`）
@@ -88,25 +90,17 @@
 
 生产环境不依赖 Firebase，也不挂载运行时凭据。已 gitignore 的 `src/services/serviceAccountKey.json` 只在切换前由独立的 `tools/firestore-to-sqlite` 维护工具使用。一次性命令、检查、回滚与恢复流程见[数据库迁移与备份维护](database-maintenance.zh-CN.md)。
 
-## DeepSeek 模型
+## 对话模型
 
-Bot 使用两个 DeepSeek model ID，共配置三种变体：
+`qwen3.7-flash` 负责所有对话 tier、分类、主动探测、压缩、记忆整理和 Telegram/推文视觉理解，并显式发送 `enable_thinking: false`。Telegram 图片与原消息文本在同一条 user message 中发送；WebM 视频贴纸转为 MP4 `video_url`，普通视频和 TGS 贴纸仍使用 Telegram 缩略图。
 
-| 模型                | 思考模式                               | 用途                                                         |
-| ------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、告白/互动反应、主动探测                      |
-| `deepseek-v4-flash` | 启用（`thinking: {type: "enabled"}`）  | 复杂对话（tier=`complex`），带 send_message/dismiss 工具调用 |
-| `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 技术问题（tier=`tech`），带 send_message/dismiss 工具调用    |
-
-思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
-
-面向回复的 DeepSeek 快速路径预留 12 秒，思考路径预留 45 秒。网络/超时、401–403、408/409/429 和 5xx 会在 DeepSeek 尚未调用工具时把整轮回复切换到 Gemini 3.5 Flash-Lite，后续 step 继续使用 Gemini。分类、subagent、URL 抽取、compaction 和后台记忆压缩仍只使用 DeepSeek。
+可选 `startSubagent` advisor 仅使用开启思考的 `deepseek-v4-flash`；项目不再使用 DeepSeek V4 Pro。Qwen 首次调用遇到网络、超时、认证、限流或 5xx 错误时可回退到 Gemini 3.5 Flash-Lite，工具调用开始后不跨 provider 切换。
 
 ## Cloudflare AI Gateway
 
 Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退、Telegram/推文图片理解和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
+- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 Qwen 不可用时的回复回退和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
 - `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
 
 YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-lite`。由于 gateway wrapper 不会声明原生 URL 支持，这一路径使用受限的 AI SDK URL passthrough，把公开 YouTube URL 保留为 Gemini `fileData`。Bot 不会直连 Google API，也不会下载视频；每次调用只读取一个视频。

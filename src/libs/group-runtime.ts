@@ -177,9 +177,14 @@ function formatTurnRecord(turn: RuntimeTurnRecord): string {
 function buildMessageContentSignature(input: IngestMessageInput): string {
   const media = input.mediaRefs
     .map((mediaRef) =>
-      [mediaRef.source, mediaRef.type, mediaRef.fileId ?? "", mediaRef.thumbnailFileId ?? ""].join(
-        ":",
-      ),
+      [
+        mediaRef.source,
+        mediaRef.type,
+        mediaRef.fileId ?? "",
+        mediaRef.thumbnailFileId ?? "",
+        mediaRef.isAnimated ? "animated" : "",
+        mediaRef.isVideo ? "video" : "",
+      ].join(":"),
     )
     .join("|");
   const urls = [...input.urls].sort().join("|");

@@ -48,9 +48,7 @@ handlers/index.ts (setupHandlers)
     ├─ Trigger detection (@mention / reply-to-bot)
     ├─ Local routing (short chat / tech / current-fact)
     ├─ AI classification (classifyMessage)
-    │     └─ simple → flashNoThinkModel
-    │     └─ complex → flashThinkModel
-    │     └─ tech → proThinkModel
+    │     └─ simple / complex / tech → Qwen 3.7 Flash
     ├─ Runtime scheduling (group-runtime.ts)
     │     ├─ Persist event in SQLite, dedup, rate-limit, debounce, running lock
     │     └─ Build summary + recent events context
@@ -60,8 +58,9 @@ handlers/index.ts (setupHandlers)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
-    │     ├─ Rich content on demand; session-only cache, no persistent image cache
-    │     │     ├─ Photos use full file; other media/stickers prefer thumbnails
+    │     ├─ Direct multimodal input plus on-demand tools; session-only cache
+    │     │     ├─ Photos enter the original user message; video stickers enter as MP4
+    │     │     ├─ Other videos and TGS/static stickers use thumbnails
     │     │     └─ Known signatures win; image/* headers are accepted as fallback
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search
     │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
@@ -124,17 +123,17 @@ If all retries still dismiss:
 
 | Provider/model                                   | Usage                                                                            |
 | ------------------------------------------------ | -------------------------------------------------------------------------------- |
-| DeepSeek v4 Flash, thinking disabled             | Classification, short chat, greetings, affection/reaction flows, proactive probe |
-| DeepSeek v4 Flash, thinking enabled              | Complex conversations and tool-calling turns                                     |
-| DeepSeek v4 Pro, thinking enabled                | Technical questions and advisor-heavy turns                                      |
-| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | DeepSeek reply fallback, Telegram/tweet vision, full-diary notification copy     |
+| Qwen 3.7 Flash, thinking disabled                | All chat tiers, tools, background tasks, Telegram/tweet multimodal understanding |
+| DeepSeek v4 Flash, thinking enabled              | Optional `startSubagent` advisor                                                 |
+| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | Qwen reply fallback, YouTube understanding, full-diary notification copy         |
 | Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                            |
 
-### Why two providers?
+### Provider boundaries
 
-- **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
-- **Gemini 3.5 Flash-Lite** handles unavailable-DeepSeek reply fallback, image understanding, and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
-- Provider selection is sticky for the whole reply: if the first DeepSeek step falls back, every later tool step stays on Gemini so thought signatures remain valid. The bot never switches providers after DeepSeek has already emitted a tool call. Fallback activates for network/timeouts, 401–403, 408/409/429, and 5xx responses, but not malformed 400 requests or normal dismissals.
+- **Qwen 3.7 Flash** receives text and visual media together and explicitly disables thinking for daily chat.
+- **DeepSeek V4 Flash Thinking** is only an optional advisor; DeepSeek V4 Pro is not used.
+- **Gemini 3.5 Flash-Lite** remains the reply fallback, YouTube reader, and diary notice writer; **Gemini 3.1 Pro Preview** writes diaries.
+- Provider selection is sticky after a tool call. Initial Qwen failures can fall back to Gemini for network/timeouts, auth/rate-limit, and server errors.
 
 ## Local Routing
 

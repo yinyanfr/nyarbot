@@ -27,15 +27,10 @@ type GenerateCall = Record<string, unknown> & {
 };
 
 const models = Object.fromEntries(
-  [
-    "flashNoThink",
-    "flashThink",
-    "proThink",
-    "replyFlashNoThink",
-    "replyFlashThink",
-    "replyProThink",
-    "geminiFlashLite",
-  ].map((name) => [name, { modelId: name, provider: "test" }]),
+  ["qwenFast", "advisorThink", "replyQwenFast", "geminiFlashLite"].map((name) => [
+    name,
+    { modelId: name, provider: "test" },
+  ]),
 ) as unknown as NonNullable<AiDependencyOverrides["models"]>;
 
 function result(text = "", toolNames: string[] = [], modelId = "test-model") {
@@ -96,7 +91,7 @@ describe("classification and lightweight generators", () => {
       tier: "tech",
       needsSearch: true,
     });
-    assert.equal(valid.calls[0]?.model, models.flashNoThink);
+    assert.equal(valid.calls[0]?.model, models.qwenFast);
     assert.deepEqual(await classifyMessage("x", scripted([() => result("bad")]).dependencies), {
       tier: "simple",
       needsSearch: false,
@@ -128,7 +123,7 @@ describe("classification and lightweight generators", () => {
       },
       () => ({ ...result("摘要"), usage: { promptTokens: 5, completionTokens: 2 } }),
       (call) => {
-        assert.equal(call.model, models.geminiFlashLite);
+        assert.equal(call.model, models.qwenFast);
         return result("图像描述");
       },
     ]);
@@ -229,9 +224,9 @@ describe("classification and lightweight generators", () => {
 describe("main turn architecture", () => {
   test("routes tiers, preserves stable tools, token limits and caller abort", async () => {
     for (const [tier, expectedModel, expectedTokens] of [
-      ["simple", models.replyFlashNoThink, 200],
-      ["complex", models.replyFlashThink, 500],
-      ["tech", models.replyProThink, undefined],
+      ["simple", models.replyQwenFast, 200],
+      ["complex", models.replyQwenFast, 500],
+      ["tech", models.replyQwenFast, undefined],
     ] as const) {
       const fake = scripted([() => result()]);
       const controller = new AbortController();
@@ -498,14 +493,16 @@ describe("main turn architecture", () => {
     assert.equal(videos, 1);
   });
 
-  test("prefetches successful search and image context before the main call", async () => {
+  test("prefetches search and sends the original image in the main user message", async () => {
     const fake = scripted([
-      () => result("画面里有 <猫> & 字"),
       async (call) => {
         const prompt = JSON.stringify(call.messages);
         assert.match(prompt, /prefetched_web_search/);
-        assert.match(prompt, /prefetched_media/);
-        assert.match(prompt, /&lt;猫&gt; &amp; 字/);
+        const messages = call.messages as {
+          content: { type: string; image?: string; text?: string }[];
+        }[];
+        assert.equal(messages[0]?.content[1]?.type, "image");
+        assert.equal(messages[0]?.content[1]?.image, "data:image/png;base64,eA==");
         await runTool(call, "send_message", { text: "看到了" });
         return result("", ["send_message"]);
       },
@@ -528,29 +525,83 @@ describe("main turn architecture", () => {
       resolveTelegramFileAsDataUrl: async () => "data:image/png;base64,eA==",
     });
     assert.equal(response.action, "send");
-    assert.equal(fake.calls[0]?.model, models.geminiFlashLite);
+    assert.equal(fake.calls.length, 1);
+    assert.equal(fake.calls[0]?.model, models.replyQwenFast);
   });
 
-  test("fails image understanding closed for unsupported or failed media", async () => {
-    for (const testCase of [
-      {
-        resolver: async () => "data:application/octet-stream;base64,eA==",
-        scripts: [() => result()],
-      },
-      {
-        resolver: async () => "data:image/png;base64,eA==",
-        scripts: [() => Promise.reject(new Error("vision down")), () => result()],
-      },
+  test("fails image understanding closed when original media cannot be resolved", async () => {
+    for (const resolver of [
+      async () => "data:application/octet-stream;base64,eA==",
+      async () => null,
     ]) {
-      const fake = scripted(testCase.scripts);
+      const fake = scripted([() => result()]);
       const response = await turn(fake.dependencies, {
         userMessage: "看看图",
         allowRichContentTools: true,
         mediaRefs: [{ type: "image", source: "current", fileId: `image-${fake.calls.length}` }],
-        resolveTelegramFileAsDataUrl: testCase.resolver,
+        resolveTelegramFileAsDataUrl: resolver,
       });
       assert.equal(response.action, "dismiss");
     }
+  });
+
+  test("sends only video stickers as original MP4 and keeps ordinary videos on thumbnails", async () => {
+    const fake = scripted([
+      (call) => {
+        const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
+        assert.deepEqual(content.slice(1), [
+          { type: "file", data: "data:video/mp4;base64,dmlkZW8=", mediaType: "video/mp4" },
+          { type: "image", image: "data:image/jpeg;base64,dGh1bWI=" },
+        ]);
+        return result();
+      },
+    ]);
+    const imageIds: string[] = [];
+    const videoIds: string[] = [];
+    await turn(fake.dependencies, {
+      allowRichContentTools: true,
+      mediaRefs: [
+        { type: "sticker", source: "current", fileId: "webm", isVideo: true },
+        { type: "video", source: "current", fileId: "original", thumbnailFileId: "thumb" },
+      ],
+      resolveTelegramFileAsDataUrl: async (fileId) => {
+        imageIds.push(fileId);
+        return "data:image/jpeg;base64,dGh1bWI=";
+      },
+      resolveTelegramVideoStickerAsDataUrl: async (fileId) => {
+        videoIds.push(fileId);
+        return "data:video/mp4;base64,dmlkZW8=";
+      },
+    });
+    assert.deepEqual(videoIds, ["webm"]);
+    assert.deepEqual(imageIds, ["thumb"]);
+  });
+
+  test("falls back to sticker thumbnails when video conversion is unavailable", async () => {
+    const fake = scripted([
+      (call) => {
+        const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
+        assert.deepEqual(content[1], {
+          type: "image",
+          image: "data:image/jpeg;base64,dGh1bWI=",
+        });
+        return result();
+      },
+    ]);
+    await turn(fake.dependencies, {
+      allowRichContentTools: true,
+      mediaRefs: [
+        {
+          type: "sticker",
+          source: "current",
+          fileId: "webm",
+          thumbnailFileId: "thumb",
+          isVideo: true,
+        },
+      ],
+      resolveTelegramFileAsDataUrl: async () => "data:image/jpeg;base64,dGh1bWI=",
+      resolveTelegramVideoStickerAsDataUrl: async () => null,
+    });
   });
 
   test("rich tools report disabled access and video-specific failures", async () => {
@@ -785,7 +836,7 @@ describe("main turn architecture", () => {
         return result();
       },
       (call) => {
-        assert.equal(call.model, models.proThink);
+        assert.equal(call.model, models.advisorThink);
         return result("research");
       },
     ]);
@@ -926,6 +977,47 @@ describe("fallback and URL helpers", () => {
       ],
       thinking: { type: "enabled" },
     });
+  });
+
+  test("rewrites internal MP4 markers to Qwen video_url and disables thinking", () => {
+    const rewritten = aiTestHelpers.rewriteQwenVideoParts({
+      body: JSON.stringify({
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: { url: "data:image/x-qwen-video;base64,dmlkZW8=" },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    const body = JSON.parse(String(rewritten.body));
+    assert.equal(body.enable_thinking, false);
+    assert.deepEqual(body.messages[0].content[0], {
+      type: "video_url",
+      video_url: { url: "data:video/mp4;base64,dmlkZW8=" },
+      fps: 4,
+    });
+    assert.equal(aiTestHelpers.rewriteQwenVideoParts(undefined).body, undefined);
+    assert.equal(aiTestHelpers.rewriteQwenVideoParts({ body: "invalid" }).body, "invalid");
+    const unchanged = aiTestHelpers.rewriteQwenVideoParts({
+      body: JSON.stringify({
+        messages: [
+          { role: "assistant", content: "text" },
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: "data:image/png;base64,eA==" } }],
+          },
+        ],
+      }),
+    });
+    const unchangedBody = JSON.parse(String(unchanged.body));
+    assert.equal(unchangedBody.enable_thinking, false);
+    assert.equal(unchangedBody.messages[1].content[0].image_url.url, "data:image/png;base64,eA==");
   });
 
   test("combines caller and timeout abort signals", () => {
@@ -1095,7 +1187,20 @@ describe("fallback and URL helpers", () => {
       provider: "test",
       doGenerate: async () => Promise.reject(unavailable),
     };
-    const params = { prompt: [{ role: "user", content: [] }] };
+    const params = {
+      prompt: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "file",
+              data: "video",
+              mediaType: "image/x-qwen-video",
+            },
+          ],
+        },
+      ],
+    };
     const got = await middleware.wrapGenerate!({ params, model } as never);
     assert.equal(got.response?.modelId, "gemini");
     const signal = new AbortController().signal;
@@ -1104,6 +1209,7 @@ describe("fallback and URL helpers", () => {
     const repeatedSignaled = await middleware.wrapGenerate!({ params: signaled, model } as never);
     assert.equal(firstSignaled.response?.modelId, "gemini");
     assert.equal(repeatedSignaled.response?.modelId, "gemini");
+    assert.equal((fallbackCalls[0] as typeof params).prompt[0]?.content[0]?.mediaType, "video/mp4");
     const continued = { prompt: [{ role: "tool", content: [] }] };
     await assert.rejects(
       Promise.resolve(middleware.wrapGenerate!({ params: continued, model } as never)),

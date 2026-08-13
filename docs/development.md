@@ -56,15 +56,15 @@ Additional benefits:
 
 ### Why `generateText` instead of `generateObject` for classification?
 
-DeepSeek's Chat Completions API does not support `json_schema` response_format (returns 400 `This response_format type is unavailable now`). The classification prompt instructs the model to reply in raw JSON, which is then parsed with Zod.
+Classification asks Qwen for a tiny raw JSON object and validates it with Zod. Keeping this path schema-independent makes failure handling deterministic.
 
 ### Why `.chat()` instead of the default model factory?
 
-`@ai-sdk/openai` v3 defaults to the Responses API (`/responses` endpoint). DeepSeek only supports Chat Completions (`/chat/completions`). Using `provider.chat("model-id")` explicitly selects the Chat Completions API.
+Qwen uses the AI SDK Alibaba chat adapter. The optional DeepSeek advisor explicitly uses the OpenAI-compatible Chat Completions API.
 
 ### Why two-stage proactive probe?
 
-Running the full model for every proactive check is expensive. The probe gate uses `flashNoThinkModel` with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full model runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels probe/generation output when new user or bot activity arrives.
+Running a full turn for every proactive check is wasteful. The probe gate uses Qwen 3.7 Flash with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full turn runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels output when new activity arrives.
 
 ### Why `formatForTelegramHtml`?
 
@@ -149,7 +149,7 @@ Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead 
 
 `fetchUrlContent()` in `ai.ts` uses a three-tier strategy:
 
-1. **Twitter/X** → fxtwitter API (free, no auth) with batch Gemini photo descriptions
+1. **Twitter/X** → fxtwitter API (free, no auth) with batch Qwen photo descriptions
 2. **Direct fetch** → HTML title/meta extraction
 3. **Tavily Extract** → fallback
 

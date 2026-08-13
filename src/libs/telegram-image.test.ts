@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 const requiredEnv = {
@@ -14,8 +15,15 @@ const requiredEnv = {
 };
 Object.assign(process.env, requiredEnv);
 
-const { createTelegramImageDownloader } = await import("./telegram-image.js");
+const { createTelegramImageDownloader, createTelegramVideoStickerDownloader } =
+  await import("./telegram-image.js");
 const signal = new AbortController().signal;
+const videoIo = {
+  mkdtemp: async () => "/tmp/nyarbot-sticker-test",
+  readFile: async () => Buffer.from("mp4"),
+  rm: async () => undefined,
+  tmpdir: () => "/tmp",
+} as const;
 
 function downloader(response: Response | Error) {
   const urls: string[] = [];
@@ -89,5 +97,129 @@ test("returns null for non-2xx, malformed non-image, oversized, timeout, and abo
     await t.test(name, async () => {
       assert.equal(await downloader(new DOMException(name, name)).download("a"), null);
     });
+  }
+});
+
+test("validates WebM and returns transcoded MP4 video stickers", async () => {
+  const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]);
+  const mp4 = Buffer.from("mp4");
+  const download = createTelegramVideoStickerDownloader({
+    botApiKey: "secret-token",
+    timeout: () => signal,
+    fetch: async () => new Response(webm),
+    ...videoIo,
+    rm: async () => Promise.reject(new Error("cleanup failed")),
+    spawn: (() => {
+      const child = new EventEmitter() as never as ReturnType<
+        typeof import("node:child_process").spawn
+      >;
+      const stdin = new EventEmitter();
+      Object.assign(stdin, { end: () => undefined });
+      const stderr = new EventEmitter();
+      Object.assign(stderr, { resume: () => stderr });
+      Object.assign(child, {
+        stderr,
+        stdin,
+        kill: () => true,
+      });
+      queueMicrotask(() => {
+        child.emit("close", 0);
+      });
+      return child;
+    }) as typeof import("node:child_process").spawn,
+  });
+  assert.equal(
+    await download("stickers/a.webm"),
+    `data:video/mp4;base64,${mp4.toString("base64")}`,
+  );
+});
+
+test("rejects non-WebM video sticker payloads", async () => {
+  const download = createTelegramVideoStickerDownloader({
+    botApiKey: "secret-token",
+    timeout: () => signal,
+    fetch: async () => new Response("not webm"),
+    ...videoIo,
+    spawn: (() =>
+      assert.fail("ffmpeg should not run")) as typeof import("node:child_process").spawn,
+  });
+  assert.equal(await download("stickers/a.tgs"), null);
+});
+
+test("rejects failed, empty, and oversized WebM transcodes", async () => {
+  const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]);
+  for (const fixture of [
+    { code: 1, output: Buffer.from("bad") },
+    { code: 0, output: Buffer.alloc(0) },
+    { code: 0, output: Buffer.alloc(7 * 1024 * 1024 + 1) },
+  ]) {
+    const download = createTelegramVideoStickerDownloader({
+      botApiKey: "secret-token",
+      timeout: () => signal,
+      fetch: async () => new Response(webm),
+      ...videoIo,
+      readFile: async () => fixture.output,
+      spawn: (() => {
+        const child = new EventEmitter() as never as ReturnType<
+          typeof import("node:child_process").spawn
+        >;
+        const stdin = new EventEmitter();
+        Object.assign(stdin, { end: () => undefined });
+        const stderr = new EventEmitter();
+        Object.assign(stderr, { resume: () => stderr });
+        Object.assign(child, {
+          stderr,
+          stdin,
+          kill: () => true,
+        });
+        queueMicrotask(() => {
+          child.emit("close", fixture.code);
+        });
+        return child;
+      }) as typeof import("node:child_process").spawn,
+    });
+    assert.equal(await download("stickers/a.webm"), null);
+  }
+});
+
+test("handles ffmpeg stdin errors without crashing", async () => {
+  const webm = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1]);
+  const download = createTelegramVideoStickerDownloader({
+    botApiKey: "secret-token",
+    timeout: () => signal,
+    fetch: async () => new Response(webm),
+    ...videoIo,
+    spawn: (() => {
+      const child = new EventEmitter() as never as ReturnType<
+        typeof import("node:child_process").spawn
+      >;
+      const stdin = new EventEmitter();
+      Object.assign(stdin, {
+        end: () => queueMicrotask(() => stdin.emit("error", new Error("EPIPE"))),
+      });
+      const stderr = new EventEmitter();
+      Object.assign(stderr, { resume: () => stderr });
+      Object.assign(child, { stderr, stdin, kill: () => true });
+      return child;
+    }) as typeof import("node:child_process").spawn,
+  });
+
+  assert.equal(await download("stickers/a.webm"), null);
+});
+
+test("rejects failed and oversized Telegram video sticker downloads", async () => {
+  for (const response of [
+    new Response("no", { status: 503 }),
+    new Response(Buffer.alloc(5 * 1024 * 1024 + 1)),
+  ]) {
+    const download = createTelegramVideoStickerDownloader({
+      botApiKey: "secret-token",
+      timeout: () => signal,
+      fetch: async () => response,
+      ...videoIo,
+      spawn: (() =>
+        assert.fail("ffmpeg should not run")) as typeof import("node:child_process").spawn,
+    });
+    assert.equal(await download("stickers/a.webm"), null);
   }
 });

@@ -14,6 +14,7 @@ Object.assign(process.env, {
   BOT_API_KEY: "test-token",
   TG_ADMIN_UID: "1",
   TG_GROUP_ID: "-100",
+  QWEN_API_KEY: "test",
   DEEPSEEK_API_KEY: "test",
   TAVILY_API_KEY: "test",
   CF_AIG_TOKEN: "test",
@@ -29,7 +30,8 @@ const event = (messageId: number, ts: number): RuntimeEventRecord => ({
   uid: "42",
   name: "Alice",
   text: `message ${messageId}`,
-  mediaRefs: [],
+  mediaRefs:
+    messageId === 1 ? [{ type: "sticker", source: "current", fileId: "webm", isVideo: true }] : [],
   urls: [],
   ts,
 });
@@ -56,6 +58,9 @@ test("runtime events and turns roundtrip with ordering, dates, and limits", asyn
       ),
       [2, 4],
     );
+    assert.deepEqual((await persistence.loadRecentRuntimeEvents())[0]?.mediaRefs, [
+      { type: "sticker", source: "current", fileId: "webm", isVideo: true },
+    ]);
     assert.deepEqual(
       (await persistence.loadRecentRuntimeEvents({ newestFirst: true, limit: 2 })).map(
         (item) => item.messageId,

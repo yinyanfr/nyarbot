@@ -50,7 +50,10 @@ import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
-import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
+import {
+  downloadTelegramFileAsDataUrl,
+  downloadTelegramVideoStickerAsDataUrl,
+} from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 import { decideLocalAiRoute } from "./ai-routing.js";
@@ -391,6 +394,8 @@ function mapRuntimeMediaRefToMediaRef(ref: {
   source?: string;
   fileId?: string;
   thumbnailFileId?: string;
+  isAnimated?: boolean;
+  isVideo?: boolean;
   emoji?: string;
   filename?: string;
   title?: string;
@@ -412,6 +417,8 @@ function mapRuntimeMediaRefToMediaRef(ref: {
     source: "reply_to",
     ...(ref.fileId ? { fileId: ref.fileId } : {}),
     ...(ref.thumbnailFileId ? { thumbnailFileId: ref.thumbnailFileId } : {}),
+    ...(ref.isAnimated ? { isAnimated: true } : {}),
+    ...(ref.isVideo ? { isVideo: true } : {}),
     ...(ref.emoji ? { emoji: ref.emoji } : {}),
     ...(ref.filename ? { filename: ref.filename } : {}),
     ...(ref.title ? { title: ref.title } : {}),
@@ -528,6 +535,7 @@ export interface AiTurnDependencies {
   getStickerFileId: typeof getStickerFileId;
   pickRandomStickerEmoji: typeof pickRandomStickerEmoji;
   downloadTelegramFileAsDataUrl: typeof downloadTelegramFileAsDataUrl;
+  downloadTelegramVideoStickerAsDataUrl: typeof downloadTelegramVideoStickerAsDataUrl;
   formatForTelegramHtml: typeof formatForTelegramHtml;
   replyAndTrack: typeof replyAndTrack;
   runtime: Pick<typeof groupRuntime, "loadContext" | "recordBotMessages" | "recordTurn">;
@@ -546,6 +554,7 @@ const defaultAiTurnDependencies: AiTurnDependencies = {
   getStickerFileId,
   pickRandomStickerEmoji,
   downloadTelegramFileAsDataUrl,
+  downloadTelegramVideoStickerAsDataUrl,
   formatForTelegramHtml,
   replyAndTrack,
   runtime: groupRuntime,
@@ -708,7 +717,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
     if (chatId === undefined) throw new Error("no chat in context");
 
     // Signal "typing..." while the AI generates.
-    // Because DeepSeek can take 10-20s, refresh the typing action every 4.5s.
+    // Model and tool calls can take several seconds, so refresh the typing action periodically.
     const typingTimer = setInterval(() => {
       ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
     }, 4500);
@@ -780,6 +789,18 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
           return null;
         }
       };
+      const resolveTelegramVideoStickerAsDataUrl = async (
+        fileId: string,
+      ): Promise<string | null> => {
+        try {
+          const file = await ctx.api.getFile(fileId);
+          if (!file.file_path) return null;
+          return await dependencies.downloadTelegramVideoStickerAsDataUrl(file.file_path);
+        } catch (err) {
+          logger.warn({ err, fileId }, "resolveTelegramVideoStickerAsDataUrl failed");
+          return null;
+        }
+      };
 
       // Build the base systemHint, appending the mandatory-reply hint for
       // retries when the user explicitly triggered the bot.
@@ -799,6 +820,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
         urls,
         ...(sourceRefs ? { sourceRefs } : {}),
         resolveTelegramFileAsDataUrl,
+        resolveTelegramVideoStickerAsDataUrl,
         allowRichContentTools: isTriggered,
         ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
         ...(runtimeStatus ? { runtimeStatus } : {}),
@@ -851,6 +873,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
             urls,
             ...(sourceRefs ? { sourceRefs } : {}),
             resolveTelegramFileAsDataUrl,
+            resolveTelegramVideoStickerAsDataUrl,
             allowRichContentTools: isTriggered,
             ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
             ...(runtimeStatus ? { runtimeStatus } : {}),

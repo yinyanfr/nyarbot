@@ -11,7 +11,7 @@ A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): DeepSeek handles chat and tool use, with Gemini 3.5 Flash-Lite taking over replies when DeepSeek is unavailable. Gemini also handles vision and diary notices through Cloudflare AI Gateway, while one unified SQLite database provides persistence. This is not a generic Q&A bot with a persona sticker on top. It is designed as a long-lived group participant with memory, proactive timing, tool-calling, and diary publishing.
+Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.ai): Qwen 3.7 Flash handles multimodal chat and tools, DeepSeek V4 Flash Thinking is an optional advisor, and Gemini handles reply fallback, YouTube, diaries, and diary notices. One unified SQLite database provides persistence.
 
 ## Overview
 
@@ -53,16 +53,16 @@ Built with [grammy](https://grammy.dev) and [Vercel AI SDK](https://sdk.vercel.a
 
 ## Tech Stack
 
-| Layer               | Library                                                |
-| ------------------- | ------------------------------------------------------ |
-| Telegram Bot        | `grammy` v1                                            |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
-| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
-| Search / Extraction | `@tavily/ai-sdk`                                       |
-| Database            | `better-sqlite3` (unified SQLite)                      |
-| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
-| Runtime             | Node.js + TypeScript ESM                               |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
+| Layer               | Library                                                      |
+| ------------------- | ------------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                                  |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + Qwen 3.7 Flash / DeepSeek V4 Flash |
+| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway       |
+| Search / Extraction | `@tavily/ai-sdk`                                             |
+| Database            | `better-sqlite3` (unified SQLite)                            |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                              |
+| Runtime             | Node.js + TypeScript ESM                                     |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                                    |
 
 ## Project Layout
 
@@ -174,6 +174,7 @@ See [Configuration Docs](docs/configuration.md).
 | `TG_GROUP_ID`                 | ✅       | Target group ID                                             |
 | `TG_ADMIN_UID`                | ✅       | Admin Telegram user ID                                      |
 | `DEEPSEEK_API_KEY`            | ✅       | DeepSeek API key                                            |
+| `QWEN_API_KEY`                | ✅       | Qwen AI Platform API key                                    |
 | `TAVILY_API_KEY`              | ✅       | Tavily API key                                              |
 | `CF_AIG_TOKEN`                | ✅       | Cloudflare AI Gateway token                                 |
 | `CF_ACCOUNT_ID`               | ✅       | Cloudflare account ID                                       |
