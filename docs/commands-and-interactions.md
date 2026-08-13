@@ -63,7 +63,7 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Stickers
 
-Incoming sticker emoji remains the lightweight default context and sticker descriptions are not persisted. On a triggered turn, the bot may safely inspect a sticker thumbnail; it never passes an animated WebM sticker payload to the vision model, and unsupported payloads are skipped.
+Incoming sticker emoji remains the lightweight default context and sticker descriptions are not persisted. On a triggered turn, WebM video stickers are passed in their original format to Gemini 3.5 Flash-Lite. TGS animated stickers continue to use their Telegram thumbnail, and unsupported payloads are skipped.
 
 When answering, the LLM can respond with:
 

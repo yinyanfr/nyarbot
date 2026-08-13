@@ -59,7 +59,7 @@ handlers/index.ts (setupHandlers)
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
     │     ├─ Direct multimodal input plus on-demand tools; session-only cache
-    │     │     ├─ Photos enter the original user message; video stickers enter as MP4
+    │     │     ├─ Photos enter the original user message; WebM video-sticker turns use Gemini Flash-Lite
     │     │     ├─ Other videos and TGS/static stickers use thumbnails
     │     │     └─ Known signatures win; image/* headers are accepted as fallback
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search

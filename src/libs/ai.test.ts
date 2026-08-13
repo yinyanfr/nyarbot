@@ -545,12 +545,13 @@ describe("main turn architecture", () => {
     }
   });
 
-  test("sends only video stickers as original MP4 and keeps ordinary videos on thumbnails", async () => {
+  test("routes video stickers as original WebM to Gemini and keeps ordinary videos on thumbnails", async () => {
     const fake = scripted([
       (call) => {
+        assert.equal(call.model, models.geminiFlashLite);
         const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
         assert.deepEqual(content.slice(1), [
-          { type: "file", data: "data:video/mp4;base64,dmlkZW8=", mediaType: "video/mp4" },
+          { type: "file", data: "data:video/webm;base64,dmlkZW8=", mediaType: "video/webm" },
           { type: "image", image: "data:image/jpeg;base64,dGh1bWI=" },
         ]);
         return result();
@@ -570,16 +571,17 @@ describe("main turn architecture", () => {
       },
       resolveTelegramVideoStickerAsDataUrl: async (fileId) => {
         videoIds.push(fileId);
-        return "data:video/mp4;base64,dmlkZW8=";
+        return "data:video/webm;base64,dmlkZW8=";
       },
     });
     assert.deepEqual(videoIds, ["webm"]);
     assert.deepEqual(imageIds, ["thumb"]);
   });
 
-  test("falls back to sticker thumbnails when video conversion is unavailable", async () => {
+  test("falls back to sticker thumbnails when the WebM download is unavailable", async () => {
     const fake = scripted([
       (call) => {
+        assert.equal(call.model, models.geminiFlashLite);
         const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
         assert.deepEqual(content[1], {
           type: "image",
