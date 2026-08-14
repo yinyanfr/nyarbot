@@ -18,7 +18,10 @@ Object.assign(process.env, requiredEnv);
 
 const { createReplyAndTrack } = await import("./reply-and-track.js");
 
-function fixture(reply: (...args: unknown[]) => Promise<unknown>) {
+function fixture(
+  reply: (...args: unknown[]) => Promise<unknown>,
+  recordBotMessages?: (input: unknown) => Promise<void>,
+) {
   const pushed: unknown[][] = [];
   const recorded: unknown[] = [];
   let touched = 0;
@@ -26,6 +29,7 @@ function fixture(reply: (...args: unknown[]) => Promise<unknown>) {
     pushMessage: (...args: unknown[]) => pushed.push(args),
     recordBotMessages: async (input: unknown) => {
       recorded.push(input);
+      await recordBotMessages?.(input);
     },
     touchBotActivity: () => {
       touched++;
@@ -107,4 +111,39 @@ test("plain reply without target uses empty options", async () => {
   const setup = fixture(async (...args) => calls.push(args));
   await setup.run(setup.ctx, "hello");
   assert.deepEqual(calls, [["hello", {}]]);
+});
+
+test("waits for runtime persistence and contains persistence failures", async (t) => {
+  await t.test("waits", async () => {
+    let release: (() => void) | undefined;
+    const persisted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const setup = fixture(
+      async () => undefined,
+      async () => persisted,
+    );
+    let completed = false;
+    const pending = setup.run(setup.ctx, "hello").then(() => {
+      completed = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(completed, false);
+    assert.equal(setup.pushed.length, 1);
+    release?.();
+    await pending;
+    assert.equal(completed, true);
+  });
+
+  await t.test("contains failure", async () => {
+    const setup = fixture(
+      async () => undefined,
+      async () => {
+        throw new Error("database unavailable");
+      },
+    );
+    await setup.run(setup.ctx, "hello");
+    assert.equal(setup.pushed.length, 1);
+    assert.equal(setup.touched(), 1);
+  });
 });

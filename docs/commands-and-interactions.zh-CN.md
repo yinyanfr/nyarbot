@@ -6,8 +6,8 @@
 | ----------------------------- | -------- | ------------------------------------ |
 | `/help`                       | 所有人   | 显示帮助文本                         |
 | `/love`                       | 所有人   | 触发好感度评分条目 + 傲娇回应        |
-| `/shock`                      | 所有人   | 电 bot 一下，触发被电到炸毛的反应    |
-| `/stroke`                     | 所有人   | 摸 bot；正常力度亲昵，过度时可能抗议 |
+| `/shock`                      | 所有人   | 电 bot 一下；反应会结合当前对话前因  |
+| `/stroke`                     | 所有人   | 摸 bot；反应会结合当前对话前因       |
 | `/roll [NdM]`                 | 所有人   | 立即掷骰并排队生成一句 AI 反应       |
 | `/nighty`                     | 所有人   | 说晚安；8 小时后 bot 发送早安问候    |
 | `/status`                     | 仅管理员 | 显示运行时间、缓冲区大小、记忆用户数 |
@@ -29,7 +29,7 @@
 当用户 @提及bot 或回复它的消息时，触发完整 AI 流程：
 
 1. **分类** — `classifyMessage()` 将消息归类为 `simple`、`complex` 或 `tech`，以及是否需要联网搜索。
-2. **模型选择** — `simple` → flash-无思考、`complex` → flash-思考、`tech` → pro-思考。
+2. **模型选择** — 所有文本 tier 都使用关闭思考的 GLM-4.7-FlashX；tier 仍控制提示、重试和 advisor 策略。
 3. **工具增强生成** — `generateAiTurn()` 运行带工具的生成（send_message、dismiss、记忆、昵称、贴纸、可选联网搜索）。
 4. **沉默重试** — 如果模型在被触发时选择 `dismiss`，simple/complex 最多重试 1 次，tech 不重试。之后会先尽量把 raw draft 救成真实的 `send_message`，再回退到贴纸。
 5. **输出** — 消息通过 `formatForTelegramHtml()` 格式化（Markdown → Telegram HTML），带打字指示和可选贴纸分发。
@@ -38,7 +38,7 @@
 
 ### 特殊上下文记录
 
-- 部分不是 `send_message` 产生的 bot 输出也会写入对话缓冲区，例如 `/love`、`/shock`、`/stroke`、`/roll`、`/reset`、早安问候、每日自动日记通知。
+- 部分不是 `send_message` 产生的 bot 输出也会写入对话缓冲区，例如 `/love`、`/shock`、`/stroke`、`/roll`、`/reset`、早安问候、每日自动日记通知。`/shock` 与 `/stroke` 会通过 command turn 队列执行，读取和普通聊天一致的持久化历史/摘要上下文，并在运行时回复落盘后才释放下一轮。
 - 这些记录在 XML 历史里会带 `kind="..."` 属性，表示它们是命令回复或系统性插入记录，模型应将其视为真实发生过的上下文。
 
 ### 图片与媒体
@@ -47,6 +47,7 @@
 - 上下文只保留原始引用（`file_id` / `thumbnail_file_id`，含当前消息与 reply-to）。
 - 在**被动触发**（@提及/回复）时，模型可按需调用 `describeTelegramMedia`。
 - 在**主动插话**时，URL 抓取仍禁用；最新候选消息中的图片可以预取，bot 在谈论图片前必须先理解图片，旧媒体只作为背景上下文。
+- Telegram 图片与媒体缩略图由 Gemini 3.5 Flash-Lite 描述，文本模型接收描述而不是视觉输入。
 - Telegram 下载优先识别 JPEG、PNG、GIF、WebP、BMP、TIFF、AVIF、HEIC 字节签名；未命中时接受 `image/*` 响应头作为回退，两者都没有才拒绝。
 
 ### URL
@@ -63,7 +64,7 @@
 
 ### 贴纸
 
-收到贴纸时默认只读取 emoji 做轻量上下文，且不会持久化描述。被动触发轮次会把 WebM 视频贴纸循环转为 2.1 秒 MP4 后交给 Qwen；TGS 动画贴纸仍使用 Telegram 缩略图，不支持的负载会直接跳过。
+收到贴纸时默认只读取 emoji 做轻量上下文，且不会持久化描述。视频贴纸不会下载、转码或作为视频理解；需要视觉上下文时，可由 Gemini 3.5 Flash-Lite 描述 Telegram 预览缩略图，没有缩略图时仅保留 emoji / 轻量标记。
 
 回复时，LLM 可以：
 

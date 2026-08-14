@@ -288,7 +288,6 @@ function createProductionDependencies(): {
       checkAndGenerateWordcloud: () => void calls.push("wordcloud.check"),
       formatForTelegramHtml: (text) => `<b>${text}</b>`,
       downloadTelegramFileAsDataUrl: async (path) => `data:${path}`,
-      downloadTelegramVideoStickerAsDataUrl: async (path) => `data:${path}`,
       pushMessage: (...args) => void calls.push(`push:${String(args[3])}`),
       recordBotMessages: async (messages) => void calls.push(`record:${messages.join(",")}`),
       touchBotActivity: () => void calls.push("activity"),

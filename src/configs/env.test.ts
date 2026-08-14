@@ -7,7 +7,7 @@ const base = {
   BOT_API_KEY: "token",
   TG_ADMIN_UID: "1",
   TG_GROUP_ID: "-1",
-  QWEN_API_KEY: "key",
+  GLM_API_KEY: "key",
   DEEPSEEK_API_KEY: "key",
   TAVILY_API_KEY: "key",
   CF_AIG_TOKEN: "key",
@@ -20,7 +20,7 @@ test("loads defaults and explicit overrides", () => {
   assert.equal(config.appTimezone, "UTC");
   assert.equal(config.databasePath, "data/nyarbot.sqlite");
   assert.equal(config.databaseBackupSchedule, "23:59");
-  assert.equal(config.qwenBaseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+  assert.equal(config.glmBaseUrl, "https://api.z.ai/api/paas/v4/");
 });
 
 test("rejects every missing required setting", () => {

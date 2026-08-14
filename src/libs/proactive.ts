@@ -52,7 +52,6 @@ export interface ProactiveCallbacks {
   ) => Promise<void>;
   /** Resolve a Telegram file_id to a data URL so proactive turns can inspect images. */
   resolveTelegramFileAsDataUrl: (fileId: string) => Promise<string | null>;
-  resolveTelegramVideoStickerAsDataUrl?: (fileId: string) => Promise<string | null>;
 }
 
 export interface ProactiveDependencies {
@@ -330,12 +329,6 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             allowPersistentTools: false,
             ...(recentImageMediaRefs.length > 0 ? { mediaRefs: recentImageMediaRefs } : {}),
             resolveTelegramFileAsDataUrl: callbacks.resolveTelegramFileAsDataUrl,
-            ...(callbacks.resolveTelegramVideoStickerAsDataUrl
-              ? {
-                  resolveTelegramVideoStickerAsDataUrl:
-                    callbacks.resolveTelegramVideoStickerAsDataUrl,
-                }
-              : {}),
             allowRichContentTools: recentImageMediaRefs.length > 0,
             ...(recentImageMediaRefs.length > 0 ? { allowMediaTools: true } : {}),
           });

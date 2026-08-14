@@ -27,12 +27,12 @@ node dist/app.js   # run the compiled bot
 
 ## Stack
 
-| Layer                  | Library                                                   |
-| ---------------------- | --------------------------------------------------------- |
-| Telegram bot framework | `grammy` v1                                               |
-| AI / LLM               | `ai` v6 with Qwen via `@ai-sdk/alibaba`; DeepSeek advisor |
-| Web search             | `@tavily/ai-sdk`                                          |
-| Database               | `better-sqlite3` (unified SQLite)                         |
+| Layer                  | Library                                                          |
+| ---------------------- | ---------------------------------------------------------------- |
+| Telegram bot framework | `grammy` v1                                                      |
+| AI / LLM               | `ai` v6 with GLM via z.ai and `@ai-sdk/openai`; DeepSeek advisor |
+| Web search             | `@tavily/ai-sdk`                                                 |
+| Database               | `better-sqlite3` (unified SQLite)                                |
 
 ## Architecture
 
@@ -40,12 +40,12 @@ node dist/app.js   # run the compiled bot
 - `src/configs/env.ts` — typed config reader from `process.env`
 - `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, command routing, runtime ingestion, sendAiMessages
 - `src/libs/group-runtime.ts` — single-group runtime: message-level dedup, abuse gates, debounce, running/dirty lock, quiet mode, SQLite event/turn persistence, compaction trigger
-- `src/libs/ai.ts` — Qwen 3.7 Flash multimodal primary with Gemini reply fallback, DeepSeek V4 Flash Thinking advisor, stable tool-call architecture, proactive probe, compaction, and rich-content tools
+- `src/libs/ai.ts` — GLM-4.7-FlashX text primary through z.ai's overseas OpenAI-compatible API, Gemini media description/reply fallback, DeepSeek V4 Flash Thinking advisor, stable tool-call architecture, proactive probe, compaction, and rich-content tools
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (static persona + rules), `buildSessionContextBlock()` (summary/history/user data), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (current time + per-turn dynamic state)
 - `src/libs/conversation-buffer.ts` — in-memory hot ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
 - `src/libs/stickers.ts` — sticker facade: emoji-based lookup only (`getStickerFileId`), random fallback (`pickRandomStickerEmoji`), emoji-by-file-id reverse lookup (`getStickerEmojiByFileId`)
-- `src/libs/telegram-image.ts` — Telegram image download plus validated WebM video-sticker looping/transcoding for vision
+- `src/libs/telegram-image.ts` — Telegram image and media-thumbnail download/validation for Gemini descriptions; video stickers use only Telegram preview thumbnails when available
 - `src/libs/video.ts` — stable video reader backend: native Gemini YouTube understanding and read-only Bilibili MCP transcript/metadata access
 - `src/libs/proactive.ts` — two-stage proactive checker: `probeGate()` (cheap model), `generateAiTurn()` (full model), `ProactiveCallbacks` interface
 - `src/libs/diary.ts` — diary system: rollover timer, Gemini Pro generation, Telegram/GitHub publishing, Pages polling, and Gemini 3.5 Flash-Lite group notice
@@ -71,7 +71,7 @@ node dist/app.js   # run the compiled bot
 - User nicknames and memories are stored in the unified SQLite database at `DATABASE_PATH` (default `data/nyarbot.sqlite`).
 - The bot is meant to reply naturally, memorize users, understand images/stickers, and proactively join conversations — not just respond to commands.
 - **Language**: The group chat is in Simplified Chinese. System prompt, classification prompt, and bot responses are in Chinese. Match the user's language if they switch.
-- **Model routing**: Qwen `qwen3.7-flash` is the non-thinking multimodal primary; Telegram WebM video stickers are looped to a 2.1-second MP4 before being sent to Qwen; DeepSeek `deepseek-v4-flash` thinking is optional advisor only; DeepSeek V4 Pro is not used.
+- **Model routing**: z.ai `glm-4.7-flashx` with thinking disabled handles every text chat tier, classification, proactive probing, compaction, memory compression, tools, and text/background tasks. Gemini 3.5 Flash-Lite describes Telegram images/media thumbnails and tweet photos and remains the reply fallback, YouTube reader, and diary-notice writer. Video stickers are never downloaded or understood as video: use a Telegram preview thumbnail through Gemini when needed, otherwise retain only emoji/a lightweight marker. DeepSeek `deepseek-v4-flash` thinking is optional advisor only; DeepSeek V4 Pro is not used.
 - **Auto-retry**: `@grammyjs/auto-retry` is applied on `bot.api.config` before stream middleware to handle 429 rate limits.
 - **Tool-call architecture**: The model must call `send_message` to speak; raw text output is invisible inner monologue. The `dismiss` tool is a binary speak/silence choice.
 - **Dismiss retry**: When triggered (@/reply) but model chooses dismiss, simple/complex retry once; tech does not retry. Falls back to raw text or sticker.

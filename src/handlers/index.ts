@@ -50,10 +50,7 @@ import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
 import { formatForTelegramHtml } from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
-import {
-  downloadTelegramFileAsDataUrl,
-  downloadTelegramVideoStickerAsDataUrl,
-} from "../libs/telegram-image.js";
+import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 import { decideLocalAiRoute } from "./ai-routing.js";
@@ -535,7 +532,6 @@ export interface AiTurnDependencies {
   getStickerFileId: typeof getStickerFileId;
   pickRandomStickerEmoji: typeof pickRandomStickerEmoji;
   downloadTelegramFileAsDataUrl: typeof downloadTelegramFileAsDataUrl;
-  downloadTelegramVideoStickerAsDataUrl: typeof downloadTelegramVideoStickerAsDataUrl;
   formatForTelegramHtml: typeof formatForTelegramHtml;
   replyAndTrack: typeof replyAndTrack;
   runtime: Pick<typeof groupRuntime, "loadContext" | "recordBotMessages" | "recordTurn">;
@@ -554,7 +550,6 @@ const defaultAiTurnDependencies: AiTurnDependencies = {
   getStickerFileId,
   pickRandomStickerEmoji,
   downloadTelegramFileAsDataUrl,
-  downloadTelegramVideoStickerAsDataUrl,
   formatForTelegramHtml,
   replyAndTrack,
   runtime: groupRuntime,
@@ -789,19 +784,6 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
           return null;
         }
       };
-      const resolveTelegramVideoStickerAsDataUrl = async (
-        fileId: string,
-      ): Promise<string | null> => {
-        try {
-          const file = await ctx.api.getFile(fileId);
-          if (!file.file_path) return null;
-          return await dependencies.downloadTelegramVideoStickerAsDataUrl(file.file_path);
-        } catch (err) {
-          logger.warn({ err, fileId }, "resolveTelegramVideoStickerAsDataUrl failed");
-          return null;
-        }
-      };
-
       // Build the base systemHint, appending the mandatory-reply hint for
       // retries when the user explicitly triggered the bot.
       let currentHint = systemHint;
@@ -820,7 +802,6 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
         urls,
         ...(sourceRefs ? { sourceRefs } : {}),
         resolveTelegramFileAsDataUrl,
-        resolveTelegramVideoStickerAsDataUrl,
         allowRichContentTools: isTriggered,
         ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
         ...(runtimeStatus ? { runtimeStatus } : {}),
@@ -873,7 +854,6 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
             urls,
             ...(sourceRefs ? { sourceRefs } : {}),
             resolveTelegramFileAsDataUrl,
-            resolveTelegramVideoStickerAsDataUrl,
             allowRichContentTools: isTriggered,
             ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
             ...(runtimeStatus ? { runtimeStatus } : {}),
@@ -1148,6 +1128,8 @@ export interface HandlerDependencies {
   getOrCreateUser: typeof getOrCreateUser;
   extractContent: typeof extractContent;
   replyAndTrack: typeof replyAndTrack;
+  getHistory: typeof getHistory;
+  formatHistoryAsContext: typeof formatHistoryAsContext;
   pushMessage: typeof pushMessage;
   generateLoveResponse: typeof generateLoveResponse;
   generateMorningGreeting: typeof generateMorningGreeting;
@@ -1168,7 +1150,11 @@ export interface HandlerDependencies {
   recentMedia: RecentMediaDependencies;
   runtime: Pick<
     typeof groupRuntime,
-    "beginIncomingActivity" | "ingestUserMessage" | "schedulePassiveTurn" | "scheduleCommandTurn"
+    | "beginIncomingActivity"
+    | "ingestUserMessage"
+    | "loadContext"
+    | "schedulePassiveTurn"
+    | "scheduleCommandTurn"
   >;
   handleAiTurn: typeof handleAiTurn;
 }
@@ -1178,6 +1164,8 @@ const defaultHandlerDependencies: HandlerDependencies = {
   getOrCreateUser,
   extractContent,
   replyAndTrack,
+  getHistory,
+  formatHistoryAsContext,
   pushMessage,
   generateLoveResponse,
   generateMorningGreeting,
@@ -1208,6 +1196,73 @@ export function setupHandlers(
   const dependencies = { ...defaultHandlerDependencies, ...overrides };
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
+
+  const loadReactionContext = async (ctx: BotContext, user: User, senderUsername?: string) => {
+    const history = dependencies.getHistory(config.tgGroupId);
+    const runtimeContext = await dependencies.runtime.loadContext().catch((err: unknown) => {
+      logger.warn({ err }, "reaction: load runtime context failed, falling back to buffer");
+      return null;
+    });
+    const recentConversation =
+      runtimeContext?.recentEventsText || dependencies.formatHistoryAsContext(history);
+    const { recentMembers } = collectRecentMembers(config.tgGroupId, dependencies.getHistory);
+    if (!recentMembers.some((member) => member.uid === user.uid)) {
+      recentMembers.push({
+        uid: user.uid,
+        name: user.nickname || "大哥哥",
+        ...(senderUsername ? { username: senderUsername } : {}),
+      });
+    }
+    const replyTo = ctx.msg?.reply_to_message;
+    if (replyTo?.from && replyTo.from.id !== ctx.me.id) {
+      const replyUid = replyTo.from.id.toString();
+      if (!recentMembers.some((member) => member.uid === replyUid)) {
+        recentMembers.push({
+          uid: replyUid,
+          name: replyTo.from.first_name ?? "某人",
+          ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
+        });
+      }
+    }
+    return {
+      recentConversation,
+      recentMembers,
+      ...(runtimeContext?.summary ? { conversationSummary: runtimeContext.summary } : {}),
+    };
+  };
+
+  const scheduleReactionResponse = (params: {
+    reaction: "shock" | "stroke";
+    ctx: BotContext;
+    messageId: number;
+    user: User;
+    args: { intensity?: number; extraText?: string };
+    senderUsername?: string;
+  }) => {
+    const { reaction, ctx, messageId, user, args, senderUsername } = params;
+    dependencies.runtime.scheduleCommandTurn({
+      label: `${reaction}:${messageId}`,
+      execute: async () => {
+        try {
+          const context = await loadReactionContext(ctx, user, senderUsername);
+          const response =
+            reaction === "shock"
+              ? await dependencies.generateShockResponse(user, { ...args, ...context })
+              : await dependencies.generateStrokeResponse(user, { ...args, ...context });
+          await dependencies.replyAndTrack(
+            ctx,
+            response,
+            messageId,
+            true,
+            reaction === "shock" ? "command_shock" : "command_stroke",
+          );
+        } catch (err) {
+          logger.error({ err, reaction, messageId }, "reaction command failed");
+          await dependencies.replyAndTrack(ctx, "呜喵...刚才没反应过来喵...", messageId);
+        }
+      },
+    });
+  };
 
   bot.use(async (ctx, next) => {
     const groupUpdate = ctx.update.message ?? ctx.update.edited_message;
@@ -1668,15 +1723,27 @@ export function setupHandlers(
 
     const shockArgs = parseShockCommand(entities, rawText, botUsername);
     if (shockArgs) {
-      const shocked = await dependencies.generateShockResponse(user, shockArgs);
-      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      scheduleReactionResponse({
+        reaction: "shock",
+        ctx,
+        messageId: msg.message_id,
+        user,
+        args: shockArgs,
+        ...(from.username ? { senderUsername: from.username } : {}),
+      });
       return;
     }
 
     const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
     if (strokeArgs) {
-      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
-      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      scheduleReactionResponse({
+        reaction: "stroke",
+        ctx,
+        messageId: msg.message_id,
+        user,
+        args: strokeArgs,
+        ...(from.username ? { senderUsername: from.username } : {}),
+      });
       return;
     }
 
@@ -1862,14 +1929,10 @@ export function setupHandlers(
     });
 
     const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
-    if (strokeArgs) {
-      const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
-      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
-      return;
-    }
+    const shockArgs = parseShockCommand(entities, rawText, botUsername);
+    const isReactionCommand = strokeArgs !== null || shockArgs !== null;
 
-    if (!isMentioned && !isRepliedToBot) return;
+    if (!isMentioned && !isRepliedToBot && !isReactionCommand) return;
 
     const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
     const displayName = user.nickname || from.first_name || "大哥哥";
@@ -1925,7 +1988,7 @@ export function setupHandlers(
           }
         : {}),
       ts: Date.now(),
-      triggered: isMentioned || isRepliedToBot,
+      triggered: isMentioned || isRepliedToBot || isReactionCommand,
     });
     if (runtimeDecision.ignoredReason === "non_content_edit") return;
 
@@ -1948,10 +2011,27 @@ export function setupHandlers(
       return;
     }
 
-    const shockArgs = parseShockCommand(entities, rawText, botUsername);
     if (shockArgs) {
-      const shocked = await dependencies.generateShockResponse(user, shockArgs);
-      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      scheduleReactionResponse({
+        reaction: "shock",
+        ctx,
+        messageId: msg.message_id,
+        user,
+        args: shockArgs,
+        ...(from.username ? { senderUsername: from.username } : {}),
+      });
+      return;
+    }
+
+    if (strokeArgs) {
+      scheduleReactionResponse({
+        reaction: "stroke",
+        ctx,
+        messageId: msg.message_id,
+        user,
+        args: strokeArgs,
+        ...(from.username ? { senderUsername: from.username } : {}),
+      });
       return;
     }
 

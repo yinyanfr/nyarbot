@@ -3,7 +3,7 @@ const testEnv = {
   BOT_API_KEY: "test-token",
   TG_ADMIN_UID: "1",
   TG_GROUP_ID: "-1",
-  QWEN_API_KEY: "test-key",
+  GLM_API_KEY: "test-key",
   DEEPSEEK_API_KEY: "test-key",
   TAVILY_API_KEY: "test-key",
   CF_AIG_TOKEN: "test-token",

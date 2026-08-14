@@ -16,10 +16,7 @@ import type { WordcloudCallbacks } from "./libs/wordcloud.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
 import { groupRuntime } from "./libs/group-runtime.js";
-import {
-  downloadTelegramFileAsDataUrl,
-  downloadTelegramVideoStickerAsDataUrl,
-} from "./libs/telegram-image.js";
+import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
 import { closeVideoReader } from "./libs/video.js";
 import { DatabaseBackupService } from "./libs/database-backup.js";
 
@@ -135,7 +132,6 @@ export interface ProductionApplicationDependencies {
   checkAndGenerateWordcloud(): void;
   formatForTelegramHtml(text: string): string;
   downloadTelegramFileAsDataUrl(filePath: string): Promise<string | null>;
-  downloadTelegramVideoStickerAsDataUrl(filePath: string): Promise<string | null>;
   pushMessage: typeof pushMessage;
   recordBotMessages(messages: string[]): Promise<unknown>;
   touchBotActivity(): void;
@@ -177,7 +173,6 @@ export const productionApplicationDependencies: ProductionApplicationDependencie
   checkAndGenerateWordcloud,
   formatForTelegramHtml,
   downloadTelegramFileAsDataUrl,
-  downloadTelegramVideoStickerAsDataUrl,
   pushMessage,
   recordBotMessages: (messages) => groupRuntime.recordBotMessages({ messages }),
   touchBotActivity,
@@ -256,19 +251,6 @@ export function createProductionApplication(
             return await dependencies.downloadTelegramFileAsDataUrl(file.file_path);
           } catch (err) {
             dependencies.logWarn({ err, fileId }, "proactive: resolveTelegramFileAsDataUrl failed");
-            return null;
-          }
-        },
-        resolveTelegramVideoStickerAsDataUrl: async (fileId: string) => {
-          try {
-            const file = await bot.api.getFile(fileId);
-            if (!file.file_path) return null;
-            return await dependencies.downloadTelegramVideoStickerAsDataUrl(file.file_path);
-          } catch (err) {
-            dependencies.logWarn(
-              { err, fileId },
-              "proactive: resolveTelegramVideoStickerAsDataUrl failed",
-            );
             return null;
           }
         },

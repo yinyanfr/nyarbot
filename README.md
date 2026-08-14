@@ -11,7 +11,7 @@
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：Qwen 3.7 Flash 负责多模态群聊与工具调用，DeepSeek V4 Flash Thinking 作为可选 advisor，Gemini 负责回复回退、YouTube、日记与导读。统一 SQLite 数据库负责持久化。
+基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：通过 `@ai-sdk/openai` 接入 z.ai 海外 OpenAI-compatible API，GLM-4.7-FlashX（关闭思考）负责文本群聊与工具调用，DeepSeek V4 Flash Thinking 作为可选 advisor，Gemini 负责图片/媒体缩略图与推文配图描述、回复回退、YouTube、日记与导读。统一 SQLite 数据库负责持久化。
 
 ## Overview
 
@@ -40,7 +40,7 @@
 - 🧠 **严肃模式**：遇到编程、学术、技术分析类问题会优先给清晰答案
 - 🔍 **联网搜索**：涉及时事、实时事实、最新 API 时强制联网，不靠过期记忆瞎猜
 - 🔗 **链接理解（按需）**：只有在被动触发且确实需要时，才抓取 URL 内容；推文支持图片说明
-- 🖼️ **媒体理解（按需）**：图片与完整消息一起交给 Qwen；视频贴纸以转码视频输入，其余视频保留封面理解
+- 🖼️ **媒体理解（按需）**：Telegram 图片、媒体缩略图和推文配图交给 Gemini 3.5 Flash-Lite 描述；视频贴纸只按需读取 Telegram 预览缩略图，否则仅保留 emoji / 轻量标记
 - 🎬 **视频链接理解**：YouTube 直接理解声音与画面；Bilibili 支持 BV/AV/短链接并读取字幕，无字幕时仅使用元数据
 - 🌅 **早安问候**：`/nighty` 后 8 小时以上，下次发言会收到个性化早安
 - 💔 **告白回应**：`/love` 或告白文本触发记忆驱动的好感度评分与傲娇回应
@@ -54,16 +54,16 @@
 
 ## Tech Stack
 
-| 层                  | 库                                                           |
-| ------------------- | ------------------------------------------------------------ |
-| Telegram Bot        | `grammy` v1                                                  |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + Qwen 3.7 Flash / DeepSeek V4 Flash |
-| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway       |
-| Search / Extraction | `@tavily/ai-sdk`                                             |
-| Database            | `better-sqlite3`（统一 SQLite）                              |
-| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                              |
-| Runtime             | Node.js + TypeScript ESM                                     |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                                    |
+| 层                  | 库                                                     |
+| ------------------- | ------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                            |
+| AI / LLM            | `ai` v6 + GLM-4.7-FlashX via z.ai / DeepSeek V4 Flash  |
+| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                                       |
+| Database            | `better-sqlite3`（统一 SQLite）                        |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
+| Runtime             | Node.js + TypeScript ESM                               |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
 ## Project Layout
 
@@ -174,7 +174,7 @@ docker compose logs -f nyarbot
 | `BOT_USERNAME`                | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致） |
 | `TG_GROUP_ID`                 | ✅   | 目标群组 ID（bot 只在此群工作）              |
 | `TG_ADMIN_UID`                | ✅   | 管理员 Telegram 用户 ID                      |
-| `QWEN_API_KEY`                | ✅   | 千问 AI 平台 API Key                         |
+| `GLM_API_KEY`                 | ✅   | z.ai 海外 API Key                            |
 | `DEEPSEEK_API_KEY`            | ✅   | DeepSeek API Key                             |
 | `TAVILY_API_KEY`              | ✅   | Tavily Search API Key                        |
 | `CF_AIG_TOKEN`                | ✅   | Cloudflare AI Gateway Token                  |
@@ -236,7 +236,7 @@ English docs:
 ## Release Notes
 
 - 当前发布版本：[`1.0.0`](CHANGELOG.md)
-- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；DeepSeek 不可用时由 Gemini 3.5 Flash-Lite 接管主动/被动回复；Telegram 图片按真实字节识别 MIME，动画贴纸只安全读取缩略图；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，3.5 Flash-Lite 通读全文生成克制导读
+- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；GLM 初始回复不可用时由 Gemini 3.5 Flash-Lite 接管；Telegram 图片与媒体缩略图交给 Gemini 描述，视频贴纸不下载或转码；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，3.5 Flash-Lite 通读全文生成克制导读
 
 ## Disclaimer
 

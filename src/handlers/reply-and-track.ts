@@ -37,7 +37,7 @@ export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
     formatMarkdown = false,
     kind: HistoryEntryKind = "normal",
   ): Promise<void> {
-    const push = () => {
+    const push = async () => {
       dependencies.pushMessage(
         config.tgGroupId,
         "bot",
@@ -46,12 +46,12 @@ export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
         undefined,
         kind,
       );
-      dependencies
+      dependencies.touchBotActivity();
+      await dependencies
         .recordBotMessages({ messages: [text], kind: "bot_message" })
         .catch((err: unknown) => {
           logger.warn({ err }, "replyAndTrack: runtime bot event persist failed");
         });
-      dependencies.touchBotActivity();
     };
 
     if (formatMarkdown) {
@@ -62,7 +62,7 @@ export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
           htmlOpts.reply_parameters = { message_id: replyToMessageId };
         }
         await ctx.reply(formatted, htmlOpts);
-        push();
+        await push();
         return;
       } catch (err) {
         if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
@@ -72,7 +72,7 @@ export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
           );
           try {
             await ctx.reply(formatted, { parse_mode: "HTML" });
-            push();
+            await push();
             return;
           } catch (retryErr) {
             logger.warn(
@@ -109,7 +109,7 @@ export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
         return;
       }
     }
-    push();
+    await push();
   };
 }
 

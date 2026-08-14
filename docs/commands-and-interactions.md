@@ -2,23 +2,23 @@
 
 ## Slash Commands
 
-| Command                       | Who        | Description                                                            |
-| ----------------------------- | ---------- | ---------------------------------------------------------------------- |
-| `/help`                       | Anyone     | Show help text                                                         |
-| `/love`                       | Anyone     | Get affection scoring breakdown + tsundere response                    |
-| `/shock`                      | Anyone     | Zap the bot and trigger a shocked / frazzled reaction                  |
-| `/stroke`                     | Anyone     | Pet the bot; normal intensity is affectionate, excess may draw protest |
-| `/roll [NdM]`                 | Anyone     | Roll dice immediately, then queue a short AI reaction                  |
-| `/nighty`                     | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later             |
-| `/status`                     | Admin only | Show uptime, buffer size, memory user count                            |
-| `/reset`                      | Admin only | Clear the conversation buffer and runtime summary                      |
-| `/diary`                      | Admin only | Generate today's diary preview (private chat only)                     |
-| `/wordcloud [date]`           | Admin only | Generate a wordcloud preview for a specific date (private chat only)   |
-| `/diaryobs [date]`            | Admin only | List structured diary observations (private chat only)                 |
-| `/diaryshow <id>`             | Admin only | Show one structured diary observation (private chat only)              |
-| `/diaryedit <id> <json>`      | Admin only | Patch an observation with JSON (private chat only)                     |
-| `/diaryretract <id> [reason]` | Admin only | Retract an observation (private chat only)                             |
-| `/diaryregen [date]`          | Admin only | Regenerate a preview without saving or publishing (private chat)       |
+| Command                       | Who        | Description                                                          |
+| ----------------------------- | ---------- | -------------------------------------------------------------------- |
+| `/help`                       | Anyone     | Show help text                                                       |
+| `/love`                       | Anyone     | Get affection scoring breakdown + tsundere response                  |
+| `/shock`                      | Anyone     | Zap the bot; the reaction uses current conversation context          |
+| `/stroke`                     | Anyone     | Pet the bot; the reaction uses current conversation context          |
+| `/roll [NdM]`                 | Anyone     | Roll dice immediately, then queue a short AI reaction                |
+| `/nighty`                     | Anyone     | Say goodnight; bot sends a morning greeting 8+ hours later           |
+| `/status`                     | Admin only | Show uptime, buffer size, memory user count                          |
+| `/reset`                      | Admin only | Clear the conversation buffer and runtime summary                    |
+| `/diary`                      | Admin only | Generate today's diary preview (private chat only)                   |
+| `/wordcloud [date]`           | Admin only | Generate a wordcloud preview for a specific date (private chat only) |
+| `/diaryobs [date]`            | Admin only | List structured diary observations (private chat only)               |
+| `/diaryshow <id>`             | Admin only | Show one structured diary observation (private chat only)            |
+| `/diaryedit <id> <json>`      | Admin only | Patch an observation with JSON (private chat only)                   |
+| `/diaryretract <id> [reason]` | Admin only | Retract an observation (private chat only)                           |
+| `/diaryregen [date]`          | Admin only | Regenerate a preview without saving or publishing (private chat)     |
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 
@@ -29,7 +29,7 @@ Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 When a user @mentions the bot or replies to one of its messages, the full AI pipeline is triggered:
 
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
-2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
+2. **Model selection** — every text tier uses GLM-4.7-FlashX with thinking disabled; tier still controls prompting and retry/advisor policy.
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, simple/complex turns retry once; tech turns do not retry. The handler then tries to rescue a raw draft into real `send_message` output before falling back to a sticker.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
@@ -38,7 +38,7 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Special Context Records
 
-- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/stroke`, `/roll`, `/reset`, standalone morning greetings, and daily diary notifications.
+- Some bot outputs that do **not** originate from `send_message` are still written into the conversation buffer, such as `/love`, `/shock`, `/stroke`, `/roll`, `/reset`, standalone morning greetings, and daily diary notifications. `/shock` and `/stroke` run through the command-turn queue with the same persisted history/summary context as chat, and their replies finish runtime persistence before the next queued turn starts.
 - In XML history, these entries carry a `kind="..."` attribute so the model can treat them as real prior events rather than ordinary user chat lines.
 
 ### Images & Media
@@ -47,6 +47,7 @@ Before classification, the handler runs a lightweight local route so short chats
 - Context now includes raw Telegram references only (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media.
 - During **passive replies** (@mention/reply), the model can call `describeTelegramMedia` on demand when media content is actually needed.
 - During **proactive replies**, URL fetching remains disabled. Images attached to the newest response candidates may be prefetched and must be understood before the bot comments on them; older media is context-only.
+- Gemini 3.5 Flash-Lite describes Telegram images and media thumbnails; the text model receives the resulting description rather than visual input.
 - Telegram downloads prefer known JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, and HEIC byte signatures. If none matches, an `image/*` response header is accepted as fallback; payloads with neither are rejected.
 
 ### URLs
@@ -63,7 +64,7 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Stickers
 
-Incoming sticker emoji remains the lightweight default context and sticker descriptions are not persisted. On a triggered turn, WebM video stickers are looped into a 2.1-second MP4 and passed to Qwen. TGS animated stickers continue to use their Telegram thumbnail, and unsupported payloads are skipped.
+Incoming sticker emoji remains the lightweight default context and sticker descriptions are not persisted. Video stickers are never downloaded, transcoded, or understood as video. When visual context is needed, Gemini 3.5 Flash-Lite may describe Telegram's preview thumbnail; without one, the bot keeps only the emoji/lightweight marker.
 
 When answering, the LLM can respond with:
 

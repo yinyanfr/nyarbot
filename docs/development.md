@@ -56,15 +56,15 @@ Additional benefits:
 
 ### Why `generateText` instead of `generateObject` for classification?
 
-Classification asks Qwen for a tiny raw JSON object and validates it with Zod. Keeping this path schema-independent makes failure handling deterministic.
+Classification asks GLM-4.7-FlashX for a tiny raw JSON object and validates it with Zod. Keeping this path schema-independent makes failure handling deterministic.
 
-### Why `.chat()` instead of the default model factory?
+### Why the OpenAI chat model integration?
 
-Qwen uses the AI SDK Alibaba chat adapter. The optional DeepSeek advisor explicitly uses the OpenAI-compatible Chat Completions API.
+The text primary uses `@ai-sdk/openai` against z.ai's overseas OpenAI-compatible API. GLM-4.7-FlashX runs with thinking disabled; the optional DeepSeek advisor separately uses OpenAI-compatible Chat Completions with thinking enabled.
 
 ### Why two-stage proactive probe?
 
-Running a full turn for every proactive check is wasteful. The probe gate uses Qwen 3.7 Flash with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full turn runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels output when new activity arrives.
+Running a full turn for every proactive check is wasteful. The probe gate uses GLM-4.7-FlashX with thinking disabled, a simplified prompt, and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full turn runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels output when new activity arrives.
 
 ### Why `formatForTelegramHtml`?
 
@@ -143,13 +143,13 @@ This avoids the previous monkey-patching of `logger.error`/`.warn` and the fragi
 
 ### On-demand media handling
 
-Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead of eagerly describing media. Triggered turns inspect full photos or thumbnails on demand; candidate images may also be prefetched for proactive turns. Downloads are MIME-sniffed from bytes, animated sticker payloads are never passed as images, and successful descriptions use only a bounded in-process session cache.
+Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead of eagerly describing media. Gemini 3.5 Flash-Lite inspects full Telegram photos or media thumbnails on demand and may prefetch candidate images for proactive turns. Video stickers are never downloaded, transcoded, or passed as video; only a Telegram preview thumbnail may be described, otherwise the emoji/lightweight marker is retained. Downloads are MIME-sniffed from bytes, and successful descriptions use only a bounded in-process session cache.
 
 ### URL fetching (three-tier)
 
 `fetchUrlContent()` in `ai.ts` uses a three-tier strategy:
 
-1. **Twitter/X** → fxtwitter API (free, no auth) with batch Qwen photo descriptions
+1. **Twitter/X** → fxtwitter API (free, no auth) with batch Gemini 3.5 Flash-Lite photo descriptions
 2. **Direct fetch** → HTML title/meta extraction
 3. **Tavily Extract** → fallback
 

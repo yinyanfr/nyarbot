@@ -56,15 +56,15 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` �
 
 ### 为什么分类用 `generateText` 而不是 `generateObject`？
 
-分类要求 Qwen 返回一个很小的原始 JSON 对象，再用 Zod 校验；这一无 schema 依赖路径便于确定性处理失败。
+分类要求 GLM-4.7-FlashX 返回一个很小的原始 JSON 对象，再用 Zod 校验；这一无 schema 依赖路径便于确定性处理失败。
 
-### 为什么用 `.chat()` 而不是默认的模型工厂方法？
+### 为什么使用 OpenAI chat model 集成？
 
-Qwen 使用 AI SDK Alibaba chat adapter；可选 DeepSeek advisor 显式使用 OpenAI-compatible Chat Completions API。
+文本主模型通过 `@ai-sdk/openai` 接入 z.ai 海外 OpenAI-compatible API。GLM-4.7-FlashX 关闭思考；可选 DeepSeek advisor 另行使用 OpenAI-compatible Chat Completions 并开启思考。
 
 ### 为什么用两阶段主动探测？
 
-每次主动检查都运行完整 turn 很浪费。探测门使用 Qwen 3.7 Flash 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整 turn。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新活动时取消结果。
+每次主动检查都运行完整 turn 很浪费。探测门使用关闭思考的 GLM-4.7-FlashX，配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整 turn。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新活动时取消结果。
 
 ### 为什么用 `formatForTelegramHtml`？
 
@@ -143,13 +143,13 @@ Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳�
 
 ### 按需媒体处理
 
-Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描述媒体。被动触发轮次按需查看完整图片或缩略图，主动轮次也可预取最新候选图片。下载文件先按字节识别 MIME；动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
+Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描述媒体。Gemini 3.5 Flash-Lite 在被动触发轮次按需查看完整图片或媒体缩略图，主动轮次也可预取最新候选图片。视频贴纸不会下载、转码或作为视频发送；只在需要时描述 Telegram 预览缩略图，否则保留 emoji / 轻量标记。下载文件先按字节识别 MIME；成功描述只进入有容量上限的进程内会话缓存。
 
 ### URL 抓取（三级策略）
 
 `fetchUrlContent()`（`ai.ts`）使用三级策略：
 
-1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Qwen 配图描述
+1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Gemini 3.5 Flash-Lite 配图描述
 2. **直接抓取** → HTML title/meta 提取
 3. **Tavily Extract** → 回退
 

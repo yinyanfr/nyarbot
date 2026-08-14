@@ -43,12 +43,12 @@ handlers/index.ts (setupHandlers)
     │     └─ forwarded messages tagged for leaderboard-only counting
     ├─ Buffer push (conversation-buffer.ts; raw media/link markers)
     ├─ Command routing (match-command.ts)
-    │     └─ /help, /love, /shock, /stroke
+    │     └─ /help, /love; contextual /shock and /stroke command turns
     ├─ Morning greeting logic → generateMorningGreeting()
     ├─ Trigger detection (@mention / reply-to-bot)
     ├─ Local routing (short chat / tech / current-fact)
     ├─ AI classification (classifyMessage)
-    │     └─ simple / complex / tech → Qwen 3.7 Flash
+    │     └─ simple / complex / tech → GLM-4.7-FlashX, thinking disabled
     ├─ Runtime scheduling (group-runtime.ts)
     │     ├─ Persist event in SQLite, dedup, rate-limit, debounce, running lock
     │     └─ Build summary + recent events context
@@ -58,9 +58,9 @@ handlers/index.ts (setupHandlers)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
 │     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
-    │     ├─ Direct multimodal input plus on-demand tools; session-only cache
-    │     │     ├─ Photos enter the original user message; video stickers are looped to 2.1-second MP4s for Qwen
-    │     │     ├─ Other videos and TGS/static stickers use thumbnails
+    │     ├─ On-demand Gemini descriptions plus session-only cache
+    │     │     ├─ Telegram photos, media thumbnails, and tweet photos are described by Gemini 3.5 Flash-Lite
+    │     │     ├─ Video stickers use only Telegram preview thumbnails when needed; otherwise emoji/lightweight markers
     │     │     └─ Known signatures win; image/* headers are accepted as fallback
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search
     │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
@@ -121,19 +121,20 @@ If all retries still dismiss:
 
 ## AI Model Routing
 
-| Provider/model                                   | Usage                                                                            |
-| ------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Qwen 3.7 Flash, thinking disabled                | All chat tiers, tools, background tasks, Telegram/tweet multimodal understanding |
-| DeepSeek v4 Flash, thinking enabled              | Optional `startSubagent` advisor                                                 |
-| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | Qwen reply fallback, YouTube understanding, full-diary notification copy         |
-| Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                            |
+| Provider/model                                   | Usage                                                                                                                                |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| GLM-4.7-FlashX via z.ai, thinking disabled       | All text chat tiers, classification, probe, compaction, memory compression, tools, and text/background tasks                         |
+| DeepSeek v4 Flash, thinking enabled              | Optional `startSubagent` advisor                                                                                                     |
+| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | Telegram image/media-thumbnail and tweet-photo descriptions, GLM reply fallback, YouTube understanding, full-diary notification copy |
+| Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                                                                                |
 
 ### Provider boundaries
 
-- **Qwen 3.7 Flash** receives text and visual media together and explicitly disables thinking for daily chat.
+- **GLM-4.7-FlashX** uses z.ai's overseas OpenAI-compatible API through `@ai-sdk/openai`, explicitly disables thinking, and owns all text/tool/background work.
 - **DeepSeek V4 Flash Thinking** is only an optional advisor; DeepSeek V4 Pro is not used.
-- **Gemini 3.5 Flash-Lite** remains the reply fallback, YouTube reader, and diary notice writer; **Gemini 3.1 Pro Preview** writes diaries.
-- Provider selection is sticky after a tool call. Initial Qwen failures can fall back to Gemini for network/timeouts, auth/rate-limit, and server errors.
+- **Gemini 3.5 Flash-Lite** describes Telegram images/media thumbnails and tweet photos and remains the reply fallback, YouTube reader, and diary notice writer; **Gemini 3.1 Pro Preview** writes diaries.
+- Video stickers are never downloaded, transcoded, or understood as video. Gemini may inspect Telegram's preview thumbnail when needed; otherwise only emoji/a lightweight marker is retained.
+- Provider selection is sticky after a tool call. Initial GLM failures can fall back to Gemini for network/timeouts, auth/rate-limit, and server errors.
 
 ## Local Routing
 
@@ -235,7 +236,7 @@ A lean variant for the proactive probe gate — persona only, no per-user memori
 
 If cooldown has elapsed, the checker finds the latest bot output and treats only later user messages as reply candidates. Older messages remain reference context. It refuses to run while ingestion or command turns are active, snapshots the runtime activity revision, and rechecks it after the probe, before sending, and between multiple messages.
 
-1. **Phase 1 — Probe**: `probeGate()` runs the cheap model (`flashNoThink`) with `buildProbeSystemPrompt()` and lightweight `dismiss`/`send_message` tools. If probe dismisses or activity changes, stop here.
+1. **Phase 1 — Probe**: `probeGate()` runs GLM-4.7-FlashX with thinking disabled, `buildProbeSystemPrompt()`, and lightweight `dismiss`/`send_message` tools. If probe dismisses or activity changes, stop here.
 2. **Phase 2 — Full model**: If probe activates, `generateAiTurn()` runs with persistent tools disabled and candidate-image understanding conditionally available. Any new user or bot activity invalidates the result.
 
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.

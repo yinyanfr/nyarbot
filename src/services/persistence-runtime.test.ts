@@ -14,7 +14,7 @@ Object.assign(process.env, {
   BOT_API_KEY: "test-token",
   TG_ADMIN_UID: "1",
   TG_GROUP_ID: "-100",
-  QWEN_API_KEY: "test",
+  GLM_API_KEY: "test",
   DEEPSEEK_API_KEY: "test",
   TAVILY_API_KEY: "test",
   CF_AIG_TOKEN: "test",

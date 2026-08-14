@@ -43,12 +43,12 @@ handlers/index.ts（setupHandlers）
     │     └─ 转发消息打标，仅参与活跃榜不参与词云正文
     ├─ 缓冲区推送（conversation-buffer.ts；原始媒体/链接标记）
     ├─ 命令路由（match-command.ts）
-    │     └─ /help、/love、/shock、/stroke
+    │     └─ /help、/love；带会话上下文的 /shock、/stroke command turn
     ├─ 早安逻辑 → generateMorningGreeting()
     ├─ 触发检测（@提及 / 回复bot）
     ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
-    │     └─ simple / complex / tech → Qwen 3.7 Flash
+    │     └─ simple / complex / tech → GLM-4.7-FlashX，关闭思考
     ├─ Runtime 调度（group-runtime.ts）
     │     ├─ 事件写入 SQLite、去重、限流、debounce、running lock
     │     └─ 构造 summary + recent events 上下文
@@ -58,8 +58,9 @@ handlers/index.ts（setupHandlers）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
 │     │           describeTelegramMedia、fetchUrlContent、readVideo、startSubagent
-    │     ├─ 富内容按需读取；只做会话缓存，不做持久化图片缓存
-    │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
+    │     ├─ Gemini 按需描述富内容；只做会话缓存，不做持久化图片缓存
+    │     │     ├─ Telegram 图片、媒体缩略图和推文配图由 Gemini 3.5 Flash-Lite 描述
+    │     │     ├─ 视频贴纸只在需要时使用 Telegram 预览缩略图，否则保留 emoji / 轻量标记
     │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
     │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
     │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
@@ -120,19 +121,20 @@ type AiTurnResult =
 
 ## AI 模型路由
 
-| Provider/model                                  | 用途                                                   |
-| ----------------------------------------------- | ------------------------------------------------------ |
-| Qwen 3.7 Flash，无思考                          | 全部对话 tier、工具、后台任务、Telegram/推文多模态理解 |
-| DeepSeek v4 Flash，有思考                       | 可选 `startSubagent` advisor                           |
-| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | Qwen 回复回退、YouTube 理解、完整日记导读              |
-| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                     |
+| Provider/model                                  | 用途                                                                             |
+| ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| GLM-4.7-FlashX（z.ai），关闭思考                | 全部文本对话 tier、分类、探测、compaction、记忆压缩、工具和文本/后台任务         |
+| DeepSeek v4 Flash，有思考                       | 可选 `startSubagent` advisor                                                     |
+| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | Telegram 图片/媒体缩略图与推文配图描述、GLM 回复回退、YouTube 理解、完整日记导读 |
+| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                                               |
 
-### 为什么用两个提供商？
+### Provider 边界
 
-- **Qwen 3.7 Flash** 同时接收文本和视觉媒体，日常对话显式关闭思考。
+- **GLM-4.7-FlashX** 通过 `@ai-sdk/openai` 接入 z.ai 海外 OpenAI-compatible API，显式关闭思考，负责全部文本、工具和后台任务。
 - **DeepSeek V4 Flash Thinking** 仅作为可选 advisor；项目不使用 DeepSeek V4 Pro。
-- **Gemini 3.5 Flash-Lite** 保留回复回退、YouTube 和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
-- 工具调用后 provider 保持粘性；Qwen 首次调用的网络、认证、限流和服务端错误可回退到 Gemini。
+- **Gemini 3.5 Flash-Lite** 负责 Telegram 图片/媒体缩略图与推文配图描述，并保留回复回退、YouTube 和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- 视频贴纸不会下载、转码或作为视频理解；需要时由 Gemini 查看 Telegram 预览缩略图，否则只保留 emoji / 轻量标记。
+- 工具调用后 provider 保持粘性；GLM 首次调用的网络、认证、限流和服务端错误可回退到 Gemini。
 
 ## 本地路由
 
@@ -234,7 +236,7 @@ type AiTurnResult =
 
 冷却结束后，checker 先找到最近一次 bot 输出，只把其后的用户消息当作可回复候选，之前的历史只能参考。摄取或命令轮次运行时不启动主动回复，并记录 activity revision，在 probe 后、发送前和多消息之间重复校验。
 
-1. **阶段一——探测**：`probeGate()` 使用廉价模型（`flashNoThink`）配合 `buildProbeSystemPrompt()` 和轻量 `dismiss`/`send_message` 工具。若探测沉默或活动已变化，停止。
+1. **阶段一——探测**：`probeGate()` 使用关闭思考的 GLM-4.7-FlashX，配合 `buildProbeSystemPrompt()` 和轻量 `dismiss`/`send_message` 工具。若探测沉默或活动已变化，停止。
 2. **阶段二——完整模型**：若探测激活，`generateAiTurn()` 关闭持久化工具，仅按候选图片情况开放视觉理解；任何新的用户或 bot 活动都会使结果失效。
 
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。

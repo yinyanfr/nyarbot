@@ -25,6 +25,14 @@ interface FixtureOptions {
   accepted?: boolean;
   ignoredReason?: string;
   user?: User;
+  runtimeContext?:
+    | {
+        summary: string;
+        summaryCursorTs: number;
+        recentEvents: never[];
+        recentEventsText: string;
+      }
+    | Error;
   overrides?: Partial<HandlerDependencies>;
 }
 
@@ -61,6 +69,8 @@ function fixture(options: FixtureOptions = {}) {
     getOrCreateUser: async () => user,
     extractContent: async () => ({ urls: [], mediaRefs: [], stickerEmoji: "" }),
     replyAndTrack: async (...args: unknown[]) => void replies.push(args),
+    getHistory: () => [],
+    formatHistoryAsContext: () => "buffer context",
     pushMessage: (...args: unknown[]) => void pushed.push(args),
     generateLoveResponse: async (...args: unknown[]) => {
       generated.push({ kind: "love", args });
@@ -108,6 +118,17 @@ function fixture(options: FixtureOptions = {}) {
           allowMediaTools: true,
           ...(options.ignoredReason ? { ignoredReason: options.ignoredReason } : {}),
         };
+      },
+      loadContext: async () => {
+        if (options.runtimeContext instanceof Error) throw options.runtimeContext;
+        return (
+          options.runtimeContext ?? {
+            summary: "group summary",
+            summaryCursorTs: 1,
+            recentEvents: [],
+            recentEventsText: "runtime reaction context",
+          }
+        );
       },
       schedulePassiveTurn: (turn: { label: string; execute(): Promise<void> }) =>
         scheduled.push(turn),
@@ -288,12 +309,28 @@ test("public commands reply and short-circuit AI dispatch", async (t) => {
       }),
     );
     assert.deepEqual(
+      setup.scheduled.map((turn) => turn.label),
+      ["shock:10", "stroke:10"],
+    );
+    await setup.scheduled[0]!.execute();
+    await setup.scheduled[1]!.execute();
+    assert.deepEqual(
       setup.generated.map((item) => item.kind),
       ["love", "shock", "stroke"],
     );
-    assert.deepEqual(setup.generated[1]?.args[1], { intensity: 20, extraText: "hello" });
-    assert.deepEqual(setup.generated[2]?.args[1], { extraText: "gently" });
-    assert.equal(setup.scheduled.length, 0);
+    assert.deepEqual(setup.generated[1]?.args[1], {
+      intensity: 20,
+      extraText: "hello",
+      recentConversation: "runtime reaction context",
+      recentMembers: [{ uid: "2", name: "Alice" }],
+      conversationSummary: "group summary",
+    });
+    assert.deepEqual(setup.generated[2]?.args[1], {
+      extraText: "gently",
+      recentConversation: "runtime reaction context",
+      recentMembers: [{ uid: "2", name: "Alice" }],
+      conversationSummary: "group summary",
+    });
   });
 });
 
@@ -432,6 +469,9 @@ test("edited commands dispatch stroke, shock, love, and contain wordcloud storag
       entities: [{ type: "bot_command", offset: 0, length: 7 }],
     }),
   );
+  assert.equal(setup.ingested.length, 1);
+  assert.equal(setup.scheduled[0]?.label, "stroke:10");
+  await setup.scheduled[0]!.execute();
   await setup.bot.handleUpdate(
     editedUpdate({
       updateId: 2,
@@ -449,11 +489,26 @@ test("edited commands dispatch stroke, shock, love, and contain wordcloud storag
       ],
     }),
   );
+  assert.equal(setup.ingested.length, 3);
+  assert.equal(setup.scheduled[1]?.label, "shock:10");
+  await setup.scheduled[1]!.execute();
   assert.deepEqual(
     setup.generated.map((item) => item.kind),
     ["stroke", "love", "shock"],
   );
-  assert.equal(setup.scheduled.length, 0);
+  assert.equal((setup.ingested[0] as { triggered?: boolean }).triggered, true);
+});
+
+test("reaction context falls back to the conversation buffer when runtime loading fails", async () => {
+  const setup = fixture({ runtimeContext: new Error("database unavailable") });
+  await setup.bot.handleUpdate(
+    update({ text: "/shock", entities: [{ type: "bot_command", offset: 0, length: 6 }] }),
+  );
+  await setup.scheduled[0]!.execute();
+  assert.equal(
+    (setup.generated[0]?.args[1] as { recentConversation?: string }).recentConversation,
+    "buffer context",
+  );
 });
 
 test("group wordcloud persistence stores forwarded messages and contains storage rejection", async () => {

@@ -12,7 +12,7 @@
 | `BOT_PERSONA_READING`        | ❌   | 人设读音标注（默认：`はるみ にゃる`）                                       |
 | `TG_ADMIN_UID`               | ✅   | 管理员 ID，用于私聊状态/重置、日记观察管理和词云命令                        |
 | `TG_GROUP_ID`                | ✅   | 目标群组 ID；其他聊天被忽略，但支持的管理员私聊命令除外                     |
-| `QWEN_API_KEY`               | ✅   | 千问 AI 平台 API Key，用于主对话与多模态理解                                |
+| `GLM_API_KEY`                | ✅   | z.ai 海外 API Key，用于主文本对话与后台任务                                 |
 | `DEEPSEEK_API_KEY`           | ✅   | DeepSeek API key（[platform.deepseek.com](https://platform.deepseek.com)）  |
 | `TAVILY_API_KEY`             | ✅   | Tavily API key，用于网页搜索和 URL 提取（[tavily.com](https://tavily.com)） |
 | `CF_AIG_TOKEN`               | ✅   | Cloudflare AI Gateway token，用于 Gemini 调用                               |
@@ -34,7 +34,7 @@
 其他可选变量（带默认值）：
 
 - `DEEPSEEK_BASE_URL`（`https://api.deepseek.com`）
-- `QWEN_BASE_URL`（`https://dashscope.aliyuncs.com/compatible-mode/v1`）
+- `GLM_BASE_URL`（`https://api.z.ai/api/paas/v4/`）
 - `CF_AIG_GATEWAY`（`gem`）
 - `BILIBILI_REQUEST_TIMEOUT_MS`（`10000`）、`BILIBILI_RATE_LIMIT_MS`（`500`）、
   `BILIBILI_CACHE_SIZE`（`100`）
@@ -92,22 +92,22 @@
 
 ## 对话模型
 
-`qwen3.7-flash` 负责所有对话 tier、分类、主动探测、压缩、记忆整理和 Telegram/推文视觉理解，并显式发送 `enable_thinking: false`。Telegram 图片与原消息文本在同一条 user message 中发送；WebM 视频贴纸会先循环转为 2.1 秒 MP4 再交给 Qwen，普通视频和 TGS 贴纸仍使用 Telegram 缩略图。
+项目通过 `@ai-sdk/openai` 接入 z.ai 海外 OpenAI-compatible API。`glm-4.7-flashx` 关闭思考，负责所有文本对话 tier、分类、主动探测、compaction、记忆压缩、工具调用和其他文本/后台任务。
 
-可选 `startSubagent` advisor 仅使用开启思考的 `deepseek-v4-flash`；项目不再使用 DeepSeek V4 Pro。Qwen 首次调用遇到网络、超时、认证、限流或 5xx 错误时可回退到 Gemini 3.5 Flash-Lite，工具调用开始后不跨 provider 切换。
+可选 `startSubagent` advisor 仅使用开启思考的 `deepseek-v4-flash`；项目不再使用 DeepSeek V4 Pro。GLM 首次调用遇到网络、超时、认证、限流或 5xx 错误时可回退到 Gemini 3.5 Flash-Lite，工具调用开始后不跨 provider 切换。
 
 ## Cloudflare AI Gateway
 
 Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 Qwen 不可用时的回复回退和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
+- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 Telegram 图片/媒体缩略图描述、推文配图描述、GLM 不可用时的回复回退和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
 - `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
 
 YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-lite`。由于 gateway wrapper 不会声明原生 URL 支持，这一路径使用受限的 AI SDK URL passthrough，把公开 YouTube URL 保留为 Gemini `fileData`。Bot 不会直连 Google API，也不会下载视频；每次调用只读取一个视频。
 
 Bilibili 读取支持 BV 链接、遗留的 `av+数字` 链接和 `b23.tv` 短链接。AV ID 会先通过 Bilibili 公开 view API 转换成 BV ID，再由锁定版本的本地 `@xzxzzx/bilibili-mcp` 子进程调用 `get_video_transcript` 和 `get_video_metadata`。不会暴露下载或账号写操作；字幕不可用时仅返回元数据。公开元数据通常不要求 Cookie，但可靠字幕读取一般需要完整登录凭据。
 
-媒体描述只做当前进程会话缓存，不写入 SQLite。
+Telegram 图片和可用媒体缩略图（包括视频贴纸预览缩略图）由 Gemini 3.5 Flash-Lite 描述，只做当前进程会话缓存。视频贴纸不会下载、转码或作为视频理解；没有可用预览缩略图时仅保留 emoji / 轻量标记。描述不写入 SQLite。
 
 ## 工具调用架构
 

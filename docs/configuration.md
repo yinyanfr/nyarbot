@@ -12,7 +12,7 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 | `BOT_PERSONA_READING`        | ❌       | Persona reading annotation (default: `はるみ にゃる`)                               |
 | `TG_ADMIN_UID`               | ✅       | Admin user ID for private status/reset, diary/observation, and wordcloud commands   |
 | `TG_GROUP_ID`                | ✅       | Target group ID; other chats are ignored except supported admin DMs                 |
-| `QWEN_API_KEY`               | ✅       | Qwen AI Platform API key for primary chat and multimodal understanding              |
+| `GLM_API_KEY`                | ✅       | z.ai overseas API key for primary text chat and background tasks                    |
 | `DEEPSEEK_API_KEY`           | ✅       | DeepSeek API key ([platform.deepseek.com](https://platform.deepseek.com))           |
 | `TAVILY_API_KEY`             | ✅       | Tavily API key for web search and URL extraction ([tavily.com](https://tavily.com)) |
 | `CF_AIG_TOKEN`               | ✅       | Cloudflare AI Gateway token for Gemini calls                                        |
@@ -34,7 +34,7 @@ All configuration is via `.env` (gitignored). Template at `.env.example`.
 Additional optional envs with defaults:
 
 - `DEEPSEEK_BASE_URL` (`https://api.deepseek.com`)
-- `QWEN_BASE_URL` (`https://dashscope.aliyuncs.com/compatible-mode/v1`)
+- `GLM_BASE_URL` (`https://api.z.ai/api/paas/v4/`)
 - `CF_AIG_GATEWAY` (`gem`)
 - `BILIBILI_REQUEST_TIMEOUT_MS` (`10000`), `BILIBILI_RATE_LIMIT_MS` (`500`),
   `BILIBILI_CACHE_SIZE` (`100`)
@@ -92,22 +92,22 @@ Production has no Firebase dependency or runtime credential mount. The gitignore
 
 ## Chat Models
 
-`qwen3.7-flash` is the primary model for every conversation tier, classification, proactive probing, compaction, memory compression, and Telegram/tweet vision. Requests explicitly set `enable_thinking: false`. Telegram photos are included in the same user message as its text. WebM video stickers are looped into a 2.1-second MP4 before being sent to Qwen; ordinary videos and TGS stickers continue to use Telegram thumbnails.
+`glm-4.7-flashx` is called through z.ai's overseas OpenAI-compatible API using `@ai-sdk/openai`. With thinking disabled, it handles every text conversation tier, classification, proactive probing, compaction, memory compression, tools, and other text/background tasks.
 
-The optional `startSubagent` advisor uses only `deepseek-v4-flash` with thinking enabled. The project does not use DeepSeek V4 Pro. Network/timeouts, auth/rate-limit errors, and 5xx responses can switch an initial Qwen reply to Gemini 3.5 Flash-Lite; a reply never changes provider after a tool call.
+The optional `startSubagent` advisor uses only `deepseek-v4-flash` with thinking enabled. The project does not use DeepSeek V4 Pro. Network/timeouts, auth/rate-limit errors, and 5xx responses can switch an initial GLM reply to Gemini 3.5 Flash-Lite; a reply never changes provider after a tool call.
 
 ## Cloudflare AI Gateway
 
 Gemini calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
-- `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-Qwen reply fallback and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
+- `gemini-3.5-flash-lite` through the native Google provider adapter: Telegram image/media-thumbnail descriptions, tweet photo descriptions, unavailable-GLM reply fallback, and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
 - `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
 
 YouTube video understanding also uses Cloudflare AI Gateway with `gemini-3.5-flash-lite`. A restricted AI SDK URL-passthrough hook preserves the public YouTube URL as Gemini `fileData` even though the gateway wrapper does not advertise native URL support. The bot process does not contact Google directly or download the video, and each call accepts one video.
 
 Bilibili reading accepts BV URLs, legacy `av<number>` URLs, and `b23.tv` short links. Legacy AV IDs are resolved to BV IDs through Bilibili's public view API before the pinned local `@xzxzzx/bilibili-mcp` process calls only `get_video_transcript` and `get_video_metadata`. No download or account mutation tools are exposed. If subtitles are unavailable, the result contains metadata only. Login cookies are optional for public metadata but normally required for reliable subtitles.
 
-Media descriptions are cached only in-process for the current session. They are not persisted in SQLite.
+Telegram images and available media thumbnails, including video-sticker preview thumbnails, are described by Gemini 3.5 Flash-Lite and cached only in-process for the current session. Video stickers are never downloaded, transcoded, or understood as video; without a usable preview thumbnail they remain emoji/lightweight markers. Descriptions are not persisted in SQLite.
 
 ## Tool-Call Architecture
 

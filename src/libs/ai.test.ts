@@ -27,7 +27,7 @@ type GenerateCall = Record<string, unknown> & {
 };
 
 const models = Object.fromEntries(
-  ["qwenFast", "advisorThink", "replyQwenFast", "geminiFlashLite"].map((name) => [
+  ["glmFast", "advisorThink", "replyGlmFast", "geminiFlashLite"].map((name) => [
     name,
     { modelId: name, provider: "test" },
   ]),
@@ -91,7 +91,7 @@ describe("classification and lightweight generators", () => {
       tier: "tech",
       needsSearch: true,
     });
-    assert.equal(valid.calls[0]?.model, models.qwenFast);
+    assert.equal(valid.calls[0]?.model, models.glmFast);
     assert.deepEqual(await classifyMessage("x", scripted([() => result("bad")]).dependencies), {
       tier: "simple",
       needsSearch: false,
@@ -114,23 +114,49 @@ describe("classification and lightweight generators", () => {
       () => result("早呀"),
       () => ({ ...result("<回应>喜欢你</回应>"), finishReason: "length" }),
       (call) => {
-        assert.match(String(call.prompt), /电击器坏了/);
+        const prompt = String(call.prompt);
+        assert.match(prompt, /电击器坏了/);
+        assert.match(prompt, /conversation_summary_untrusted/);
+        assert.match(prompt, /刚才猫娘打翻了杯子/);
+        assert.match(prompt, /喜欢 TypeScript/);
+        assert.match(prompt, /旁观者/);
         return result("<b>没电</b>");
       },
       (call) => {
-        assert.match(String(call.prompt), /快把毛撸秃了/);
+        const prompt = String(call.prompt);
+        assert.match(prompt, /快把毛撸秃了/);
+        assert.match(prompt, /刚才猫娘帮了大忙/);
         return result("呼噜");
       },
       () => ({ ...result("摘要"), usage: { promptTokens: 5, completionTokens: 2 } }),
       (call) => {
-        assert.equal(call.model, models.qwenFast);
+        assert.equal(call.model, models.geminiFlashLite);
         return result("图像描述");
       },
     ]);
     assert.equal(await generateMorningGreeting(user, fake.dependencies), "早呀");
     assert.equal(await generateLoveResponse(user, fake.dependencies), "喜欢你");
-    assert.equal(await generateShockResponse(user, { intensity: 201 }, fake.dependencies), "没电");
-    assert.equal(await generateStrokeResponse(user, { intensity: 201 }, fake.dependencies), "呼噜");
+    assert.equal(
+      await generateShockResponse(
+        user,
+        {
+          intensity: 201,
+          recentConversation: "刚才猫娘打翻了杯子",
+          recentMembers: [{ uid: "2", name: "旁观者" }],
+          conversationSummary: "今天大家在客厅聊天",
+        },
+        fake.dependencies,
+      ),
+      "没电",
+    );
+    assert.equal(
+      await generateStrokeResponse(
+        user,
+        { intensity: 201, recentConversation: "刚才猫娘帮了大忙" },
+        fake.dependencies,
+      ),
+      "呼噜",
+    );
     assert.deepEqual(
       await generateConversationCompaction({
         previousSummary: "",
@@ -224,9 +250,9 @@ describe("classification and lightweight generators", () => {
 describe("main turn architecture", () => {
   test("routes tiers, preserves stable tools, token limits and caller abort", async () => {
     for (const [tier, expectedModel, expectedTokens] of [
-      ["simple", models.replyQwenFast, 200],
-      ["complex", models.replyQwenFast, 500],
-      ["tech", models.replyQwenFast, undefined],
+      ["simple", models.replyGlmFast, 200],
+      ["complex", models.replyGlmFast, 500],
+      ["tech", models.replyGlmFast, undefined],
     ] as const) {
       const fake = scripted([() => result()]);
       const controller = new AbortController();
@@ -493,16 +519,18 @@ describe("main turn architecture", () => {
     assert.equal(videos, 1);
   });
 
-  test("prefetches search and sends the original image in the main user message", async () => {
+  test("prefetches search and Gemini image context before the GLM call", async () => {
     const fake = scripted([
+      (call) => {
+        assert.equal(call.model, models.geminiFlashLite);
+        return result("画面里有 <猫> & 字");
+      },
       async (call) => {
         const prompt = JSON.stringify(call.messages);
         assert.match(prompt, /prefetched_web_search/);
-        const messages = call.messages as {
-          content: { type: string; image?: string; text?: string }[];
-        }[];
-        assert.equal(messages[0]?.content[1]?.type, "image");
-        assert.equal(messages[0]?.content[1]?.image, "data:image/png;base64,eA==");
+        assert.match(prompt, /prefetched_media/);
+        assert.match(prompt, /&lt;猫&gt; &amp; 字/);
+        assert.equal(call.model, models.replyGlmFast);
         await runTool(call, "send_message", { text: "看到了" });
         return result("", ["send_message"]);
       },
@@ -525,72 +553,132 @@ describe("main turn architecture", () => {
       resolveTelegramFileAsDataUrl: async () => "data:image/png;base64,eA==",
     });
     assert.equal(response.action, "send");
-    assert.equal(fake.calls.length, 1);
-    assert.equal(fake.calls[0]?.model, models.replyQwenFast);
+    assert.equal(fake.calls.length, 2);
   });
 
-  test("fails image understanding closed when original media cannot be resolved", async () => {
-    for (const resolver of [
-      async () => "data:application/octet-stream;base64,eA==",
-      async () => null,
-    ]) {
-      const fake = scripted([() => result()]);
+  test("reuses prefetched media descriptions across repeated turns", async () => {
+    const fake = scripted([() => result("缓存里的猫"), () => result(), () => result()]);
+    let downloads = 0;
+    const options = {
+      userMessage: "看看图",
+      allowRichContentTools: true,
+      mediaRefs: [{ type: "image" as const, source: "current" as const, fileId: "same-image" }],
+      resolveTelegramFileAsDataUrl: async () => {
+        downloads++;
+        return "data:image/png;base64,eA==";
+      },
+    };
+
+    await turn(fake.dependencies, options);
+    await turn(fake.dependencies, options);
+
+    assert.equal(downloads, 1);
+    assert.deepEqual(
+      fake.calls.map((call) => call.model),
+      [models.geminiFlashLite, models.replyGlmFast, models.replyGlmFast],
+    );
+    assert.match(JSON.stringify(fake.calls[2]?.messages), /缓存里的猫/);
+  });
+
+  test("caches failed media descriptions across retries", async () => {
+    const fake = scripted([
+      () => Promise.reject(new Error("vision unavailable")),
+      () => result(),
+      () => result(),
+    ]);
+    let downloads = 0;
+    const options = {
+      userMessage: "看看图",
+      allowRichContentTools: true,
+      mediaRefs: [{ type: "image" as const, source: "current" as const, fileId: "failed-image" }],
+      resolveTelegramFileAsDataUrl: async () => {
+        downloads++;
+        return "data:image/png;base64,eA==";
+      },
+    };
+
+    assert.equal((await turn(fake.dependencies, options)).action, "dismiss");
+    assert.equal((await turn(fake.dependencies, options)).action, "dismiss");
+    assert.equal(downloads, 1);
+    assert.deepEqual(
+      fake.calls.map((call) => call.model),
+      [models.geminiFlashLite, models.replyGlmFast, models.replyGlmFast],
+    );
+  });
+
+  test("bounds sequential media prefetch and preserves the main model budget", async (t) => {
+    let now = 1_000;
+    t.mock.method(Date, "now", () => now);
+    const fake = scripted([
+      (call) => {
+        assert.equal((call.timeout as { totalMs: number }).totalMs, 45_000);
+        now += 50_000;
+        return result("第一张图");
+      },
+      (call) => {
+        assert.equal((call.timeout as { totalMs: number }).totalMs, 20_000);
+        now += 19_000;
+        return result("第二张图");
+      },
+      (call) => {
+        assert.equal((call.timeout as { totalMs: number }).totalMs, 21_000);
+        return result();
+      },
+    ]);
+
+    await turn(fake.dependencies, {
+      userMessage: "比较这两张图",
+      allowRichContentTools: true,
+      mediaRefs: [
+        { type: "image", source: "current", fileId: "first-image" },
+        { type: "image", source: "reply_to", fileId: "second-image" },
+      ],
+      resolveTelegramFileAsDataUrl: async () => "data:image/png;base64,eA==",
+    });
+
+    assert.equal(fake.calls[2]?.model, models.replyGlmFast);
+  });
+
+  test("fails image understanding closed for unsupported or failed media", async () => {
+    for (const [index, testCase] of [
+      {
+        resolver: async () => "data:application/octet-stream;base64,eA==",
+        scripts: [() => result()],
+      },
+      {
+        resolver: async () => "data:image/png;base64,eA==",
+        scripts: [() => Promise.reject(new Error("vision down")), () => result()],
+      },
+    ].entries()) {
+      const fake = scripted(testCase.scripts);
       const response = await turn(fake.dependencies, {
         userMessage: "看看图",
         allowRichContentTools: true,
-        mediaRefs: [{ type: "image", source: "current", fileId: `image-${fake.calls.length}` }],
-        resolveTelegramFileAsDataUrl: resolver,
+        mediaRefs: [{ type: "image", source: "current", fileId: `failed-image-${index}` }],
+        resolveTelegramFileAsDataUrl: testCase.resolver,
       });
       assert.equal(response.action, "dismiss");
     }
   });
 
-  test("routes compatible video sticker MP4s to Qwen and keeps ordinary videos on thumbnails", async () => {
+  test("describes video stickers from Telegram previews before the GLM call", async () => {
     const fake = scripted([
       (call) => {
-        assert.equal(call.model, models.replyQwenFast);
-        const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
-        assert.deepEqual(content.slice(1), [
-          { type: "file", data: "data:video/mp4;base64,dmlkZW8=", mediaType: "video/mp4" },
-          { type: "image", image: "data:image/jpeg;base64,dGh1bWI=" },
-        ]);
+        assert.equal(call.model, models.geminiFlashLite);
+        assert.match(String(call.system), /sticker thumbnail/);
+        return result("预览图里是一只挥手的猫");
+      },
+      (call) => {
+        assert.equal(call.model, models.replyGlmFast);
+        const prompt = JSON.stringify(call.messages);
+        assert.match(prompt, /预览图里是一只挥手的猫/);
+        assert.doesNotMatch(prompt, /video\/mp4|video_url/);
         return result();
       },
     ]);
     const imageIds: string[] = [];
-    const videoIds: string[] = [];
     await turn(fake.dependencies, {
-      allowRichContentTools: true,
-      mediaRefs: [
-        { type: "sticker", source: "current", fileId: "webm", isVideo: true },
-        { type: "video", source: "current", fileId: "original", thumbnailFileId: "thumb" },
-      ],
-      resolveTelegramFileAsDataUrl: async (fileId) => {
-        imageIds.push(fileId);
-        return "data:image/jpeg;base64,dGh1bWI=";
-      },
-      resolveTelegramVideoStickerAsDataUrl: async (fileId) => {
-        videoIds.push(fileId);
-        return "data:video/mp4;base64,dmlkZW8=";
-      },
-    });
-    assert.deepEqual(videoIds, ["webm"]);
-    assert.deepEqual(imageIds, ["thumb"]);
-  });
-
-  test("falls back to sticker thumbnails when MP4 conversion is unavailable", async () => {
-    const fake = scripted([
-      (call) => {
-        assert.equal(call.model, models.replyQwenFast);
-        const content = (call.messages as { content: Record<string, unknown>[] }[])[0]!.content;
-        assert.deepEqual(content[1], {
-          type: "image",
-          image: "data:image/jpeg;base64,dGh1bWI=",
-        });
-        return result();
-      },
-    ]);
-    await turn(fake.dependencies, {
+      userMessage: "",
       allowRichContentTools: true,
       mediaRefs: [
         {
@@ -601,9 +689,12 @@ describe("main turn architecture", () => {
           isVideo: true,
         },
       ],
-      resolveTelegramFileAsDataUrl: async () => "data:image/jpeg;base64,dGh1bWI=",
-      resolveTelegramVideoStickerAsDataUrl: async () => null,
+      resolveTelegramFileAsDataUrl: async (fileId) => {
+        imageIds.push(fileId);
+        return "data:image/jpeg;base64,dGh1bWI=";
+      },
     });
+    assert.deepEqual(imageIds, ["thumb"]);
   });
 
   test("rich tools report disabled access and video-specific failures", async () => {
@@ -981,47 +1072,6 @@ describe("fallback and URL helpers", () => {
     });
   });
 
-  test("rewrites internal MP4 markers to Qwen video_url and disables thinking", () => {
-    const rewritten = aiTestHelpers.rewriteQwenVideoParts({
-      body: JSON.stringify({
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: { url: "data:image/x-qwen-video;base64,dmlkZW8=" },
-              },
-            ],
-          },
-        ],
-      }),
-    });
-    const body = JSON.parse(String(rewritten.body));
-    assert.equal(body.enable_thinking, false);
-    assert.deepEqual(body.messages[0].content[0], {
-      type: "video_url",
-      video_url: { url: "data:video/mp4;base64,dmlkZW8=" },
-      fps: 4,
-    });
-    assert.equal(aiTestHelpers.rewriteQwenVideoParts(undefined).body, undefined);
-    assert.equal(aiTestHelpers.rewriteQwenVideoParts({ body: "invalid" }).body, "invalid");
-    const unchanged = aiTestHelpers.rewriteQwenVideoParts({
-      body: JSON.stringify({
-        messages: [
-          { role: "assistant", content: "text" },
-          {
-            role: "user",
-            content: [{ type: "image_url", image_url: { url: "data:image/png;base64,eA==" } }],
-          },
-        ],
-      }),
-    });
-    const unchangedBody = JSON.parse(String(unchanged.body));
-    assert.equal(unchangedBody.enable_thinking, false);
-    assert.equal(unchangedBody.messages[1].content[0].image_url.url, "data:image/png;base64,eA==");
-  });
-
   test("combines caller and timeout abort signals", () => {
     const standalone = aiTestHelpers.withFetchTimeout({ method: "GET" }, 10_000);
     assert.equal(standalone.method, "GET");
@@ -1185,24 +1235,11 @@ describe("fallback and URL helpers", () => {
     const middleware = aiTestHelpers.createReplyFallbackMiddleware(fallback as never, 1000);
     const unavailable = new TypeError("fetch failed");
     const model = {
-      modelId: "deepseek",
+      modelId: "glm-4.7-flashx",
       provider: "test",
       doGenerate: async () => Promise.reject(unavailable),
     };
-    const params = {
-      prompt: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "file",
-              data: "video",
-              mediaType: "image/x-qwen-video",
-            },
-          ],
-        },
-      ],
-    };
+    const params = { prompt: [{ role: "user", content: [] }] };
     const got = await middleware.wrapGenerate!({ params, model } as never);
     assert.equal(got.response?.modelId, "gemini");
     const signal = new AbortController().signal;
@@ -1211,7 +1248,6 @@ describe("fallback and URL helpers", () => {
     const repeatedSignaled = await middleware.wrapGenerate!({ params: signaled, model } as never);
     assert.equal(firstSignaled.response?.modelId, "gemini");
     assert.equal(repeatedSignaled.response?.modelId, "gemini");
-    assert.equal((fallbackCalls[0] as typeof params).prompt[0]?.content[0]?.mediaType, "video/mp4");
     const continued = { prompt: [{ role: "tool", content: [] }] };
     await assert.rejects(
       Promise.resolve(middleware.wrapGenerate!({ params: continued, model } as never)),
