@@ -526,6 +526,12 @@ function isPrimaryUnavailableError(error: unknown): boolean {
   if (current instanceof DOMException) {
     return current.name === "AbortError" || current.name === "TimeoutError";
   }
+  if (
+    current instanceof Error &&
+    (current.name === "AbortError" || current.name === "TimeoutError")
+  ) {
+    return true;
+  }
   if (current instanceof TypeError) {
     return /fetch|network|socket|connect|dns|timed?\s*out/i.test(current.message);
   }
@@ -693,7 +699,11 @@ export async function classifyMessage(
       maxOutputTokens: 100,
       timeout: { totalMs: FAST_MODEL_TIMEOUT_MS },
     });
-    const parsed = classificationSchema.safeParse(JSON.parse(raw));
+    const json = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
+    const parsed = classificationSchema.safeParse(JSON.parse(json));
     if (parsed.success) return parsed.data;
     logger.warn({ raw }, "classification JSON parse failed, defaulting to simple");
     return { tier: "simple", needsSearch: false };

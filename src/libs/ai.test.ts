@@ -85,11 +85,18 @@ async function runTool(call: GenerateCall, name: string, input: object = {}) {
 afterEach(() => aiTestHelpers.clearSessionCaches());
 
 describe("classification and lightweight generators", () => {
-  test("classifies valid JSON and defaults on invalid JSON or errors", async () => {
-    const valid = scripted([() => result('{"tier":"tech","needsSearch":true}')]);
+  test("classifies plain or fenced JSON and defaults on invalid JSON or errors", async () => {
+    const valid = scripted([
+      () => result('{"tier":"tech","needsSearch":true}'),
+      () => result('```json\n{"tier":"complex","needsSearch":false}\n```'),
+    ]);
     assert.deepEqual(await classifyMessage("最新 API", valid.dependencies), {
       tier: "tech",
       needsSearch: true,
+    });
+    assert.deepEqual(await classifyMessage("详细解释", valid.dependencies), {
+      tier: "complex",
+      needsSearch: false,
     });
     assert.equal(valid.calls[0]?.model, models.glmFast);
     assert.deepEqual(await classifyMessage("x", scripted([() => result("bad")]).dependencies), {
@@ -1242,6 +1249,16 @@ describe("fallback and URL helpers", () => {
     const params = { prompt: [{ role: "user", content: [] }] };
     const got = await middleware.wrapGenerate!({ params, model } as never);
     assert.equal(got.response?.modelId, "gemini");
+    aiTestHelpers.clearSessionCaches();
+    const namedTimeout = new Error("The operation was aborted due to timeout");
+    namedTimeout.name = "TimeoutError";
+    const timeoutModel = {
+      modelId: "glm-4.7-flashx",
+      provider: "test",
+      doGenerate: async () => Promise.reject(namedTimeout),
+    };
+    const timedOut = await middleware.wrapGenerate!({ params, model: timeoutModel } as never);
+    assert.equal(timedOut.response?.modelId, "gemini");
     const signal = new AbortController().signal;
     const signaled = { ...params, abortSignal: signal };
     const firstSignaled = await middleware.wrapGenerate!({ params: signaled, model } as never);
@@ -1264,7 +1281,7 @@ describe("fallback and URL helpers", () => {
       ),
       { name: "AbortError" },
     );
-    assert.equal(fallbackCalls.length, 3);
+    assert.equal(fallbackCalls.length, 4);
 
     aiTestHelpers.clearSessionCaches();
     const ordinary = new Error("bad request");
