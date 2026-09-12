@@ -41,6 +41,15 @@ test("database creates, reopens, and enforces the current schema", async () => {
         .get(),
       1,
     );
+    assert.equal(
+      database
+        .prepare(
+          "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'diary_notification_deliveries'",
+        )
+        .pluck()
+        .get(),
+      1,
+    );
 
     database
       .prepare("INSERT INTO users (firestore_id, uid, nickname, source_json) VALUES (?, ?, ?, ?)")
@@ -63,15 +72,28 @@ test("database adopts legacy metadata and rejects newer schemas", async () => {
   const databaseModule = await import("./database.js");
   const { SCHEMA_VERSION } = await import("./schema-version.js");
   try {
-    const legacy = new Database(legacyPath);
-    legacy.exec(
-      "CREATE TABLE schema_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;" +
-        "INSERT INTO schema_metadata VALUES ('schema_version', '1');",
-    );
-    legacy.close();
+    const legacy = databaseModule.initDatabase(legacyPath);
+    legacy
+      .prepare(
+        `INSERT INTO diary (firestore_id, date, generated_diary, generated_at, source_json)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run("2026-08-12", "2026-08-12", "existing diary", 123, "{}");
+    legacy.exec("DROP TABLE diary_notification_deliveries");
+    legacy.prepare("UPDATE schema_metadata SET value = '1' WHERE key = 'schema_version'").run();
+    legacy.pragma("user_version = 1");
+    databaseModule.closeDatabase();
     assert.equal(
       databaseModule.initDatabase(legacyPath).pragma("user_version", { simple: true }),
       SCHEMA_VERSION,
+    );
+    assert.equal(
+      databaseModule
+        .getDatabase()
+        .prepare("SELECT sent_at FROM diary_notification_deliveries WHERE date = ?")
+        .pluck()
+        .get("2026-08-12"),
+      123,
     );
     databaseModule.closeDatabase();
 

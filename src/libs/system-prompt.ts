@@ -399,7 +399,7 @@ export function buildLateBindingPrompt(params: {
   if (requireImageUnderstanding) {
     parts.push(
       hasImageUnderstanding
-        ? '<image_reply_policy required="true" ready="true">当前轮涉及图片。只要你决定发言，就必须基于已经拿到的图片内容理解（例如 prefetched_media 或 describeTelegramMedia 的结果）来判断；不要说自己看不到图，也不要猜图内容。</image_reply_policy>'
+        ? '<image_reply_policy required="true" ready="true">当前轮涉及图片。图片可能已直接附在本次 user 请求中，也可能已有 describeTelegramMedia 的结果；必须基于真实图片内容判断，不要说自己看不到图，也不要猜图内容。</image_reply_policy>'
         : '<image_reply_policy required="true" ready="false">当前轮涉及图片，但本轮还没有成功拿到图片内容。此时不许发送任何消息，不许猜图内容，也不许说自己看不到图；只能 dismiss 保持沉默。</image_reply_policy>',
     );
   }

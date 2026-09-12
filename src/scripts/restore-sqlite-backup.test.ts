@@ -107,6 +107,9 @@ test("restore replaces output only after decrypting and verifying a real databas
     database
       .prepare("INSERT INTO users (firestore_id, uid, nickname, source_json) VALUES (?, ?, ?, ?)")
       .run("u1", "u1", "Alice", "{}");
+    database.exec("DROP TABLE diary_notification_deliveries");
+    database.prepare("UPDATE schema_metadata SET value = '1' WHERE key = 'schema_version'").run();
+    database.pragma("user_version = 1");
     databaseModule.closeDatabase();
     await encryptSqliteBackup(sourcePath, archivePath, passphrase, { cost: 1_024 });
     await writeFile(outputPath, "old output");
@@ -121,6 +124,7 @@ test("restore replaces output only after decrypting and verifying a real databas
     );
     assert.ok(tables.includes("runtime_compactions"));
     const restored = new Database(outputPath, { readonly: true });
+    assert.equal(restored.pragma("user_version", { simple: true }), 1);
     assert.equal(restored.prepare("SELECT nickname FROM users").pluck().get(), "Alice");
     restored.close();
   } finally {
@@ -135,10 +139,11 @@ test("failed restore preserves an existing output and removes staging files", as
   const archivePath = path.join(directory, "invalid.sqlite.gz.enc");
   const outputPath = path.join(directory, "protected.sqlite");
   const restore = await import("./restore-sqlite-backup.js");
+  const { SCHEMA_VERSION } = await import("../services/schema-version.js");
   try {
     const invalid = new Database(invalidPath);
     invalid.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY) STRICT");
-    invalid.pragma("user_version = 1");
+    invalid.pragma(`user_version = ${SCHEMA_VERSION}`);
     invalid.close();
     await encryptSqliteBackup(invalidPath, archivePath, passphrase, { cost: 1_024 });
     await writeFile(outputPath, "keep me");

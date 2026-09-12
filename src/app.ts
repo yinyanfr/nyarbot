@@ -9,7 +9,7 @@ import { startProactiveChecker, stopProactiveChecker, touchBotActivity } from ".
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
 import { formatForTelegramHtml } from "./libs/format-telegram.js";
-import { checkAndGenerateDiary, initDiaryCallbacks } from "./libs/diary.js";
+import { checkAndGenerateDiary, initDiaryCallbacks, stopDiaryService } from "./libs/diary.js";
 import type { DiaryCallbacks } from "./libs/diary.js";
 import { checkAndGenerateWordcloud, initWordcloudCallbacks } from "./libs/wordcloud.js";
 import type { WordcloudCallbacks } from "./libs/wordcloud.js";
@@ -104,6 +104,25 @@ export function createApplication(dependencies: ApplicationDependencies): {
 
 type TimerHandle = ReturnType<typeof setInterval>;
 
+function waitForAbort<T>(promise: Promise<T>, abortSignal?: AbortSignal): Promise<T> {
+  if (!abortSignal) return promise;
+  abortSignal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(abortSignal.reason);
+    abortSignal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        abortSignal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        abortSignal.removeEventListener("abort", abort);
+        reject(err);
+      },
+    );
+  });
+}
+
 interface BackgroundCloser {
   start(): void;
   close(): Promise<void>;
@@ -127,6 +146,7 @@ export interface ProductionApplicationDependencies {
   startProactiveChecker(callbacks: ProactiveCallbacks): void;
   stopProactiveChecker(): void;
   initDiaryCallbacks(callbacks: DiaryCallbacks): void;
+  stopDiaryService(): Promise<void>;
   initWordcloudCallbacks(callbacks: WordcloudCallbacks): void;
   checkAndGenerateDiary(): Promise<unknown>;
   checkAndGenerateWordcloud(): void;
@@ -168,6 +188,7 @@ export const productionApplicationDependencies: ProductionApplicationDependencie
   startProactiveChecker,
   stopProactiveChecker,
   initDiaryCallbacks,
+  stopDiaryService,
   initWordcloudCallbacks,
   checkAndGenerateDiary,
   checkAndGenerateWordcloud,
@@ -259,22 +280,30 @@ export function createProductionApplication(
       dependencies.startProactiveChecker(proactiveCallbacks);
 
       dependencies.initDiaryCallbacks({
-        sendText: async (text, kind: HistoryEntryKind = "normal", options) => {
+        sendText: async (text, kind: HistoryEntryKind = "normal", options, abortSignal) => {
           const formatted = dependencies.formatForTelegramHtml(text);
           const reply_markup =
             options?.inlineKeyboardText && options.inlineKeyboardUrl
               ? new InlineKeyboard().url(options.inlineKeyboardText, options.inlineKeyboardUrl)
               : undefined;
           try {
-            await bot.api.sendMessage(runtimeConfig.tgGroupId, formatted, {
-              parse_mode: "HTML",
-              ...(reply_markup ? { reply_markup } : {}),
-            });
+            await waitForAbort(
+              bot.api.sendMessage(runtimeConfig.tgGroupId, formatted, {
+                parse_mode: "HTML",
+                ...(reply_markup ? { reply_markup } : {}),
+              }),
+              abortSignal,
+            );
           } catch {
-            await bot.api.sendMessage(runtimeConfig.tgGroupId, text, {
-              ...(reply_markup ? { reply_markup } : {}),
-            });
+            abortSignal?.throwIfAborted();
+            await waitForAbort(
+              bot.api.sendMessage(runtimeConfig.tgGroupId, text, {
+                ...(reply_markup ? { reply_markup } : {}),
+              }),
+              abortSignal,
+            );
           }
+          abortSignal?.throwIfAborted();
           dependencies.pushMessage(
             runtimeConfig.tgGroupId,
             "bot",
@@ -288,24 +317,31 @@ export function createProductionApplication(
           });
           dependencies.touchBotActivity();
         },
-        sendChannelText: async (text) => {
+        sendChannelText: async (text, abortSignal) => {
           if (!runtimeConfig.tgDiaryChannelId) return;
           const formatted = dependencies.formatForTelegramHtml(text);
           try {
-            await bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, formatted, {
-              parse_mode: "HTML",
-            });
+            await waitForAbort(
+              bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, formatted, {
+                parse_mode: "HTML",
+              }),
+              abortSignal,
+            );
             dependencies.logInfo(
               { chatId: runtimeConfig.tgDiaryChannelId },
               "diary: channel publish succeeded via HTML",
             );
           } catch (htmlErr) {
+            abortSignal?.throwIfAborted();
             dependencies.logWarn(
               { err: htmlErr, chatId: runtimeConfig.tgDiaryChannelId },
               "diary: channel HTML publish failed, retrying with plain text",
             );
             try {
-              await bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, text);
+              await waitForAbort(
+                bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, text),
+                abortSignal,
+              );
               dependencies.logInfo(
                 { chatId: runtimeConfig.tgDiaryChannelId },
                 "diary: channel publish succeeded via plain text",
@@ -319,11 +355,14 @@ export function createProductionApplication(
             }
           }
         },
-        sendChannelPhoto: async (photo, caption) => {
+        sendChannelPhoto: async (photo, caption, abortSignal) => {
           if (!runtimeConfig.tgDiaryChannelId) return;
           const options = caption ? { caption } : {};
           try {
-            await bot.api.sendPhoto(runtimeConfig.tgDiaryChannelId, photo, options);
+            await waitForAbort(
+              bot.api.sendPhoto(runtimeConfig.tgDiaryChannelId, photo, options),
+              abortSignal,
+            );
             dependencies.logInfo(
               { chatId: runtimeConfig.tgDiaryChannelId },
               "diary: channel photo publish succeeded",
@@ -384,6 +423,7 @@ export function createProductionApplication(
       if (diaryTimer) dependencies.clearInterval(diaryTimer);
       if (wordcloudTimer) dependencies.clearInterval(wordcloudTimer);
       if (bufferSaveTimer) dependencies.clearInterval(bufferSaveTimer);
+      await dependencies.stopDiaryService();
     },
     async closeBackgroundServices() {
       await databaseBackup?.close();

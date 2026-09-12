@@ -29,7 +29,7 @@ Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 When a user @mentions the bot or replies to one of its messages, the full AI pipeline is triggered:
 
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
-2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
+2. **Model selection** — Every main chat tier uses non-thinking `deepseek-flash`; the main model invokes the high-thinking `startSubagent` advisor when deeper research is needed.
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, simple/complex turns retry once; tech turns do not retry. The handler then tries to rescue a raw draft into real `send_message` output before falling back to a sticker.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
@@ -43,11 +43,10 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Images & Media
 
-- The handler no longer pre-downloads or pre-describes media.
-- Context now includes raw Telegram references only (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media.
-- During **passive replies** (@mention/reply), the model can call `describeTelegramMedia` on demand when media content is actually needed.
-- During **proactive replies**, URL fetching remains disabled. Images attached to the newest response candidates may be prefetched and must be understood before the bot comments on them; older media is context-only.
-- Telegram downloads prefer known JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, and HEIC byte signatures. If none matches, an `image/*` response header is accepted as fallback; payloads with neither are rejected.
+- The handler retains raw Telegram references (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media; the AI turn downloads images when needed.
+- Full current-turn images and text are placed in one `deepseek-flash` user message instead of being pre-described by Gemini.
+- Other media thumbnails remain available through `describeTelegramMedia`; proactive URL fetching stays disabled and older media remains context-only.
+- Telegram image downloads accept only DeepSeek-supported JPEG, PNG, GIF, and WebP, preferring the actual byte signature over response metadata.
 
 ### URLs
 

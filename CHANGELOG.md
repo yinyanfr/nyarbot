@@ -16,6 +16,8 @@
 
 ### Changed
 
+- **DeepSeek Flash 4.1 routing and vision** (`src/libs/ai.ts`, `src/libs/telegram-image.ts`): all DeepSeek calls now use `deepseek-flash`; normal calls explicitly disable the default high thinking mode, only `startSubagent` advisors enable high thinking, and Telegram images are sent with the main user text instead of being pre-described by Gemini.
+- **Diary retries** (`src/libs/diary.ts`, `src/services/persistence.ts`): Gemini diary generation and notification copy retry errors and empty output with bounded backoff, while group notification delivery retries transient failures and records successful delivery in SQLite so an unsent notice can resume after restart. Shutdown aborts in-flight diary model, wordcloud, Telegram, and GitHub work before closing persistence.
 - **Model-call timeouts** (`src/libs/ai.ts`, `src/libs/diary.ts`, `src/libs/telegram-image.ts`): main turns, subagents, vision calls, diary generation, and external fetches now have total timeout guards so one stuck request cannot pin typing/running state.
 - **Search and routing heuristics** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`): successful prefetch now counts as a completed search, current-fact queries are detected more precisely, and search hints no longer over-trigger on casual `今天/现在` usage.
 - **Persistent-tool gating** (`src/handlers/index.ts`, `src/libs/ai.ts`, `src/libs/system-prompt.ts`, `src/libs/proactive.ts`): lightweight proactive/casual turns can skip memory/diary writes, while normal triggered turns keep them available.

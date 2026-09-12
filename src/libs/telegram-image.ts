@@ -15,21 +15,11 @@ function detectImageContentType(buffer: Buffer): string | null {
   ) {
     return "image/webp";
   }
-  if (hasBytesAt(buffer, 0, [0x42, 0x4d])) return "image/bmp";
-  if (
-    hasBytesAt(buffer, 0, [0x49, 0x49, 0x2a, 0x00]) ||
-    hasBytesAt(buffer, 0, [0x4d, 0x4d, 0x00, 0x2a])
-  ) {
-    return "image/tiff";
-  }
-  if (hasBytesAt(buffer, 4, [0x66, 0x74, 0x79, 0x70])) {
-    const brand = buffer.subarray(8, 12).toString("ascii");
-    if (brand === "avif" || brand === "avis") return "image/avif";
-    if (["heic", "heix", "hevc", "hevx", "mif1", "msf1"].includes(brand)) {
-      return "image/heic";
-    }
-  }
   return null;
+}
+
+function isSupportedImageContentType(contentType: string | undefined): contentType is string {
+  return /^(?:image\/jpeg|image\/png|image\/gif|image\/webp)$/.test(contentType ?? "");
 }
 
 /**
@@ -71,7 +61,7 @@ export function createTelegramImageDownloader(
         .toLowerCase();
       const contentType =
         detectedContentType ??
-        (responseContentType?.startsWith("image/") ? responseContentType : null);
+        (isSupportedImageContentType(responseContentType) ? responseContentType : null);
       if (!contentType) {
         logger.warn(
           { responseContentType: responseContentType ?? null, filePath },

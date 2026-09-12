@@ -45,30 +45,40 @@ test("downloads an image, detects its type, and constructs the Telegram URL", as
   assert.deepEqual(fixture.urls, ["https://api.telegram.org/file/botsecret-token/photos/a.png"]);
 });
 
-test("accepts an image response content type when bytes have no known signature", async () => {
+test("accepts a supported image response content type when bytes have no known signature", async () => {
   const bytes = Buffer.from("image bytes");
   const { download } = downloader(
-    new Response(bytes, { headers: { "content-type": "image/svg+xml; charset=utf-8" } }),
+    new Response(bytes, { headers: { "content-type": "image/webp; charset=utf-8" } }),
   );
-  assert.equal(await download("a"), `data:image/svg+xml;base64,${bytes.toString("base64")}`);
+  assert.equal(await download("a"), `data:image/webp;base64,${bytes.toString("base64")}`);
 });
 
-test("detects every supported image signature without trusting response headers", async () => {
+test("detects every DeepSeek-supported image signature without trusting response headers", async () => {
   const fixtures: [string, Buffer][] = [
     ["image/jpeg", Buffer.from([0xff, 0xd8, 0xff])],
     ["image/gif", Buffer.from("GIF89a")],
     ["image/webp", Buffer.from("RIFFxxxxWEBP")],
-    ["image/bmp", Buffer.from([0x42, 0x4d, 0, 0])],
-    ["image/tiff", Buffer.from([0x49, 0x49, 0x2a, 0])],
-    ["image/tiff", Buffer.from([0x4d, 0x4d, 0, 0x2a])],
-    ["image/avif", Buffer.from("xxxxftypavif")],
-    ["image/heic", Buffer.from("xxxxftypheic")],
   ];
   for (const [contentType, bytes] of fixtures) {
     const { download } = downloader(
       new Response(bytes, { headers: { "content-type": "application/octet-stream" } }),
     );
     assert.equal(await download("image"), `data:${contentType};base64,${bytes.toString("base64")}`);
+  }
+});
+
+test("rejects image types that DeepSeek vision does not support", async () => {
+  for (const [contentType, bytes] of [
+    ["image/svg+xml", Buffer.from("<svg/>")],
+    ["image/bmp", Buffer.from([0x42, 0x4d, 0, 0])],
+    ["image/tiff", Buffer.from([0x49, 0x49, 0x2a, 0])],
+    ["image/avif", Buffer.from("xxxxftypavif")],
+    ["image/heic", Buffer.from("xxxxftypheic")],
+  ] as const) {
+    const { download } = downloader(
+      new Response(bytes, { headers: { "content-type": contentType } }),
+    );
+    assert.equal(await download("image"), null);
   }
 });
 

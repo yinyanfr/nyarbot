@@ -31,6 +31,7 @@ const observation: DiaryObservationV2 = {
 function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
   const records: unknown[] = [];
   const generated: unknown[] = [];
+  const notificationDates: string[] = [];
   const dependencies: Partial<DiaryDependencies> = {
     config: {
       githubRepo: "owner/repo",
@@ -41,13 +42,19 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
       ({
         hour: () => 1,
         minute: () => 0,
-        subtract: (days: number) => ({ format: () => `2026-08-0${9 + days}` }),
+        subtract: (days: number) => ({
+          format: () => `2026-08-${String(12 - days).padStart(2, "0")}`,
+        }),
       }) as ReturnType<DiaryDependencies["now"]>,
     yesterdayDateStr: () => "2026-08-11",
     listActiveDiaryObservationsByDate: async () => [observation],
     getDiaryEntries: async () => [],
     loadRuntimeEventsForLocalDate: async () => [],
     getGeneratedDiary: async () => null,
+    hasDiaryNotificationBeenSent: async (date) => notificationDates.includes(date),
+    markDiaryNotificationSent: async (date) => {
+      notificationDates.push(date);
+    },
     writeGeneratedDiary: async (...args) => {
       generated.push(args);
     },
@@ -62,6 +69,7 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
     pushDiaryToGithub: async () => null,
     waitForGithubPagesPublish: async () => ({ ready: true, state: "ready", detail: "ok" }),
     makeInputFile: (_data, fileName) => ({ fileName }) as never,
+    delay: async () => undefined,
     getPersonaLabel: () => "persona",
     formatTimestamp: () => "12:34",
     logger: {
@@ -71,7 +79,7 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
     } as unknown as DiaryDependencies["logger"],
     ...overrides,
   };
-  return { service: createDiaryService(dependencies), records, generated };
+  return { service: createDiaryService(dependencies), records, generated, notificationDates };
 }
 
 test("material precedence is observations, legacy entries, then bounded runtime events", async () => {
@@ -162,6 +170,113 @@ test("records successful, empty, and thrown generation attempts", async () => {
     assert.equal(await failed.service.generateDiaryForDate("2026-08-11"), null);
     assert.equal((failed.records[0] as { status: string }).status, "failed");
   }
+});
+
+test("retries diary generation on errors and empty output without nested SDK retries", async () => {
+  let attempts = 0;
+  const delays: number[] = [];
+  const f = diaryFixture({
+    delay: async (milliseconds) => {
+      delays.push(milliseconds);
+    },
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      assert.equal(input.maxRetries, 0);
+      attempts++;
+      if (attempts === 1) throw new Error("temporary outage");
+      if (attempts === 2) return { text: " " };
+      return { text: "第三次成功", usage: { inputTokens: 8, outputTokens: 4 } };
+    }) as DiaryDependencies["generateText"],
+  });
+
+  assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "第三次成功");
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [1_000, 2_000]);
+  assert.deepEqual(
+    f.records.map((record) => (record as { status: string }).status),
+    ["success"],
+  );
+});
+
+test("retries diary notification generation and group delivery", async () => {
+  let notificationAttempts = 0;
+  let sendAttempts = 0;
+  const f = diaryFixture({
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      assert.equal(input.maxRetries, 0);
+      if ("messages" in input) return { text: "日记正文" };
+      notificationAttempts++;
+      if (notificationAttempts === 1) throw new Error("Gemini unavailable");
+      if (notificationAttempts === 2) return { text: " " };
+      return { text: "导读成功" };
+    }) as DiaryDependencies["generateText"],
+  });
+  f.service.initDiaryCallbacks({
+    sendText: async () => {
+      sendAttempts++;
+      if (sendAttempts < 3) throw new Error("Telegram unavailable");
+    },
+    sendChannelText: async () => undefined,
+    sendChannelPhoto: async () => undefined,
+  });
+
+  await f.service.checkAndGenerateDiary();
+  for (let index = 0; index < 5 && sendAttempts < 3; index++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(notificationAttempts, 3);
+  assert.equal(sendAttempts, 3);
+  assert.deepEqual(f.notificationDates, ["2026-08-09"]);
+});
+
+test("retries an unsent notification for an already persisted diary", async () => {
+  let generationCalls = 0;
+  const f = diaryFixture({
+    getGeneratedDiary: async () => "已保存的日记",
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      if ("messages" in input) generationCalls++;
+      return { text: "补发导读" };
+    }) as DiaryDependencies["generateText"],
+  });
+  const notices: string[] = [];
+  f.service.initDiaryCallbacks({
+    sendText: async (text) => {
+      notices.push(text);
+    },
+    sendChannelText: async () => undefined,
+    sendChannelPhoto: async () => undefined,
+  });
+
+  await f.service.checkAndGenerateDiary();
+  assert.equal(generationCalls, 0);
+  assert.equal(notices.length, 1);
+  assert.deepEqual(f.notificationDates, ["2026-08-09"]);
+});
+
+test("stopping the diary service aborts an in-flight notification model call", async () => {
+  let observedSignal: AbortSignal | undefined;
+  const f = diaryFixture({
+    getGeneratedDiary: async () => "已保存的日记",
+    generateText: ((input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      observedSignal = input.abortSignal;
+      return new Promise((_resolve, reject) => {
+        input.abortSignal?.addEventListener("abort", () => reject(input.abortSignal?.reason), {
+          once: true,
+        });
+      });
+    }) as DiaryDependencies["generateText"],
+  });
+  f.service.initDiaryCallbacks({
+    sendText: async () => undefined,
+    sendChannelText: async () => undefined,
+    sendChannelPhoto: async () => undefined,
+  });
+
+  const check = f.service.checkAndGenerateDiary();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(observedSignal);
+  await f.service.stopDiaryService();
+  await check;
+  assert.equal(observedSignal.aborted, true);
 });
 
 test("time gate, catch-up order, no-material completion, and check lock are deterministic", async () => {
@@ -378,5 +493,5 @@ test("secondary persistence, publishing, and notification failures are contained
   await publication.service.checkAndGenerateDiary();
   await new Promise((resolve) => setImmediate(resolve));
   assert.ok(warnings.some((message) => message.includes("GitHub push")));
-  assert.ok(warnings.some((message) => message.includes("notification send")));
+  assert.ok(warnings.some((message) => message.includes("notification delivery")));
 });

@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Critical: Stop When Acceptance Criteria Are Met
+
+> **完成需求所需的最小改动。最多进行一次代码审查和一次最终验证。若相关测试/typecheck 通过，不要继续寻找潜在改进，不要进行额外重构，不要再次执行全量审查。发现非阻塞问题只在最终总结中列出，不要修改。满足验收条件后立即停止。**
+
 ## Critical: Do Not Trust Internal Knowledge
 
 Everything you know is outdated or wrong. Your training data contains obsolete APIs, deprecated patterns, and incorrect usage. Do a websearch everytime.
@@ -40,7 +44,7 @@ node dist/app.js   # run the compiled bot
 - `src/configs/env.ts` — typed config reader from `process.env`
 - `src/handlers/index.ts` — message handler: group filter, user lookup, trigger detection, command routing, runtime ingestion, sendAiMessages
 - `src/libs/group-runtime.ts` — single-group runtime: message-level dedup, abuse gates, debounce, running/dirty lock, quiet mode, SQLite event/turn persistence, compaction trigger
-- `src/libs/ai.ts` — DeepSeek providers (no-think + thinking) with Gemini 3.5 Flash-Lite reply fallback, `classifyMessage()`, `generateAiTurn()` with stable tool-call architecture, `probeGate()` for proactive, one-shot `startSubagent`, compaction generation, on-demand rich-content tools
+- `src/libs/ai.ts` — DeepSeek Flash providers (explicit no-think + advisor high-thinking) with native image input and Gemini 3.5 Flash-Lite reply fallback, `classifyMessage()`, `generateAiTurn()` with stable tool-call architecture, `probeGate()` for proactive, one-shot `startSubagent`, compaction generation, on-demand rich-content tools
 - `src/libs/system-prompt.ts` — `buildSystemPrompt()` (static persona + rules), `buildSessionContextBlock()` (summary/history/user data), `buildProbeSystemPrompt()` (lean probe variant), `buildLateBindingPrompt()` (current time + per-turn dynamic state)
 - `src/libs/conversation-buffer.ts` — in-memory hot ring buffer: `pushMessage()`, `getHistory()`, `formatHistoryAsContext()`
 - `src/libs/format-telegram.ts` — Markdown→Telegram HTML converter (bold, italic, code, links, LaTeX→Unicode)
@@ -84,5 +88,5 @@ node dist/app.js   # run the compiled bot
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`webSearch` tool**: Keep schema stable. When flood protection disables search, expose a disabled tool that returns the reason; do not set the tool to `undefined`.
 - **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.
-- **Diary system**: Model writes structured observations via `writeDiary`. After 00:02, startup and interval checks scan the previous three dates; missing structured material falls back to legacy entries and then a bounded sample of persisted runtime events. Gemini 3.1 Pro Preview writes the diary and Gemini 3.5 Flash-Lite writes its group notice. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
+- **Diary system**: Model writes structured observations via `writeDiary`. After 00:02, startup and interval checks scan the previous three dates; missing structured material falls back to legacy entries and then a bounded sample of persisted runtime events. Gemini 3.1 Pro Preview writes the diary and Gemini 3.5 Flash-Lite writes its group notice; both model operations and the group notice delivery use bounded retries. Successful group delivery is persisted so startup checks can retry an unsent notice without regenerating or republishing the diary. Shutdown aborts active diary model, retry, Telegram, wordcloud, and GitHub operations before the database closes. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
 - **Timezone**: Date formatting is centralized in `src/libs/time.ts` and uses `APP_TIMEZONE` (default `Asia/Shanghai`). Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.

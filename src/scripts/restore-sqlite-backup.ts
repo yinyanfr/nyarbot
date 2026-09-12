@@ -71,7 +71,7 @@ export function verifyDatabase(databasePath: string, requiredTables: string[] = 
     if (foreignKeys.length > 0)
       throw new Error(`SQLite foreign key check found ${foreignKeys.length} errors`);
     const schemaVersion = database.pragma("user_version", { simple: true }) as number;
-    if (schemaVersion !== SCHEMA_VERSION) {
+    if (schemaVersion < 1 || schemaVersion > SCHEMA_VERSION) {
       throw new Error(
         `Restored SQLite schema version ${schemaVersion} is incompatible with supported version ${SCHEMA_VERSION}`,
       );
@@ -86,7 +86,9 @@ export function verifyDatabase(databasePath: string, requiredTables: string[] = 
     }
     const tables = tableRows.map((row) => row.name);
     if (tables.length === 0) throw new Error("Restored SQLite database has no application tables");
-    for (const table of [...REQUIRED_TABLES, ...requiredTables]) {
+    const versionTables =
+      schemaVersion >= 2 ? [...REQUIRED_TABLES, "diary_notification_deliveries"] : REQUIRED_TABLES;
+    for (const table of [...versionTables, ...requiredTables]) {
       if (!tables.includes(table))
         throw new Error(`Required table is missing from restored schema: ${table}`);
     }

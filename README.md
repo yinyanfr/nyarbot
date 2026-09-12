@@ -11,7 +11,7 @@
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，不可用时由 Gemini 3.5 Flash-Lite 接管回复；Gemini 还经 Cloudflare AI Gateway 负责视觉和日记导读，统一 SQLite 数据库负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
+基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek Flash 负责群聊、工具调用和图片理解，日常显式关闭思考，advisor 才启用 high 思考；不可用时由 Gemini 3.5 Flash-Lite 接管回复，Gemini 还经 Cloudflare AI Gateway 负责日记生成与导读。统一 SQLite 数据库负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
 
 ## Overview
 
@@ -57,7 +57,7 @@
 | 层                  | 库                                                     |
 | ------------------- | ------------------------------------------------------ |
 | Telegram Bot        | `grammy` v1                                            |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4                  |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek Flash               |
 | Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
 | Search / Extraction | `@tavily/ai-sdk`                                       |
 | Database            | `better-sqlite3`（统一 SQLite）                        |
@@ -235,7 +235,7 @@ English docs:
 ## Release Notes
 
 - 当前发布版本：[`1.0.0`](CHANGELOG.md)
-- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；DeepSeek 不可用时由 Gemini 3.5 Flash-Lite 接管主动/被动回复；Telegram 图片按真实字节识别 MIME，动画贴纸只安全读取缩略图；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，3.5 Flash-Lite 通读全文生成克制导读
+- 最近更新重点：DeepSeek Flash 统一处理普通对话、工具调用和图片正文，只有 advisor 启用 high 思考；DeepSeek 不可用时由 Gemini 3.5 Flash-Lite 接管主动/被动回复；日记生成、导读和群通知发送加入有界重试；主动插话加入候选窗口和活动版本校验，避免重复或过时回复
 
 ## Disclaimer
 

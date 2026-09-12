@@ -150,6 +150,9 @@ test("diary observations support dedupe, revision, retraction, and generation re
     await persistence.appendDiaryGenerationRecord(record);
     await persistence.writeGeneratedDiary(date, " diary text ");
     assert.equal(await persistence.getGeneratedDiary(date), " diary text ");
+    assert.equal(await persistence.hasDiaryNotificationBeenSent(date), false);
+    await persistence.markDiaryNotificationSent(date);
+    assert.equal(await persistence.hasDiaryNotificationBeenSent(date), true);
     assert.equal(
       databaseModule
         .getDatabase()

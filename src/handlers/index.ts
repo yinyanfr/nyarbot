@@ -660,7 +660,7 @@ const MANDATORY_REPLY_HINT =
  *
  * When the user explicitly @-mentioned or replied to the bot, dismiss results
  * are retried with escalating hints based on the classification tier:
- *   - tech (pro model): no retry — dismisses are sent as fallback immediately
+ *   - tech: no retry — dismisses are sent as fallback immediately
  *   - simple/complex: 1 retry, then fallback if still dismissed
  *   - proactive: no retry (dismiss = silence)
  */

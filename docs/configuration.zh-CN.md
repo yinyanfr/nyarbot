@@ -90,30 +90,29 @@
 
 ## DeepSeek 模型
 
-Bot 使用两个 DeepSeek model ID，共配置三种变体：
+Bot 只使用 `deepseek-flash`，配置两种调用模式：
 
-| 模型                | 思考模式                               | 用途                                                         |
-| ------------------- | -------------------------------------- | ------------------------------------------------------------ |
-| `deepseek-v4-flash` | 禁用（`thinking: {type: "disabled"}`） | 分类、早安问候、告白/互动反应、主动探测                      |
-| `deepseek-v4-flash` | 启用（`thinking: {type: "enabled"}`）  | 复杂对话（tier=`complex`），带 send_message/dismiss 工具调用 |
-| `deepseek-v4-pro`   | 启用（`thinking: {type: "enabled"}`）  | 技术问题（tier=`tech`），带 send_message/dismiss 工具调用    |
+| 模型             | 思考模式                                                           | 用途                                                    |
+| ---------------- | ------------------------------------------------------------------ | ------------------------------------------------------- |
+| `deepseek-flash` | 禁用（`thinking: {type: "disabled"}`）                             | 所有普通调用，包括各对话 tier、分类、主动探测和图片理解 |
+| `deepseek-flash` | high（`thinking: {type: "enabled"}` + `reasoning_effort: "high"`） | 仅一次性 `startSubagent` advisor                        |
 
-思考模式通过自定义 `fetch` 包装器注入，在发送前修改请求体。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
+DeepSeek Flash 默认启用 high 思考，因此普通模式必须通过自定义 `fetch` 包装器显式关闭。Base URL 可通过 `DEEPSEEK_BASE_URL` 配置（默认 `https://api.deepseek.com`，无 `/v1` 后缀）。
 
-面向回复的 DeepSeek 快速路径预留 12 秒，思考路径预留 45 秒。网络/超时、401–403、408/409/429 和 5xx 会在 DeepSeek 尚未调用工具时把整轮回复切换到 Gemini 3.5 Flash-Lite，后续 step 继续使用 Gemini。分类、subagent、URL 抽取、compaction 和后台记忆压缩仍只使用 DeepSeek。
+面向回复的 DeepSeek 快速路径预留 12 秒。网络/超时、401–403、408/409/429 和 5xx 会在 DeepSeek 尚未调用工具时把整轮回复切换到 Gemini 3.5 Flash-Lite，后续 step 继续使用 Gemini。分类、advisor、URL 抽取、compaction 和后台记忆压缩仍只使用 DeepSeek。
 
 ## Cloudflare AI Gateway
 
 Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
-- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退、Telegram/推文图片理解和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
+- 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
 - `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
 
 YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-lite`。由于 gateway wrapper 不会声明原生 URL 支持，这一路径使用受限的 AI SDK URL passthrough，把公开 YouTube URL 保留为 Gemini `fileData`。Bot 不会直连 Google API，也不会下载视频；每次调用只读取一个视频。
 
 Bilibili 读取支持 BV 链接、遗留的 `av+数字` 链接和 `b23.tv` 短链接。AV ID 会先通过 Bilibili 公开 view API 转换成 BV ID，再由锁定版本的本地 `@xzxzzx/bilibili-mcp` 子进程调用 `get_video_transcript` 和 `get_video_metadata`。不会暴露下载或账号写操作；字幕不可用时仅返回元数据。公开元数据通常不要求 Cookie，但可靠字幕读取一般需要完整登录凭据。
 
-媒体描述只做当前进程会话缓存，不写入 SQLite。
+Telegram 完整图片与当前文本直接组成同一个 DeepSeek user message；图片格式限制为 JPEG、PNG、GIF、WebP。缩略图和按需媒体描述只做当前进程会话缓存，不写入 SQLite。
 
 ## 工具调用架构
 

@@ -48,9 +48,8 @@ handlers/index.ts（setupHandlers）
     ├─ 触发检测（@提及 / 回复bot）
     ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
-    │     └─ simple → flashNoThinkModel
-    │     └─ complex → flashThinkModel
-    │     └─ tech → proThinkModel
+    │     └─ simple / complex / tech → deepseekFlashModel（无思考）
+    │     └─ advisor → advisorModel（high 思考）
     ├─ Runtime 调度（group-runtime.ts）
     │     ├─ 事件写入 SQLite、去重、限流、debounce、running lock
     │     └─ 构造 summary + recent events 上下文
@@ -61,8 +60,8 @@ handlers/index.ts（setupHandlers）
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
 │     │           describeTelegramMedia、fetchUrlContent、readVideo、startSubagent
     │     ├─ 富内容按需读取；只做会话缓存，不做持久化图片缓存
-    │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
-    │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
+    │     │     ├─ 图片与文本直接进入同一请求，其他媒体/贴纸优先缩略图
+    │     │     └─ 仅接受 JPEG / PNG / GIF / WebP，已知字节签名优先
     │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
     │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
     │     ├─ 沉默重试（simple/complex 1 次；tech 0 次）
@@ -122,18 +121,17 @@ type AiTurnResult =
 
 ## AI 模型路由
 
-| Provider/model                                  | 用途                                                   |
-| ----------------------------------------------- | ------------------------------------------------------ |
-| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测               |
-| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                                 |
-| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次                          |
-| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | DeepSeek 回复回退、Telegram/推文图片理解、完整日记导读 |
-| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                     |
+| Provider/model                                  | 用途                                                    |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| DeepSeek Flash，无思考                          | 所有主对话 tier、分类、主动探测、图片理解和轻量后台任务 |
+| DeepSeek Flash，high 思考                       | 仅一次性 `startSubagent` advisor                        |
+| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | DeepSeek 回复回退、完整日记导读和 YouTube 理解          |
+| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                      |
 
 ### 为什么用两个提供商？
 
-- **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 3.5 Flash-Lite** 经 Cloudflare AI Gateway 处理 DeepSeek 不可用时的回复回退、图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- **DeepSeek Flash** 原生支持视觉；Telegram 图片以 `image_url` 与当前文本放入同一个 user message，缩略图和推文配图也由它识别。
+- **Gemini 3.5 Flash-Lite** 经 Cloudflare AI Gateway 处理 DeepSeek 不可用时的回复回退、YouTube 理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
 - 一轮回复会粘在同一提供商上：如果首个 DeepSeek step 触发回退，后续工具 step 全部继续使用 Gemini，以保留有效 thought signature；DeepSeek 已经发出工具调用后不会再中途切换。网络/超时、401–403、408/409/429 和 5xx 会触发回退；错误请求 400 和正常 `dismiss` 不会触发。
 
 ## 本地路由
@@ -146,7 +144,7 @@ type AiTurnResult =
 - 当前事实查询会直接标记 `needsSearch`
 - 轻贴纸闲聊会关闭本轮持久化工具，避免无意义写记忆/写日记
 
-`preferAdvisor` 只是提示主轮次先调用 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
+`preferAdvisor` 只是提示非思考主轮次先调用 high 思考的 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
 
 ## 超时保护
 
@@ -258,10 +256,10 @@ Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终
 一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检查日期。启动时会立即运行并扫描最近三个已结束日期，因此重启后可以补生成近期缺失日记：
 
 1. 00:02 后选取最多 12 条 active observations；若没有观察通过筛选，则依次回退到旧的 `diary/{date}.entries` 和当天持久化 runtime `events` 的限量样本。
-2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 SQLite。
+2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 SQLite；异常和空输出最多尝试三次。
 3. 生成或复用昨日词云。推送 Telegram 频道时，日记不超过 1024 字符则作为图片 caption，否则图片后另发正文。
 4. GitHub 发布通过 blobs/tree/commit 一次提交 Markdown 与可选的 `source/img/diary/` 图片，再非 force 更新 `main`；Markdown 使用 `/img/diary/...` 根路径。
-5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
+5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接；导读生成和群内发送分别最多尝试三次。成功投递会写入 SQLite；启动和定时检查会基于已保存的日记补发尚未成功的群通知，而不会重复发布频道或 GitHub 内容。
 
 ### 日记管理员命令
 
@@ -278,6 +276,9 @@ YYYY-MM-DD 对应的 diary 行
 
 id 对应的 diary_observations 行
   └── DiaryObservationV2
+
+YYYY-MM-DD 对应的 diary_notification_deliveries 行
+  └── sentAt: number
 ```
 
 ### 时区

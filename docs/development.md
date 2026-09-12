@@ -64,7 +64,7 @@ DeepSeek's Chat Completions API does not support `json_schema` response_format (
 
 ### Why two-stage proactive probe?
 
-Running the full model for every proactive check is expensive. The probe gate uses `flashNoThinkModel` with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full model runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels probe/generation output when new user or bot activity arrives.
+Running the full model for every proactive check is expensive. The probe gate uses the non-thinking `deepseekFlashModel` with a simplified prompt and only `dismiss`/`send_message` tools. If the probe decides the topic is relevant, the full model runs. Only messages after the latest bot output are candidates, and an `activityRevision` snapshot cancels probe/generation output when new user or bot activity arrives.
 
 ### Why `formatForTelegramHtml`?
 
@@ -74,7 +74,7 @@ DeepSeek outputs Markdown (bold, italic, code, links, LaTeX math). Telegram's Bo
 
 When the user @mentions or replies to the bot, silence is almost always wrong — the user expects a response. Retrying with escalating hints ensures the model eventually speaks. For proactive messages, silence is a valid and expected choice, so no retry is needed.
 
-Current retry policy: simple/complex turns retry once; tech turns do not retry to avoid repeating expensive model calls.
+Current retry policy: simple/complex turns retry once and tech turns do not retry. This tier policy is independent of model selection; all three main tiers use non-thinking DeepSeek Flash.
 
 ### Why a single-group runtime?
 
@@ -117,7 +117,7 @@ Diary is literary archive written by `writeDiary` and the midnight diary flow. I
 
 ### Why a diary system?
 
-The bot records structured `DiaryObservationV2` records via `writeDiary`, including optional stable subject identity. After 00:02, the timer scans the previous three dates and also runs at startup. Gemini 3.1 Pro Preview consolidates selected observations into a first-person diary; when no observation survives selection, legacy entries and then a bounded first/last sample of persisted runtime events provide fallback material. The final wordcloud is reused for Telegram/blog publishing; GitHub blobs, tree, Markdown, and image are batched into one Git Data API commit. Pages is polled only after configured GitHub publishing succeeds; Gemini 3.5 Flash-Lite reads the full diary for the group notice regardless of publishing availability.
+The bot records structured `DiaryObservationV2` records via `writeDiary`, including optional stable subject identity. After 00:02, the timer scans the previous three dates and also runs at startup. Gemini 3.1 Pro Preview consolidates selected observations into a first-person diary; when no observation survives selection, legacy entries and then a bounded first/last sample of persisted runtime events provide fallback material. The final wordcloud is reused for Telegram/blog publishing; GitHub blobs, tree, Markdown, and image are batched into one Git Data API commit. Pages is polled only after configured GitHub publishing succeeds; Gemini 3.5 Flash-Lite reads the full diary for the group notice regardless of publishing availability. Diary text, notification copy, and group delivery each use up to three bounded backoff attempts, including retries for empty model output. Successful group delivery is recorded in SQLite so later startup or interval checks can retry an unsent notice from the persisted diary without repeating publication.
 
 ### Why dayjs for date handling?
 
@@ -143,13 +143,13 @@ This avoids the previous monkey-patching of `logger.error`/`.warn` and the fragi
 
 ### On-demand media handling
 
-Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references instead of eagerly describing media. Triggered turns inspect full photos or thumbnails on demand; candidate images may also be prefetched for proactive turns. Downloads are MIME-sniffed from bytes, animated sticker payloads are never passed as images, and successful descriptions use only a bounded in-process session cache.
+Handlers retain raw Telegram `file_id` / `thumbnail_file_id` references. The AI turn downloads JPEG, PNG, GIF, or WebP images and places full images beside dynamic text in one DeepSeek user message; other media thumbnails remain available for on-demand description. Animated sticker payloads are never passed as images, and successful descriptions use only a bounded in-process session cache.
 
 ### URL fetching (three-tier)
 
 `fetchUrlContent()` in `ai.ts` uses a three-tier strategy:
 
-1. **Twitter/X** → fxtwitter API (free, no auth) with batch Gemini photo descriptions
+1. **Twitter/X** → fxtwitter API (free, no auth) with batch DeepSeek Flash photo descriptions
 2. **Direct fetch** → HTML title/meta extraction
 3. **Tavily Extract** → fallback
 

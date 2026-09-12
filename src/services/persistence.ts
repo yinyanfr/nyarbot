@@ -401,6 +401,24 @@ export async function getGeneratedDiary(date: string): Promise<string | null> {
   return row?.generated_diary?.trim() ? row.generated_diary : null;
 }
 
+export async function hasDiaryNotificationBeenSent(date: string): Promise<boolean> {
+  return Boolean(
+    getDatabase().prepare(`SELECT 1 FROM diary_notification_deliveries WHERE date = ?`).get(date),
+  );
+}
+
+export async function markDiaryNotificationSent(date: string): Promise<void> {
+  getDatabase().transaction(() => {
+    ensureDiary(date);
+    getDatabase()
+      .prepare(
+        `INSERT INTO diary_notification_deliveries (date, sent_at) VALUES (?, ?)
+         ON CONFLICT(date) DO UPDATE SET sent_at = excluded.sent_at`,
+      )
+      .run(date, Date.now());
+  })();
+}
+
 export async function getDiaryObservation(id: string): Promise<DiaryObservationV2 | null> {
   const row = getDatabase()
     .prepare(`SELECT source_json FROM diary_observations WHERE firestore_id = ?`)

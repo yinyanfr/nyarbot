@@ -281,6 +281,7 @@ function createProductionDependencies(): {
       initDiaryCallbacks: (value) => {
         callbacks.diary = value;
       },
+      stopDiaryService: async () => void calls.push("diary.stop"),
       initWordcloudCallbacks: (value) => {
         callbacks.wordcloud = value;
       },
@@ -335,6 +336,7 @@ test("production wiring starts services, dispatches callbacks, timers, and clean
   assert.equal(fixture.calls.filter((call) => call === "timer.clear").length, 3);
   assert.ok(fixture.calls.includes("backup.start"));
   assert.ok(fixture.calls.includes("backup.close"));
+  assert.ok(fixture.calls.includes("diary.stop"));
   assert.ok(fixture.calls.includes("record:diary"));
   assert.ok(fixture.calls.includes("record:cloud"));
   assert.ok(fixture.calls.includes("activity"));

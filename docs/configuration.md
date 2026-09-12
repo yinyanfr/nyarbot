@@ -90,30 +90,29 @@ Production has no Firebase dependency or runtime credential mount. The gitignore
 
 ## DeepSeek Models
 
-The bot uses two DeepSeek model IDs across three configured variants:
+The bot uses only `deepseek-flash`, with two call modes:
 
-| Model               | Thinking                                  | Usage                                                                                    |
-| ------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `deepseek-v4-flash` | Disabled (`thinking: {type: "disabled"}`) | Classification, greetings, affection/reaction flows, and proactive probe                 |
-| `deepseek-v4-flash` | Enabled (`thinking: {type: "enabled"}`)   | Complex conversations (tier=`complex`), tool-calling responses with send_message/dismiss |
-| `deepseek-v4-pro`   | Enabled (`thinking: {type: "enabled"}`)   | Tech questions (tier=`tech`), tool-calling responses with send_message/dismiss           |
+| Model            | Thinking                                                          | Usage                                                           |
+| ---------------- | ----------------------------------------------------------------- | --------------------------------------------------------------- |
+| `deepseek-flash` | Disabled (`thinking: {type: "disabled"}`)                         | All normal calls, including every chat tier, probes, and vision |
+| `deepseek-flash` | High (`thinking: {type: "enabled"}` + `reasoning_effort: "high"`) | One-shot `startSubagent` advisors only                          |
 
-Thinking mode is injected via a custom `fetch` wrapper that modifies the request body before sending. Base URL is configurable via `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`, no `/v1` suffix).
+DeepSeek Flash defaults to high thinking, so a custom `fetch` wrapper explicitly disables it for every normal request. Base URL is configurable via `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`, no `/v1` suffix).
 
-Reply-facing DeepSeek calls reserve 12 seconds for fast paths and 45 seconds for thinking paths. Network/timeouts, 401–403, 408/409/429, and 5xx switch a reply to Gemini 3.5 Flash-Lite before any DeepSeek tool call, after which that reply stays on Gemini. Classification, subagents, URL extraction, compaction, and background memory compression remain DeepSeek-only.
+Reply-facing DeepSeek calls reserve 12 seconds for the initial attempt. Network/timeouts, 401–403, 408/409/429, and 5xx switch a reply to Gemini 3.5 Flash-Lite before any DeepSeek tool call, after which that reply stays on Gemini. Classification, advisors, URL extraction, compaction, and background memory compression remain DeepSeek-only.
 
 ## Cloudflare AI Gateway
 
 Gemini calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
-- `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-DeepSeek reply fallback, Telegram/tweet image understanding, and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
+- `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-DeepSeek reply fallback and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
 - `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
 
 YouTube video understanding also uses Cloudflare AI Gateway with `gemini-3.5-flash-lite`. A restricted AI SDK URL-passthrough hook preserves the public YouTube URL as Gemini `fileData` even though the gateway wrapper does not advertise native URL support. The bot process does not contact Google directly or download the video, and each call accepts one video.
 
 Bilibili reading accepts BV URLs, legacy `av<number>` URLs, and `b23.tv` short links. Legacy AV IDs are resolved to BV IDs through Bilibili's public view API before the pinned local `@xzxzzx/bilibili-mcp` process calls only `get_video_transcript` and `get_video_metadata`. No download or account mutation tools are exposed. If subtitles are unavailable, the result contains metadata only. Login cookies are optional for public metadata but normally required for reliable subtitles.
 
-Media descriptions are cached only in-process for the current session. They are not persisted in SQLite.
+Full Telegram images and current text are sent together in one DeepSeek user message; accepted formats are JPEG, PNG, GIF, and WebP. Thumbnail and on-demand media descriptions are cached only in-process and are not persisted in SQLite.
 
 ## Tool-Call Architecture
 

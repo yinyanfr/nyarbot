@@ -29,7 +29,7 @@
 当用户 @提及bot 或回复它的消息时，触发完整 AI 流程：
 
 1. **分类** — `classifyMessage()` 将消息归类为 `simple`、`complex` 或 `tech`，以及是否需要联网搜索。
-2. **模型选择** — `simple` → flash-无思考、`complex` → flash-思考、`tech` → pro-思考。
+2. **模型选择** — 所有主对话 tier 都使用非思考 `deepseek-flash`；需要深入研究时，主模型调用 high 思考的 `startSubagent` advisor。
 3. **工具增强生成** — `generateAiTurn()` 运行带工具的生成（send_message、dismiss、记忆、昵称、贴纸、可选联网搜索）。
 4. **沉默重试** — 如果模型在被触发时选择 `dismiss`，simple/complex 最多重试 1 次，tech 不重试。之后会先尽量把 raw draft 救成真实的 `send_message`，再回退到贴纸。
 5. **输出** — 消息通过 `formatForTelegramHtml()` 格式化（Markdown → Telegram HTML），带打字指示和可选贴纸分发。
@@ -43,11 +43,10 @@
 
 ### 图片与媒体
 
-- handler 不再预下载、预描述媒体。
-- 上下文只保留原始引用（`file_id` / `thumbnail_file_id`，含当前消息与 reply-to）。
-- 在**被动触发**（@提及/回复）时，模型可按需调用 `describeTelegramMedia`。
-- 在**主动插话**时，URL 抓取仍禁用；最新候选消息中的图片可以预取，bot 在谈论图片前必须先理解图片，旧媒体只作为背景上下文。
-- Telegram 下载优先识别 JPEG、PNG、GIF、WebP、BMP、TIFF、AVIF、HEIC 字节签名；未命中时接受 `image/*` 响应头作为回退，两者都没有才拒绝。
+- handler 只保留原始引用（`file_id` / `thumbnail_file_id`，含当前消息与 reply-to）；AI 轮次按需下载图片。
+- 当前轮完整图片会和文本放入同一个 `deepseek-flash` user message，不再先经 Gemini 预描述。
+- 其他媒体的缩略图仍可由 `describeTelegramMedia` 按需识别；主动插话时 URL 抓取仍禁用，旧媒体只作为背景上下文。
+- Telegram 下载仅接受 DeepSeek 明确支持的 JPEG、PNG、GIF、WebP，并优先按真实字节判断格式。
 
 ### URL
 

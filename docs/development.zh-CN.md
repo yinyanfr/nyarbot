@@ -64,7 +64,7 @@ DeepSeek 的 Chat Completions API 不支持 `json_schema` response_format（返�
 
 ### 为什么用两阶段主动探测？
 
-每次主动检查都运行完整模型很昂贵。探测门使用 `flashNoThinkModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
+每次主动检查都运行完整模型很昂贵。探测门使用非思考 `deepseekFlashModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
 
 ### 为什么用 `formatForTelegramHtml`？
 
@@ -74,7 +74,7 @@ DeepSeek 输出 Markdown（粗体、斜体、代码、链接、LaTeX 数学）�
 
 当用户 @提及或回复 bot 时，沉默几乎总是错误的——用户期望得到回复。用递增提示重试确保模型最终会说话。对于主动插话，沉默是合理的预期选择，不需要重试。
 
-当前实现的重试次数是：simple/complex 最多 1 次，tech 0 次。技术问题如果模型选择沉默，直接走兜底，避免昂贵模型重复消耗。
+当前实现的重试次数是：simple/complex 最多 1 次，tech 0 次。这个 tier 级策略独立于模型选择；三个 tier 的主轮次都使用非思考 DeepSeek Flash。
 
 ### 为什么有单群 Runtime？
 
@@ -117,7 +117,7 @@ Diary 是文学化归档：由 `writeDiary` 和午夜日记流程生成，面向
 
 ### 为什么有日记系统？
 
-Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。定时器会在 00:02 后扫描最近三个已结束日期，且启动时立即检查。Gemini 3.1 Pro Preview 优先选择 active observations 生成第一人称日记；如果没有观察通过筛选，则依次使用旧日记条目和 runtime 持久化事件的首尾限量样本。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成群通知导读。
+Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。定时器会在 00:02 后扫描最近三个已结束日期，且启动时立即检查。Gemini 3.1 Pro Preview 优先选择 active observations 生成第一人称日记；如果没有观察通过筛选，则依次使用旧日记条目和 runtime 持久化事件的首尾限量样本。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成群通知导读。日记正文、导读生成和群通知投递都使用最多三次的有界退避重试，空模型输出也会重试。成功投递会写入 SQLite，因此之后的启动或定时检查可以用已保存的日记补发失败通知，而不会重复发布其他目标。
 
 ### 为什么用 dayjs 处理日期？
 
@@ -143,13 +143,13 @@ Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳�
 
 ### 按需媒体处理
 
-Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描述媒体。被动触发轮次按需查看完整图片或缩略图，主动轮次也可预取最新候选图片。下载文件先按字节识别 MIME；动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
+Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`。AI 轮次下载 JPEG、PNG、GIF 或 WebP 后，将完整图片与动态文本放入同一个 DeepSeek user message；其他媒体缩略图仍可按需描述。动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
 
 ### URL 抓取（三级策略）
 
 `fetchUrlContent()`（`ai.ts`）使用三级策略：
 
-1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Gemini 配图描述
+1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 DeepSeek Flash 配图描述
 2. **直接抓取** → HTML title/meta 提取
 3. **Tavily Extract** → 回退
 

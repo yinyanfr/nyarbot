@@ -1,6 +1,7 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleepTimer } from "node:timers/promises";
 import { InputFile } from "grammy";
 import { GlobalFonts, createCanvas, type CanvasRenderingContext2D } from "@napi-rs/canvas";
 import nodejieba from "nodejieba";
@@ -284,8 +285,11 @@ let fontsLoaded = false;
 let jiebaLoaded = false;
 const globalFonts = GlobalFonts as typeof GlobalFonts & { loadSystemFonts?: () => number };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, abortSignal?: AbortSignal): Promise<void> {
+  return sleepTimer(ms, undefined, {
+    ref: false,
+    ...(abortSignal ? { signal: abortSignal } : {}),
+  }).then(() => undefined);
 }
 
 function getWordcloudArtifactFileName(date: string): string {
@@ -853,7 +857,7 @@ export interface WordcloudDependencies {
   todayDateStr: typeof todayDateStr;
   yesterdayDateStr: typeof yesterdayDateStr;
   now: typeof now;
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, abortSignal?: AbortSignal) => Promise<void>;
   makeInputFile: (data: Buffer, fileName: string) => InputFile;
   logger: typeof logger;
 }
@@ -884,19 +888,25 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
   let lastDate: string | null = null;
   const sameDayPublishInFlight = new Set<string>();
 
-  async function retryTask<T>(label: string, task: (attempt: number) => Promise<T>): Promise<T> {
+  async function retryTask<T>(
+    label: string,
+    task: (attempt: number) => Promise<T>,
+    abortSignal?: AbortSignal,
+  ): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= WORDCLOUD_MAX_RETRY_ATTEMPTS; attempt += 1) {
+      abortSignal?.throwIfAborted();
       try {
         return await task(attempt);
       } catch (err) {
+        abortSignal?.throwIfAborted();
         lastErr = err;
         if (attempt >= WORDCLOUD_MAX_RETRY_ATTEMPTS) break;
         dependencies.logger.warn(
           { err, label, attempt, maxAttempts: WORDCLOUD_MAX_RETRY_ATTEMPTS },
           "wordcloud: task failed, retrying",
         );
-        await dependencies.sleep(WORDCLOUD_RETRY_DELAY_MS);
+        await dependencies.sleep(WORDCLOUD_RETRY_DELAY_MS, abortSignal);
       }
     }
     throw lastErr;
@@ -953,10 +963,15 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
 
   async function ensureWordcloudArtifactForDateWithRetry(
     date: string,
+    abortSignal?: AbortSignal,
   ): Promise<WordcloudArtifact | null> {
-    return retryTask("ensure wordcloud artifact", async () => {
-      return await ensureWordcloudArtifactForDate(date);
-    });
+    return retryTask(
+      "ensure wordcloud artifact",
+      async () => {
+        return await ensureWordcloudArtifactForDate(date);
+      },
+      abortSignal,
+    );
   }
 
   async function ensureWordcloudArtifactForPublication(

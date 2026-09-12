@@ -222,6 +222,22 @@ function migrate(db: SqliteDatabase): void {
         INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '1');
       `);
     }
+    if (currentVersion < 2) {
+      db.exec(`
+        CREATE TABLE diary_notification_deliveries (
+          date TEXT PRIMARY KEY REFERENCES diary(firestore_id) ON DELETE CASCADE,
+          sent_at INTEGER NOT NULL
+        ) STRICT;
+
+        INSERT INTO diary_notification_deliveries (date, sent_at)
+          SELECT firestore_id, COALESCE(generated_at, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+          FROM diary
+          WHERE generated_diary IS NOT NULL AND length(trim(generated_diary)) > 0;
+
+        INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '2')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
 }
