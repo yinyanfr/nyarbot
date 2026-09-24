@@ -283,12 +283,9 @@ test("sanitizes with DeepSeek after prohibited content and retries with safe mat
       { ts: 2, content: "ordinary dinner discussion" },
     ],
     generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
-      if ("output" in input && input.output) {
+      if (!("messages" in input)) {
         sanitizerCalls++;
-        return {
-          text: "",
-          output: { removeIds: ["entry:0"], categories: ["sexual-minors"] },
-        };
+        return { text: '{"removeIds":["entry:0"],"categories":["sexual-minors"]}' };
       }
       diaryAttempts++;
       requests.push(JSON.stringify(input));
@@ -310,9 +307,9 @@ test("sanitizes when the provider returns a content-filter finish reason", async
   let sanitizerCalls = 0;
   const f = diaryFixture({
     generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
-      if ("output" in input && input.output) {
+      if (!("messages" in input)) {
         sanitizerCalls++;
-        return { text: "", output: { removeIds: [], categories: ["unknown"] } };
+        return { text: '```json\n{"removeIds":[],"categories":["unknown"]}\n```' };
       }
       diaryAttempts++;
       if (diaryAttempts === 1) {

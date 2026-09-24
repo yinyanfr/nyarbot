@@ -9,7 +9,7 @@ import config from "../configs/env.js";
 import { safePromptValue, truncateUnicode } from "./prompt-safety.js";
 import { formatTimestampInputForTimezone } from "./time.js";
 
-export const DIARY_PROMPT_VERSION = "diary-v4";
+export const DIARY_PROMPT_VERSION = "diary-v5";
 export const DIARY_STYLE_REFERENCE_VERSION = "lixia-v1";
 export const MAX_DAILY_DIARY_OBSERVATIONS = 12;
 
