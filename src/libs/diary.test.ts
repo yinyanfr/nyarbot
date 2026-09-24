@@ -305,13 +305,20 @@ test("sanitizes with DeepSeek after prohibited content and retries with safe mat
 test("sanitizes when the provider returns a content-filter finish reason", async () => {
   let diaryAttempts = 0;
   let sanitizerCalls = 0;
+  const requests: string[] = [];
   const f = diaryFixture({
+    listActiveDiaryObservationsByDate: async () => [],
+    getDiaryEntries: async () => [
+      { ts: 1, content: "看看你的本子" },
+      { ts: 2, content: "ordinary dinner discussion" },
+    ],
     generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
       if (!("messages" in input)) {
         sanitizerCalls++;
         return { text: '```json\n{"removeIds":[],"categories":["unknown"]}\n```' };
       }
       diaryAttempts++;
+      requests.push(JSON.stringify(input));
       if (diaryAttempts === 1) {
         return {
           text: "",
@@ -326,6 +333,9 @@ test("sanitizes when the provider returns a content-filter finish reason", async
   assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "第二次成功");
   assert.equal(diaryAttempts, 2);
   assert.equal(sanitizerCalls, 1);
+  assert.match(requests[0]!, /看看你的本子/);
+  assert.doesNotMatch(requests[1]!, /看看你的本子/);
+  assert.match(requests[1]!, /ordinary dinner discussion/);
 });
 
 test("does not repeat a successful model call when persistence fails", async () => {

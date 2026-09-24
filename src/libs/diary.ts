@@ -302,6 +302,8 @@ interface DiaryMaterial {
 
 const prohibitedDiaryTextPattern =
   /(?:幼小女孩|幼女|未成年|儿童|小孩|女孩|男孩|萝莉|正太).{0,24}(?:性感|色情|情色|性行为|裸|情趣)|(?:性感|色情|情色|性行为|裸|情趣).{0,24}(?:幼小女孩|幼女|未成年|儿童|小孩|女孩|男孩|萝莉|正太)|r\s*-?\s*18|色情|情色|情趣道具/iu;
+const strictProhibitedDiaryTextPattern =
+  /幼小女孩|幼女|未成年|儿童|小孩|女孩|男孩|萝莉|正太|性感|色情|情色|性行为|情趣|r\s*-?\s*18|本子|项圈|流口水|绳子/iu;
 
 function observationSafetyText(observation: DiaryObservationV2): string {
   return [
@@ -393,10 +395,23 @@ async function sanitizeDiaryMaterialWithDeepSeek(
   if (!Array.isArray(parsed.removeIds) || !parsed.removeIds.every((id) => typeof id === "string")) {
     throw new Error("Diary sanitizer returned invalid removeIds");
   }
+  const modelRemoveIds = parsed.removeIds as string[];
   const categories = Array.isArray(parsed.categories)
     ? parsed.categories.filter((category): category is string => typeof category === "string")
     : [];
-  const filtered = filterDiaryMaterial(material, new Set(parsed.removeIds));
+  const removeIds = new Set(modelRemoveIds);
+  for (const observation of material.observations) {
+    if (strictProhibitedDiaryTextPattern.test(observationSafetyText(observation))) {
+      removeIds.add(`observation:${observation.id}`);
+    }
+  }
+  material.entries.forEach((entry, index) => {
+    if (strictProhibitedDiaryTextPattern.test(entry.content)) removeIds.add(`entry:${index}`);
+  });
+  const filtered = filterDiaryMaterial(material, removeIds);
+  if (filtered.removedIds.some((id) => !modelRemoveIds.includes(id))) {
+    categories.push("deterministic-strict-fallback");
+  }
   return { ...filtered, categories };
 }
 
