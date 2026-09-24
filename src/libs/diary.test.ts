@@ -285,7 +285,9 @@ test("sanitizes with DeepSeek after prohibited content and retries with safe mat
     generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
       if (!("messages" in input)) {
         sanitizerCalls++;
-        return { text: '{"removeIds":["entry:0"],"categories":["sexual-minors"]}' };
+        return {
+          text: '{"removeIds":["entry:0"],"categories":["sexual-minors"],"safeNotes":["Alice and Bob discussed dinner"]}',
+        };
       }
       diaryAttempts++;
       requests.push(JSON.stringify(input));
@@ -299,7 +301,7 @@ test("sanitizes with DeepSeek after prohibited content and retries with safe mat
   assert.equal(sanitizerCalls, 1);
   assert.match(requests[0]!, /opaque risky material/);
   assert.doesNotMatch(requests[1]!, /opaque risky material/);
-  assert.match(requests[1]!, /ordinary dinner discussion/);
+  assert.match(requests[1]!, /Alice and Bob discussed dinner/);
 });
 
 test("sanitizes when the provider returns a content-filter finish reason", async () => {
