@@ -701,6 +701,22 @@ export async function appendDiaryGenerationRecord(record: DiaryGenerationRecord)
   })();
 }
 
+export async function hasTerminalDiaryGenerationFailure(
+  date: string,
+  promptVersion: string,
+): Promise<boolean> {
+  return Boolean(
+    getDatabase()
+      .prepare(
+        `SELECT 1 FROM diary_generation_records
+         WHERE diary_firestore_id = ? AND prompt_version = ? AND status = 'failed'
+           AND json_extract(source_json, '$.terminal') = 1
+         LIMIT 1`,
+      )
+      .get(date, promptVersion),
+  );
+}
+
 export async function writeGeneratedDiary(date: string, diary: string): Promise<void> {
   getDatabase().transaction(() => {
     ensureDiary(date);

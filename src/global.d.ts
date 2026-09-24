@@ -55,4 +55,8 @@ export interface DiaryGenerationRecord {
   outputTokens?: number;
   status: "success" | "failed";
   error?: string;
+  errorKind?: "prohibited_content" | "other";
+  attempts?: number;
+  terminal?: boolean;
+  removedMaterialIds?: string[];
 }

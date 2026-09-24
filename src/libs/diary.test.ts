@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { APICallError } from "ai";
 import type { DiaryDependencies } from "./diary.js";
 import type { DiaryObservationV2 } from "../global.d.js";
 
@@ -52,6 +53,7 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
     loadRuntimeEventsForLocalDate: async () => [],
     getGeneratedDiary: async () => null,
     hasDiaryNotificationBeenSent: async (date) => notificationDates.includes(date),
+    hasTerminalDiaryGenerationFailure: async () => false,
     markDiaryNotificationSent: async (date) => {
       notificationDates.push(date);
     },
@@ -101,7 +103,7 @@ test("material precedence is observations, legacy entries, then bounded runtime 
     generateText: (async (input: unknown) => {
       request = JSON.stringify(input);
       return { text: "diary" };
-    }) as DiaryDependencies["generateText"],
+    }) as unknown as DiaryDependencies["generateText"],
   });
   await legacy.service.generateDiaryForDate("2026-08-11");
   assert.match(request, /legacy material/);
@@ -185,7 +187,7 @@ test("retries diary generation on errors and empty output without nested SDK ret
       if (attempts === 1) throw new Error("temporary outage");
       if (attempts === 2) return { text: " " };
       return { text: "第三次成功", usage: { inputTokens: 8, outputTokens: 4 } };
-    }) as DiaryDependencies["generateText"],
+    }) as unknown as DiaryDependencies["generateText"],
   });
 
   assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "第三次成功");
@@ -195,6 +197,189 @@ test("retries diary generation on errors and empty output without nested SDK ret
     f.records.map((record) => (record as { status: string }).status),
     ["success"],
   );
+});
+
+test("removes known prohibited material before the first diary request", async () => {
+  let request = "";
+  const f = diaryFixture({
+    listActiveDiaryObservationsByDate: async () => [],
+    getDiaryEntries: async () => [],
+    loadRuntimeEventsForLocalDate: async () => [
+      {
+        id: 1,
+        groupId: "-1",
+        chatId: "-1",
+        updateId: 1,
+        messageId: 1,
+        uid: "u",
+        name: "Alice",
+        text: "幼小女孩性感的移动",
+        ts: 1,
+        kind: "user_message",
+        mediaRefs: [],
+        urls: [],
+      },
+      {
+        id: 2,
+        groupId: "-1",
+        chatId: "-1",
+        updateId: 2,
+        messageId: 2,
+        uid: "u",
+        name: "Alice",
+        text: "今天吃了烤串",
+        ts: 2,
+        kind: "user_message",
+        mediaRefs: [],
+        urls: [],
+      },
+      {
+        id: 3,
+        groupId: "-1",
+        chatId: "-1",
+        updateId: 3,
+        messageId: 3,
+        uid: "u",
+        name: "Alice",
+        text: "买了一个新本子",
+        ts: 3,
+        kind: "user_message",
+        mediaRefs: [],
+        urls: [],
+      },
+    ],
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      request = JSON.stringify(input);
+      return { text: "安全日记" };
+    }) as DiaryDependencies["generateText"],
+  });
+
+  assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "安全日记");
+  assert.doesNotMatch(request, /幼小女孩性感/);
+  assert.match(request, /今天吃了烤串/);
+  assert.match(request, /买了一个新本子/);
+  assert.deepEqual((f.records[0] as { removedMaterialIds: string[] }).removedMaterialIds, [
+    "entry:0",
+  ]);
+});
+
+test("sanitizes with DeepSeek after prohibited content and retries with safe material", async () => {
+  let diaryAttempts = 0;
+  let sanitizerCalls = 0;
+  const requests: string[] = [];
+  const prohibited = new APICallError({
+    message: "Invalid JSON response",
+    url: "https://example.test/chat/completions",
+    requestBodyValues: {},
+    statusCode: 200,
+    responseBody: JSON.stringify({
+      choices: [{ finish_reason: "content_filter: PROHIBITED_CONTENT", index: 0 }],
+    }),
+  });
+  const f = diaryFixture({
+    listActiveDiaryObservationsByDate: async () => [],
+    getDiaryEntries: async () => [
+      { ts: 1, content: "opaque risky material" },
+      { ts: 2, content: "ordinary dinner discussion" },
+    ],
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      if ("output" in input && input.output) {
+        sanitizerCalls++;
+        return {
+          text: "",
+          output: { removeIds: ["entry:0"], categories: ["sexual-minors"] },
+        };
+      }
+      diaryAttempts++;
+      requests.push(JSON.stringify(input));
+      if (diaryAttempts === 1) throw prohibited;
+      return { text: "过滤后日记" };
+    }) as DiaryDependencies["generateText"],
+  });
+
+  assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "过滤后日记");
+  assert.equal(diaryAttempts, 2);
+  assert.equal(sanitizerCalls, 1);
+  assert.match(requests[0]!, /opaque risky material/);
+  assert.doesNotMatch(requests[1]!, /opaque risky material/);
+  assert.match(requests[1]!, /ordinary dinner discussion/);
+});
+
+test("sanitizes when the provider returns a content-filter finish reason", async () => {
+  let diaryAttempts = 0;
+  let sanitizerCalls = 0;
+  const f = diaryFixture({
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      if ("output" in input && input.output) {
+        sanitizerCalls++;
+        return { text: "", output: { removeIds: [], categories: ["unknown"] } };
+      }
+      diaryAttempts++;
+      if (diaryAttempts === 1) {
+        return {
+          text: "",
+          finishReason: "content-filter",
+          rawFinishReason: "PROHIBITED_CONTENT",
+        };
+      }
+      return { text: "第二次成功" };
+    }) as unknown as DiaryDependencies["generateText"],
+  });
+
+  assert.equal(await f.service.generateDiaryForDate("2026-08-11"), "第二次成功");
+  assert.equal(diaryAttempts, 2);
+  assert.equal(sanitizerCalls, 1);
+});
+
+test("does not repeat a successful model call when persistence fails", async () => {
+  let generationCalls = 0;
+  const preview = diaryFixture({
+    generateText: (async () => {
+      generationCalls++;
+      return { text: "已经生成" };
+    }) as unknown as DiaryDependencies["generateText"],
+    appendDiaryGenerationRecord: async () => {
+      throw new Error("record unavailable");
+    },
+  });
+  assert.equal(await preview.service.generateDiaryForDate("2026-08-11"), "已经生成");
+  assert.equal(generationCalls, 1);
+
+  generationCalls = 0;
+  const scheduled = diaryFixture({
+    now: () =>
+      ({
+        hour: () => 1,
+        minute: () => 0,
+        subtract: () => ({ format: () => "2026-08-11" }),
+      }) as unknown as ReturnType<DiaryDependencies["now"]>,
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      if (!("messages" in input)) return { text: "notice" };
+      generationCalls++;
+      return { text: "无法保存的日记" };
+    }) as DiaryDependencies["generateText"],
+    writeGeneratedDiary: async () => {
+      throw new Error("database unavailable");
+    },
+  });
+  await scheduled.service.checkAndGenerateDiary();
+  await scheduled.service.checkAndGenerateDiary();
+  assert.equal(generationCalls, 1);
+});
+
+test("terminal generation failure prevents later scheduled retries", async () => {
+  let generationCalls = 0;
+  const f = diaryFixture({
+    hasTerminalDiaryGenerationFailure: async () => true,
+    generateText: (async () => {
+      generationCalls++;
+      return { text: "should not run" };
+    }) as unknown as DiaryDependencies["generateText"],
+  });
+
+  await f.service.checkAndGenerateDiary();
+  await f.service.checkAndGenerateDiary();
+  assert.equal(generationCalls, 0);
 });
 
 test("retries diary notification generation and group delivery", async () => {

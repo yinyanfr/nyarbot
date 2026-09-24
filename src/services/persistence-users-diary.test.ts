@@ -148,6 +148,24 @@ test("diary observations support dedupe, revision, retraction, and generation re
     };
     await persistence.appendDiaryGenerationRecord(record);
     await persistence.appendDiaryGenerationRecord(record);
+    assert.equal(await persistence.hasTerminalDiaryGenerationFailure(date, "v1"), false);
+    await persistence.appendDiaryGenerationRecord({
+      ...record,
+      generatedAt: "2026-08-13T00:02:30.000Z",
+      status: "failed",
+      error: "temporary",
+      terminal: false,
+    });
+    assert.equal(await persistence.hasTerminalDiaryGenerationFailure(date, "v1"), false);
+    await persistence.appendDiaryGenerationRecord({
+      ...record,
+      generatedAt: "2026-08-13T00:03:00.000Z",
+      status: "failed",
+      error: "blocked",
+      terminal: true,
+    });
+    assert.equal(await persistence.hasTerminalDiaryGenerationFailure(date, "v1"), true);
+    assert.equal(await persistence.hasTerminalDiaryGenerationFailure(date, "v2"), false);
     await persistence.writeGeneratedDiary(date, " diary text ");
     assert.equal(await persistence.getGeneratedDiary(date), " diary text ");
     assert.equal(await persistence.hasDiaryNotificationBeenSent(date), false);
@@ -159,7 +177,7 @@ test("diary observations support dedupe, revision, retraction, and generation re
         .prepare("SELECT COUNT(*) FROM diary_generation_records")
         .pluck()
         .get(),
-      1,
+      3,
     );
   } finally {
     databaseModule.closeDatabase();
