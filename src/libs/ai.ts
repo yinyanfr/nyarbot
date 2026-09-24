@@ -1,7 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAiGateway } from "ai-gateway-provider";
 import { createGoogleGenerativeAI } from "ai-gateway-provider/providers/google";
-import { createUnified } from "ai-gateway-provider/providers/unified";
 import {
   APICallError,
   generateText,
@@ -527,10 +526,9 @@ const aigateway = createAiGateway({
   apiKey: config.cfAigToken,
 });
 
-const unified = createUnified();
 const google = createGoogleGenerativeAI();
 export const geminiFlashLiteModel = aigateway(google("gemini-3.5-flash-lite"));
-export const geminiDiaryModel = aigateway(unified("google-ai-studio/gemini-3.1-pro-preview"));
+export const geminiDiaryModel = aigateway(google("gemini-3.1-pro-preview"));
 
 // ---------------------------------------------------------------------------
 // Model instances

@@ -382,6 +382,35 @@ test("terminal generation failure prevents later scheduled retries", async () =>
   assert.equal(generationCalls, 0);
 });
 
+test("records the provider error detail from a failed API response", async () => {
+  const providerError = new APICallError({
+    message: "Bad Request",
+    url: "https://example.test/chat/completions",
+    requestBodyValues: {},
+    statusCode: 400,
+    responseBody: JSON.stringify([
+      {
+        error: {
+          message: "User location is not supported for the API use.",
+          status: "FAILED_PRECONDITION",
+        },
+      },
+    ]),
+  });
+  const f = diaryFixture({
+    generateText: (async () => {
+      throw providerError;
+    }) as unknown as DiaryDependencies["generateText"],
+  });
+
+  assert.equal(await f.service.generateDiaryForDate("2026-08-11"), null);
+  assert.equal((f.records[0] as { attempts: number }).attempts, 3);
+  assert.equal(
+    (f.records[0] as { error: string }).error,
+    "Bad Request: User location is not supported for the API use.",
+  );
+});
+
 test("retries diary notification generation and group delivery", async () => {
   let notificationAttempts = 0;
   let sendAttempts = 0;

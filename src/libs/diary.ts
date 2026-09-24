@@ -421,6 +421,22 @@ function isProhibitedContentError(error: unknown): boolean {
   return false;
 }
 
+function describeDiaryError(error: unknown): string {
+  const fallback = error instanceof Error ? error.message : String(error);
+  if (!APICallError.isInstance(error) || !error.responseBody) return fallback;
+  try {
+    const body = JSON.parse(error.responseBody) as
+      | { error?: { message?: unknown } }
+      | { error?: { message?: unknown } }[];
+    const providerError = Array.isArray(body) ? body[0]?.error : body.error;
+    return typeof providerError?.message === "string"
+      ? `${fallback}: ${providerError.message}`
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function isProhibitedContentResult(result: unknown): boolean {
   const candidate = result as { finishReason?: unknown; rawFinishReason?: unknown };
   return (
@@ -621,6 +637,7 @@ async function attemptDiaryGeneration(
     throw lastError;
   } catch (err) {
     abortSignal?.throwIfAborted();
+    const error = describeDiaryError(err);
     await dependencies
       .appendDiaryGenerationRecord({
         date,
@@ -631,7 +648,7 @@ async function attemptDiaryGeneration(
         styleReferenceVersion: DIARY_STYLE_REFERENCE_VERSION,
         observationIds: material.observations.map((observation) => observation.id),
         status: "failed",
-        error: err instanceof Error ? err.message : String(err),
+        error,
         errorKind:
           hadProhibitedContent || isProhibitedContentError(err) ? "prohibited_content" : "other",
         attempts,
@@ -646,7 +663,7 @@ async function attemptDiaryGeneration(
           "diary: failed to append failure record",
         );
       });
-    dependencies.logger.error({ err, date }, "diary: generation failed");
+    dependencies.logger.error({ err, date, providerError: error }, "diary: generation failed");
     return { status: "failed" };
   }
 }
