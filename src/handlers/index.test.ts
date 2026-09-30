@@ -199,6 +199,67 @@ function editedUpdate(params: {
   } as never;
 }
 
+test("bot replies preserve the quoted bot message in prompt, buffer, and runtime", async () => {
+  const setup = fixture();
+  await setup.bot.handleUpdate(update({ replyToBot: true, text: "这句是谁说的" }));
+  await setup.scheduled[0]!.execute();
+  const turn = setup.dispatched[0] as { userMessage: string };
+  const event = setup.ingested[0] as { replyTo: { uid: string; text: string; messageId: number } };
+  assert.match(turn.userMessage, /<speaker uid="2" name="Alice"/);
+  assert.match(turn.userMessage, /<reply_to uid="99" name="Bot"/);
+  assert.match(turn.userMessage, /<quoted_text>previous bot reply<\/quoted_text>/);
+  assert.deepEqual(event.replyTo, {
+    uid: "99",
+    name: "Bot",
+    username: "test_bot",
+    text: "previous bot reply",
+    messageId: 9,
+  });
+  assert.match(setup.pushed[0]![3] as string, /回复 uid 99 Bot \(@test_bot\) message_id=9/);
+});
+
+test("quoted chat senders use sender_chat instead of Telegram's fake sender user", async () => {
+  const setup = fixture();
+  const incoming = update({
+    text: "@test_bot 谁发的",
+    entities: [{ type: "mention", offset: 0, length: 9 }],
+  }) as unknown as {
+    message: Record<string, unknown>;
+  };
+  incoming.message.reply_to_message = {
+    message_id: 8,
+    from: { id: 1087968824, first_name: "GroupAnonymousBot" },
+    sender_chat: { id: -123, type: "supergroup", title: "公告群" },
+    text: "通知",
+  };
+  await setup.bot.handleUpdate(incoming as never);
+  await setup.scheduled[0]!.execute();
+  const turn = setup.dispatched[0] as { userMessage: string };
+  const event = setup.ingested[0] as { replyTo: { uid: string; name: string } };
+  assert.match(turn.userMessage, /<reply_to uid="chat:-123" name="公告群"/);
+  assert.equal(event.replyTo.uid, "chat:-123");
+  assert.equal(event.replyTo.name, "公告群");
+});
+
+test("messages sent on behalf of a chat keep the chat identity across contexts", async () => {
+  const setup = fixture({ user: { uid: "chat:-123", nickname: "", memories: [] } });
+  const incoming = update({
+    text: "@test_bot 你好",
+    entities: [{ type: "mention", offset: 0, length: 9 }],
+  }) as unknown as {
+    message: Record<string, unknown>;
+  };
+  incoming.message.sender_chat = { id: -123, type: "supergroup", title: "公告群" };
+  await setup.bot.handleUpdate(incoming as never);
+  await setup.scheduled[0]!.execute();
+  assert.match(
+    (setup.dispatched[0] as { userMessage: string }).userMessage,
+    /<speaker uid="chat:-123" name="公告群"/,
+  );
+  assert.equal((setup.ingested[0] as { uid: string }).uid, "chat:-123");
+  assert.equal(setup.pushed[0]![1], "chat:-123");
+});
+
 test("Telegram handler filters other groups and private non-admins", async () => {
   const setup = fixture();
   await setup.bot.handleUpdate(update({ chatId: -200 }));

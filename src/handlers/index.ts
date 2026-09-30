@@ -62,7 +62,13 @@ import {
   parseStrokeCommand,
   rollDice,
 } from "./command-parsers.js";
-import { buildBufferLine, buildUserMessage, detectTrigger, xmlEscape } from "./message-builders.js";
+import {
+  buildBufferLine,
+  buildUserMessage,
+  detectTrigger,
+  getMessageSender,
+  xmlEscape,
+} from "./message-builders.js";
 
 // Delay between consecutive bot messages (ms) — mimics human typing rhythm.
 const MESSAGE_DELAY_MS = config.botMessageDelayMs;
@@ -479,11 +485,10 @@ function collectRecentMembers(
   const map = new Map<string, { name: string; username?: string }>();
   for (const entry of history) {
     if (entry.uid === "bot" || entry.uid === "system") continue;
-    if (!map.has(entry.uid))
-      map.set(entry.uid, {
-        name: entry.name,
-        ...(entry.username ? { username: entry.username } : {}),
-      });
+    map.set(entry.uid, {
+      name: entry.name,
+      ...(entry.username ? { username: entry.username } : {}),
+    });
   }
   const recentMembers = Array.from(map.entries()).map(([uid, info]) => ({
     uid,
@@ -730,14 +735,15 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
       });
     }
     const replyTo = ctx.msg?.reply_to_message;
-    if (replyTo && replyTo.from && replyTo.from.id !== ctx.me.id) {
-      const replyUid = replyTo.from.id.toString();
-      if (!recentMembers.some((m) => m.uid === replyUid)) {
-        recentMembers.push({
-          uid: replyUid,
-          name: replyTo.from.first_name ?? "某人",
-          ...(replyTo.from.username ? { username: replyTo.from.username } : {}),
-        });
+    if (replyTo) {
+      const sender = getMessageSender(replyTo);
+      const replyUid = sender.uid;
+      if (
+        (replyTo.sender_chat || replyTo.from?.id !== ctx.me.id) &&
+        replyUid &&
+        !recentMembers.some((m) => m.uid === replyUid)
+      ) {
+        recentMembers.push(sender);
       }
     }
 
@@ -1423,8 +1429,9 @@ export function setupHandlers(
 
       const releaseRollActivity = dependencies.runtime.beginIncomingActivity();
       void (async () => {
-        const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-        const displayName = user.nickname || from.first_name || "大哥哥";
+        const sender = getMessageSender(msg);
+        const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
+        const displayName = msg.sender_chat ? sender.name : user.nickname || sender.name;
         const replyTo = msg.reply_to_message;
         const { isMentioned, isRepliedToBot } = detectTrigger({
           rawText,
@@ -1449,18 +1456,16 @@ export function setupHandlers(
           messageId: msg.message_id,
           updateId: ctx.update.update_id,
           kind: "command",
-          uid: from.id.toString(),
+          uid: sender.uid,
           name: displayName,
-          ...(from.username ? { username: from.username } : {}),
+          ...(sender.username ? { username: sender.username } : {}),
           text: rawText,
           mediaRefs,
           urls,
-          ...(replyTo && !isRepliedToBot
+          ...(replyTo
             ? {
                 replyTo: {
-                  uid: replyTo.from?.id?.toString() ?? "",
-                  name: replyTo.from?.first_name ?? "某人",
-                  ...(replyTo.from?.username ? { username: replyTo.from.username } : {}),
+                  ...getMessageSender(replyTo),
                   text: replyTo.text ?? replyTo.caption ?? "",
                   ...(replyTo.message_id != null ? { messageId: replyTo.message_id } : {}),
                 },
@@ -1473,6 +1478,7 @@ export function setupHandlers(
         const userMessage = buildUserMessage({
           rawText,
           displayName,
+          speakerUid: sender.uid,
           mediaRefs,
           replyTo,
           isRepliedToBot,
@@ -1494,7 +1500,7 @@ export function setupHandlers(
               mediaRefs,
               urls,
               sourceRefs: [`tg:${config.tgGroupId}:roll:${msg.message_id}`],
-              ...(from.username ? { senderUsername: from.username } : {}),
+              ...(sender.username ? { senderUsername: sender.username } : {}),
               ...(runtimeDecision.lateBindingStatus
                 ? { runtimeStatus: runtimeDecision.lateBindingStatus }
                 : {}),
@@ -1513,8 +1519,9 @@ export function setupHandlers(
     }
 
     // 2. Resolve user
-    const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-    const displayName = user.nickname || from.first_name || "大哥哥";
+    const sender = getMessageSender(msg);
+    const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
+    const displayName = msg.sender_chat ? sender.name : user.nickname || sender.name;
 
     // 3. Extract content references (text, URLs, media file_ids, sticker emoji)
     const extracted = await dependencies.extractContent(ctx, msg, { rawText, entities });
@@ -1540,17 +1547,13 @@ export function setupHandlers(
     });
 
     // 4. Push user's message into the buffer ONCE, up front.
-    let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
-    if (replyTo && !isRepliedToBot) {
-      replyToInfo = {
-        uid: replyTo.from?.id?.toString() ?? "",
-        name: replyTo.from?.first_name ?? "某人",
-        text: replyTo.text ?? replyTo.caption ?? "",
-      };
-      if (replyTo.from?.username) {
-        replyToInfo.username = replyTo.from.username;
-      }
-    }
+    const replyToInfo = replyTo
+      ? {
+          ...getMessageSender(replyTo),
+          text: replyTo.text ?? replyTo.caption ?? "",
+          messageId: replyTo.message_id,
+        }
+      : undefined;
 
     const bufferLine = buildBufferLine({
       rawText,
@@ -1564,9 +1567,9 @@ export function setupHandlers(
         {
           chatId: config.tgGroupId,
           messageId: msg.message_id,
-          userId: from.id.toString(),
+          userId: sender.uid,
           displayName,
-          ...(from.username ? { username: from.username } : {}),
+          ...(sender.username ? { username: sender.username } : {}),
           isBot: false,
           isForwarded: isForwardedMessage(msg),
           text: rawText,
@@ -1582,9 +1585,9 @@ export function setupHandlers(
       messageId: msg.message_id,
       updateId: ctx.update.update_id,
       kind: isCommandMessage ? "command" : "user_message",
-      uid: from.id.toString(),
+      uid: sender.uid,
       name: displayName,
-      ...(from.username ? { username: from.username } : {}),
+      ...(sender.username ? { username: sender.username } : {}),
       text: bufferLine || rawText,
       mediaRefs,
       urls,
@@ -1595,7 +1598,7 @@ export function setupHandlers(
               name: replyToInfo.name,
               ...(replyToInfo.username ? { username: replyToInfo.username } : {}),
               text: replyToInfo.text,
-              ...(replyTo?.message_id != null ? { messageId: replyTo.message_id } : {}),
+              ...(replyToInfo.messageId != null ? { messageId: replyToInfo.messageId } : {}),
             },
           }
         : {}),
@@ -1606,10 +1609,10 @@ export function setupHandlers(
     if (bufferLine && runtimeDecision.accepted) {
       dependencies.pushMessage(
         config.tgGroupId,
-        from.id.toString(),
+        sender.uid,
         displayName,
         bufferLine,
-        from.username ?? undefined,
+        sender.username,
         "normal",
         mediaRefs,
       );
@@ -1617,7 +1620,7 @@ export function setupHandlers(
 
     // 5. /help — public
     if (matchCommand(entities, rawText, "/help", botUsername)) {
-      const helpText = `喵~ 我是${getPersonaLabel()}，一只傲娇的高中生猫娘 AI！🎀
+      const helpText = `喵~ 我是${getPersonaLabel()}，一只高中生猫娘 AI！叫我毛绒绒的猫咪或猫工智能也可以🎀
 
 我的用户名是 @${botUsername}，名字是 ${config.botPersonaName} 喵~
 
@@ -1700,7 +1703,7 @@ export function setupHandlers(
         // Merged path: AI reply will include the greeting opener.
         await dependencies.setMorningGreeted(user.uid, now);
         systemHint =
-          "<system_hint><event>user_just_woke_up</event><rule>回答开头先说一句傲娇早安，再回答问题</rule></system_hint>";
+          "<system_hint><event>user_just_woke_up</event><rule>回答开头先说一句自然亲切的早安，再回答问题</rule></system_hint>";
       } else {
         // Standalone path: send greeting, then fall through to return.
         try {
@@ -1740,6 +1743,7 @@ export function setupHandlers(
     const userMessage = buildUserMessage({
       rawText,
       displayName,
+      speakerUid: sender.uid,
       mediaRefs,
       replyTo,
       isRepliedToBot,
@@ -1762,7 +1766,7 @@ export function setupHandlers(
           mediaRefs,
           urls,
           sourceRefs: [`tg:${config.tgGroupId}:message:${msg.message_id}`],
-          ...(from.username ? { senderUsername: from.username } : {}),
+          ...(sender.username ? { senderUsername: sender.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }
             : {}),
@@ -1804,15 +1808,16 @@ export function setupHandlers(
           );
         });
     } else if (!from.is_bot && !isCommandMessage) {
-      const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-      const displayName = user.nickname || from.first_name || "大哥哥";
+      const sender = getMessageSender(msg);
+      const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
+      const displayName = msg.sender_chat ? sender.name : user.nickname || sender.name;
       await persistWordcloudMessage(
         {
           chatId: config.tgGroupId,
           messageId: msg.message_id,
-          userId: from.id.toString(),
+          userId: sender.uid,
           displayName,
-          ...(from.username ? { username: from.username } : {}),
+          ...(sender.username ? { username: sender.username } : {}),
           isBot: false,
           isForwarded: isForwardedMessage(msg),
           text: rawText,
@@ -1848,8 +1853,9 @@ export function setupHandlers(
 
     if (!isMentioned && !isRepliedToBot) return;
 
-    const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-    const displayName = user.nickname || from.first_name || "大哥哥";
+    const sender = getMessageSender(msg);
+    const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
+    const displayName = msg.sender_chat ? sender.name : user.nickname || sender.name;
 
     const extracted = await dependencies.extractContent(ctx, msg, { rawText, entities });
     const urls = extracted.urls;
@@ -1861,17 +1867,13 @@ export function setupHandlers(
       },
       dependencies.recentMedia,
     );
-    let replyToInfo: { uid: string; name: string; username?: string; text: string } | undefined;
-    if (replyTo && !isRepliedToBot) {
-      replyToInfo = {
-        uid: replyTo.from?.id?.toString() ?? "",
-        name: replyTo.from?.first_name ?? "某人",
-        text: replyTo.text ?? replyTo.caption ?? "",
-      };
-      if (replyTo.from?.username) {
-        replyToInfo.username = replyTo.from.username;
-      }
-    }
+    const replyToInfo = replyTo
+      ? {
+          ...getMessageSender(replyTo),
+          text: replyTo.text ?? replyTo.caption ?? "",
+          messageId: replyTo.message_id,
+        }
+      : undefined;
     const editedBuffer = buildBufferLine({
       rawText,
       mediaRefs,
@@ -1884,9 +1886,9 @@ export function setupHandlers(
       updateId: ctx.update.update_id,
       ...(msg.edit_date != null ? { editDate: msg.edit_date } : {}),
       kind: "edited_message",
-      uid: from.id.toString(),
+      uid: sender.uid,
       name: displayName,
-      ...(from.username ? { username: from.username } : {}),
+      ...(sender.username ? { username: sender.username } : {}),
       text: editedBuffer || rawText,
       mediaRefs,
       urls,
@@ -1897,7 +1899,7 @@ export function setupHandlers(
               name: replyToInfo.name,
               ...(replyToInfo.username ? { username: replyToInfo.username } : {}),
               text: replyToInfo.text,
-              ...(replyTo?.message_id != null ? { messageId: replyTo.message_id } : {}),
+              ...(replyToInfo.messageId != null ? { messageId: replyToInfo.messageId } : {}),
             },
           }
         : {}),
@@ -1909,10 +1911,10 @@ export function setupHandlers(
     if (editedBuffer && runtimeDecision.accepted) {
       dependencies.pushMessage(
         config.tgGroupId,
-        from.id.toString(),
+        sender.uid,
         displayName,
         editedBuffer.slice(0, MAX_BUFFER_TEXT),
-        from.username ?? undefined,
+        sender.username,
         "normal",
         mediaRefs,
       );
@@ -1948,6 +1950,7 @@ export function setupHandlers(
     const userMessage = buildUserMessage({
       rawText,
       displayName,
+      speakerUid: sender.uid,
       mediaRefs,
       replyTo,
       isRepliedToBot,
@@ -1970,7 +1973,7 @@ export function setupHandlers(
           mediaRefs,
           urls,
           sourceRefs: [`tg:${config.tgGroupId}:edited:${msg.message_id}:${msg.edit_date ?? 0}`],
-          ...(from.username ? { senderUsername: from.username } : {}),
+          ...(sender.username ? { senderUsername: sender.username } : {}),
           ...(runtimeDecision.lateBindingStatus
             ? { runtimeStatus: runtimeDecision.lateBindingStatus }
             : {}),

@@ -4,6 +4,26 @@ import { sanitizePromptText } from "../libs/prompt-safety.js";
 import { MAX_BUFFER_TEXT } from "./constants.js";
 import type { MediaRef } from "./extract-content.js";
 
+export function getMessageSender(message: Message): {
+  uid: string;
+  name: string;
+  username?: string;
+} {
+  if (message.sender_chat) {
+    const chat = message.sender_chat;
+    return {
+      uid: `chat:${chat.id}`,
+      name: chat.title ?? chat.username ?? "某个聊天身份",
+      ...(chat.username ? { username: chat.username } : {}),
+    };
+  }
+  return {
+    uid: message.from?.id?.toString() ?? "",
+    name: message.from?.first_name ?? "某人",
+    ...(message.from?.username ? { username: message.from.username } : {}),
+  };
+}
+
 function xmlEscape(text: string): string {
   return sanitizePromptText(text)
     .replaceAll("&", "&amp;")
@@ -16,6 +36,7 @@ function xmlEscape(text: string): string {
 export function buildUserMessage(params: {
   rawText: string;
   displayName: string;
+  speakerUid: string;
   mediaRefs: MediaRef[];
   replyTo: Message | undefined;
   isRepliedToBot: boolean;
@@ -24,16 +45,14 @@ export function buildUserMessage(params: {
 }): string {
   const sections = [
     "<current_turn>",
-    `  <speaker name="${xmlEscape(params.displayName)}" />`,
+    `  <speaker uid="${xmlEscape(params.speakerUid)}" name="${xmlEscape(params.displayName)}" />`,
     `  <trigger mode="${params.isMentioned || params.isRepliedToBot ? "passive_triggered" : "not_triggered"}" mentioned="${params.isMentioned ? "true" : "false"}" replied_to_bot="${params.isRepliedToBot ? "true" : "false"}" />`,
   ];
   const reply = params.replyTo;
-  if (reply && !params.isRepliedToBot) {
-    const name = reply.from?.username
-      ? `${reply.from.first_name} (@${reply.from.username})`
-      : (reply.from?.first_name ?? "某人");
+  if (reply) {
+    const sender = getMessageSender(reply);
     sections.push(
-      `  <reply_to uid="${xmlEscape(reply.from?.id?.toString() ?? "")}" name="${xmlEscape(name)}">`,
+      `  <reply_to uid="${xmlEscape(sender.uid)}" name="${xmlEscape(sender.name)}" username="${xmlEscape(sender.username ?? "")}" message_id="${reply.message_id}">`,
     );
     const text = reply.text ?? reply.caption ?? "";
     if (text) sections.push(`    <quoted_text>${xmlEscape(text)}</quoted_text>`);
@@ -77,13 +96,13 @@ export function buildBufferLine(params: {
   rawText: string;
   mediaRefs: MediaRef[];
   urls: string[];
-  replyToInfo?: { uid: string; name: string; username?: string; text: string };
+  replyToInfo?: { uid: string; name: string; username?: string; text: string; messageId?: number };
 }): string {
   const parts: string[] = [];
-  if (params.replyToInfo?.text) {
+  if (params.replyToInfo) {
     const item = params.replyToInfo;
     parts.push(
-      `[回复 ${item.uid} ${item.username ? `${item.name} (@${item.username})` : item.name}: "${item.text.slice(0, 100)}"]`,
+      `[回复 uid ${item.uid} ${item.username ? `${item.name} (@${item.username})` : item.name}${item.messageId != null ? ` message_id=${item.messageId}` : ""}: "${item.text.slice(0, 100)}"]`,
     );
   }
   const urls = [

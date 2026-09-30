@@ -163,7 +163,9 @@ function formatRuntimeEvent(event: RuntimeEventRecord): string {
   const media = event.mediaRefs.length
     ? ` media=${event.mediaRefs.map((m) => m.type).join(",")}`
     : "";
-  const reply = event.replyTo?.text ? ` reply_to="${preview(event.replyTo.text, 80)}"` : "";
+  const reply = event.replyTo
+    ? ` reply_to_uid=${event.replyTo.uid} reply_to_name=${JSON.stringify(event.replyTo.name)}${event.replyTo.messageId != null ? ` reply_to_message_id=${event.replyTo.messageId}` : ""} reply_to_text=${JSON.stringify(preview(event.replyTo.text ?? "", 80))}`
+    : "";
   return `[${date}] ${event.kind}${ignored} ${label}(${event.uid})${reply}: ${preview(event.text)}${urls}${media}`;
 }
 

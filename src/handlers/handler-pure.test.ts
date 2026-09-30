@@ -17,7 +17,8 @@ const { getDismissRetryCount } = await import("./ai-dispatch.js");
 const { decideLocalAiRoute } = await import("./ai-routing.js");
 const { formatRollResult, parseRollCommand, parseShockCommand, parseStrokeCommand, rollDice } =
   await import("./command-parsers.js");
-const { buildBufferLine, buildUserMessage, detectTrigger } = await import("./message-builders.js");
+const { buildBufferLine, buildUserMessage, detectTrigger, getMessageSender } =
+  await import("./message-builders.js");
 
 const command = (length: number) => [{ type: "bot_command", offset: 0, length }];
 
@@ -93,6 +94,7 @@ test("message builders escape context, prioritize links, and detect triggers", (
     buildUserMessage({
       rawText: "<hello>",
       displayName: "A&B",
+      speakerUid: "42",
       mediaRefs: [{ type: "image", source: "current", fileId: "p" }],
       replyTo: undefined,
       isRepliedToBot: false,
@@ -108,6 +110,41 @@ test("message builders escape context, prioritize links, and detect triggers", (
   });
   assert.ok(line.indexOf("x.com") < line.indexOf("example.com"));
   assert.match(line, /贴纸: cat/);
+});
+
+test("reply context identifies both speakers even for a bot reply or chat sender", () => {
+  const reply = {
+    message_id: 19,
+    from: { id: 99, first_name: "Bot", username: "test_bot" },
+    text: "先前的回答",
+  } as never;
+  const current = buildUserMessage({
+    rawText: "你说的是这个吗",
+    displayName: "同名",
+    speakerUid: "42",
+    mediaRefs: [],
+    replyTo: reply,
+    isRepliedToBot: true,
+    urls: [],
+  });
+  assert.match(current, /<speaker uid="42" name="同名"/);
+  assert.match(current, /<reply_to uid="99" name="Bot" username="test_bot" message_id="19">/);
+  assert.match(current, /<quoted_text>先前的回答<\/quoted_text>/);
+
+  const chatReply = {
+    message_id: 20,
+    from: { id: 1087968824, first_name: "GroupAnonymousBot" },
+    sender_chat: { id: -100, title: "群管理员", type: "supergroup" },
+    text: "群公告",
+  } as never;
+  assert.deepEqual(getMessageSender(chatReply), { uid: "chat:-100", name: "群管理员" });
+  const line = buildBufferLine({
+    rawText: "收到",
+    mediaRefs: [],
+    urls: [],
+    replyToInfo: { ...getMessageSender(chatReply), text: "群公告", messageId: 20 },
+  });
+  assert.match(line, /回复 uid chat:-100 群管理员 message_id=20: "群公告"/);
 });
 
 test("dismiss retry matrix retries only triggered simple and complex turns", () => {

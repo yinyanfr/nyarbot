@@ -308,6 +308,29 @@ test("content signatures include media and replies and expire after seven days",
   assert.equal(expired.accepted, true);
 });
 
+test("runtime history retains quoted sender identity instead of only quoted text", async () => {
+  const harness = createHarness({
+    loadRecentRuntimeEvents: async () => [
+      {
+        chatId: "-100",
+        messageId: 21,
+        kind: "user_message",
+        uid: "42",
+        name: "同名",
+        text: '[回复 uid 43 同名: "你好"] 你说的？',
+        mediaRefs: [],
+        urls: [],
+        replyTo: { uid: "43", name: "同名", text: "你好", messageId: 19 },
+        ts: 1_000,
+      },
+    ],
+  });
+  const context = await harness.runtime.loadContext();
+  assert.match(context.recentEventsText, /同名\(42\)/);
+  assert.match(context.recentEventsText, /reply_to_uid=43 reply_to_name="同名"/);
+  assert.match(context.recentEventsText, /reply_to_message_id=19 reply_to_text="你好"/);
+});
+
 test("applies duplicate-text and burst cooldown gates per user", async () => {
   const harness = createHarness();
   await harness.runtime.ingestUserMessage(input({ messageId: 1, ts: 1_000 }));
