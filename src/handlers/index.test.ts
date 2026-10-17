@@ -82,6 +82,7 @@ function fixture(options: FixtureOptions = {}) {
     setNightyTimestamp: async () => undefined,
     buildStatusText: async () => "status response",
     generateDiaryForDate: async () => "diary response",
+    retryAndPublishDiary: async () => "published",
     generateWordcloudPreviewForDateWithRetry: async () => null,
     listDiaryObservationsByDate: async () => [],
     retractDiaryObservation: async () => ({ action: "retracted" }),
@@ -619,6 +620,64 @@ test("private admin status, diary, and diary regeneration cover success, empty, 
   });
 });
 
+test("diaryretry is private admin only and defaults to yesterday", async () => {
+  const dates: string[] = [];
+  const setup = fixture({
+    overrides: {
+      retryAndPublishDiary: async (date) => {
+        dates.push(date);
+        return "published";
+      },
+    },
+  });
+  const { yesterdayDateStr } = await import("../libs/time.js");
+  await setup.bot.handleUpdate(privateCommand("/diaryretry"));
+  await setup.bot.handleUpdate(privateCommand("/diaryretry@test_bot 2026-08-10", 2));
+  for (const [updateId, chatType, fromId] of [
+    [3, "private", 2],
+    [4, "group", 1],
+  ] as const) {
+    await setup.bot.handleUpdate(
+      update({
+        updateId,
+        chatId: chatType === "private" ? 2 : -100,
+        chatType,
+        fromId,
+        text: "/diaryretry",
+        entities: [{ type: "bot_command", offset: 0, length: 11 }],
+      }),
+    );
+  }
+  assert.deepEqual(dates, [yesterdayDateStr(), "2026-08-10"]);
+  assert.ok(setup.apiCalls.some((call) => String(call.payload.text).includes("已生成、保存")));
+});
+
+test("diaryretry reports service outcomes and errors", async () => {
+  for (const result of [
+    "no_material",
+    "failed",
+    "publish_incomplete",
+    "invalid_date",
+    "busy",
+    "already_generated",
+    "stopped",
+  ] as const) {
+    const setup = fixture({ overrides: { retryAndPublishDiary: async () => result } });
+    await setup.bot.handleUpdate(privateCommand("/diaryretry"));
+    assert.equal(setup.apiCalls.length, 2);
+    assert.doesNotMatch(String(setup.apiCalls.at(-1)?.payload.text), /已生成、保存/);
+  }
+  const setup = fixture({
+    overrides: {
+      retryAndPublishDiary: async () => {
+        throw new Error("offline");
+      },
+    },
+  });
+  await setup.bot.handleUpdate(privateCommand("/diaryretry"));
+  assert.match(String(setup.apiCalls.at(-1)?.payload.text), /出错/);
+});
+
 test("private wordcloud covers image, caption fallback, empty, and generation failure", async (t) => {
   await t.test("image success", async () => {
     const setup = fixture({
@@ -851,8 +910,9 @@ test("private command delivery guards contain Telegram outages across validation
   assert.equal(setup.apiCalls.length, 0);
 });
 
-test("nighty replies immediately and contains persistence rejection", async () => {
+test("nighty uses the saved nickname and contains timestamp persistence rejection", async () => {
   const setup = fixture({
+    user: { uid: "2", nickname: "大姐姐", memories: [] },
     overrides: {
       setNightyTimestamp: async () => {
         throw new Error("database unavailable");
@@ -863,8 +923,23 @@ test("nighty replies immediately and contains persistence rejection", async () =
     update({ text: "/nighty", entities: [{ type: "bot_command", offset: 0, length: 7 }] }),
   );
   await new Promise((resolve) => setImmediate(resolve));
-  assert.match(String(setup.replies[0]?.[1]), /晚安安 Alice/);
+  assert.match(String(setup.replies[0]?.[1]), /晚安安，大姐姐/);
   assert.equal(setup.replies[0]?.[4], "command_nighty");
+});
+
+test("nighty falls back to Telegram name when nickname is empty or lookup fails", async () => {
+  for (const getOrCreateUser of [
+    async () => ({ uid: "2", nickname: "", memories: [] }),
+    async () => {
+      throw new Error("database unavailable");
+    },
+  ]) {
+    const setup = fixture({ overrides: { getOrCreateUser } });
+    await setup.bot.handleUpdate(
+      update({ text: "/nighty", entities: [{ type: "bot_command", offset: 0, length: 7 }] }),
+    );
+    assert.match(String(setup.replies[0]?.[1]), /晚安安，Alice/);
+  }
 });
 
 test("morning generation failure is contained without dispatch", async () => {

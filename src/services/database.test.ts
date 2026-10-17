@@ -107,3 +107,51 @@ test("database adopts legacy metadata and rejects newer schemas", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("v2 memory migration preserves unknown time and minimum importance, is repeatable, and does not invent metadata", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "nyarbot-memory-migration-"));
+  const databasePath = path.join(directory, "legacy.sqlite");
+  const databaseModule = await import("./database.js");
+  try {
+    const old = databaseModule.initDatabase(databasePath);
+    old.exec("DROP TABLE user_memory_records");
+    old
+      .prepare("INSERT INTO users (firestore_id, uid, nickname, source_json) VALUES (?, ?, ?, ?)")
+      .run("firestore-alice", "42", "大姐姐", JSON.stringify({ uid: "42", memories: ["旧事实"] }));
+    old
+      .prepare("INSERT INTO user_memories (user_firestore_id, position, memory) VALUES (?, ?, ?)")
+      .run("firestore-alice", 0, "旧事实");
+    old.prepare("UPDATE schema_metadata SET value = '2' WHERE key = 'schema_version'").run();
+    old.pragma("user_version = 2");
+    databaseModule.closeDatabase();
+    const migrated = databaseModule.initDatabase(databasePath);
+    const record = migrated.prepare("SELECT * FROM user_memory_records").get() as Record<
+      string,
+      unknown
+    >;
+    assert.equal(record.subject_uid, "42");
+    assert.equal(record.content, "旧事实");
+    assert.equal(record.importance, 1);
+    assert.equal(record.recorded_at, null);
+    assert.equal(record.occurred_at, null);
+    assert.equal(record.reflection, null);
+    assert.equal(record.origin, "legacy");
+    assert.equal(migrated.prepare("SELECT COUNT(*) FROM user_memories").pluck().get(), 0);
+    assert.ok(
+      !String(migrated.prepare("SELECT source_json FROM users").pluck().get()).includes("旧事实"),
+    );
+    assert.deepEqual(migrated.pragma("foreign_key_check"), []);
+    databaseModule.closeDatabase();
+    assert.equal(
+      databaseModule
+        .initDatabase(databasePath)
+        .prepare("SELECT COUNT(*) FROM user_memory_records")
+        .pluck()
+        .get(),
+      1,
+    );
+  } finally {
+    databaseModule.closeDatabase();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -25,9 +25,11 @@ test("unified persistence preserves users and runtime state", async () => {
   try {
     databaseModule.initDatabase(databasePath);
     const created = await persistence.getOrCreateUser("42", "Alice");
-    assert.deepEqual(created, { uid: "42", nickname: "Alice", memories: [] });
-    assert.deepEqual(await persistence.updateUserMemory("42", "likes tea"), ["likes tea"]);
-    assert.deepEqual((await persistence.getOrCreateUser("42")).memories, ["likes tea"]);
+    assert.deepEqual(created, { uid: "42", nickname: "Alice" });
+    const { saveUserMemory, recallUserMemories } = await import("./user-memory.js");
+    await saveUserMemory("42", { content: "likes tea" });
+    assert.equal((await persistence.getOrCreateUser("42")).memories, undefined);
+    assert.equal((await recallUserMemories("42", { query: "tea" }))[0]?.content, "likes tea");
 
     await persistence.appendRuntimeEventAndAdvance(
       {

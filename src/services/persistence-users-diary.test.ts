@@ -18,7 +18,7 @@ Object.assign(process.env, {
   APP_TIMEZONE: "Asia/Shanghai",
 });
 
-test("user profile and memory operations persist normalized, capped state", async () => {
+test("user profiles persist independently of memory retrieval", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "nyarbot-users-test-"));
   const databaseModule = await import("./database.js");
   const persistence = await import("./persistence.js");
@@ -27,26 +27,17 @@ test("user profile and memory operations persist normalized, capped state", asyn
     assert.deepEqual(await persistence.getOrCreateUser("42", "Alice"), {
       uid: "42",
       nickname: "Alice",
-      memories: [],
     });
     await persistence.updateUserNickname("42", "  Ally  ");
     await persistence.updateUserTimeZone("42", "Europe/Paris");
     await persistence.setNightyTimestamp("42", 100);
     await persistence.setMorningGreeted("42", 200);
-    for (let index = 0; index < 32; index += 1) {
-      await persistence.updateUserMemory("42", `memory ${index}`);
-    }
-    assert.deepEqual(
-      await persistence.updateUserMemory("42", "memory 31"),
-      Array.from({ length: 30 }, (_, index) => `memory ${index + 2}`),
-    );
+    const { saveUserMemory } = await import("./user-memory.js");
+    await saveUserMemory("42", { content: "likes tea" });
     assert.equal(await persistence.countUsersWithMemories(), 1);
-    assert.equal(await persistence.removeUserMemory("42", "memory 2"), true);
-    await persistence.overwriteUserMemories("42", ["compressed"], ["memory 3", "memory 4"]);
     assert.deepEqual(await persistence.getOrCreateUser("42"), {
       uid: "42",
       nickname: "Ally",
-      memories: ["compressed", ...Array.from({ length: 27 }, (_, index) => `memory ${index + 5}`)],
       timeZone: "Europe/Paris",
       nightyTimestamp: 100,
       lastMorningGreet: 200,
@@ -67,12 +58,6 @@ test("user mutations handle empty input, missing users, and absent memories", as
     await persistence.getOrCreateUser("edge-user", "Alice");
     await persistence.updateUserNickname("edge-user", " \u0000 ");
     assert.equal((await persistence.getOrCreateUser("edge-user")).nickname, "Alice");
-    assert.deepEqual(await persistence.updateUserMemory("edge-user", " \u0000 "), []);
-    assert.equal(await persistence.removeUserMemory("edge-user", " \u0000 "), false);
-    assert.equal(await persistence.removeUserMemory("edge-user", "not present"), false);
-    assert.equal(await persistence.removeUserMemory("missing", "memory"), false);
-    await persistence.overwriteUserMemories("missing", ["replacement"], ["old"]);
-    await assert.rejects(persistence.updateUserMemory("missing", "memory"), /User not found/);
     await assert.rejects(persistence.updateUserTimeZone("missing", "UTC"), /User not found/);
     await assert.rejects(persistence.setNightyTimestamp("missing", 1), /User not found/);
     await assert.rejects(persistence.setMorningGreeted("missing", 1), /User not found/);

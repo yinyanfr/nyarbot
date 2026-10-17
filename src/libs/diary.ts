@@ -14,7 +14,7 @@ import {
   writeGeneratedDiary,
 } from "../services/persistence.js";
 import type { RuntimeEventRecord } from "../services/persistence.js";
-import { formatTimestamp, now, yesterdayDateStr } from "./time.js";
+import { dateRangeForTimezone, formatTimestamp, now, yesterdayDateStr } from "./time.js";
 import { logger } from "./logger.js";
 import { pushDiaryToGithub, waitForGithubPagesPublish } from "../services/github.js";
 import config from "../configs/env.js";
@@ -713,17 +713,27 @@ async function attemptDiaryGeneration(
   }
 }
 
+type DiaryPublishResult = "published" | "no_material" | "failed" | "publish_incomplete";
+
+export type DiaryRetryResult =
+  | DiaryPublishResult
+  | "invalid_date"
+  | "busy"
+  | "already_generated"
+  | "stopped";
+
 async function generateYesterdayDiary(
   yesterdayDate: string,
   dependencies: DiaryDependencies,
   diaryCallbacks: DiaryCallbacks | null,
   abortSignal?: AbortSignal,
-): Promise<boolean> {
+): Promise<DiaryPublishResult> {
   try {
     const result = await attemptDiaryGeneration(yesterdayDate, dependencies, abortSignal, true);
-    if (result.status === "no_material") return true;
-    if (result.status === "failed") return true;
+    if (result.status === "no_material") return "no_material";
+    if (result.status === "failed") return "failed";
     const diary = result.diary;
+    let publishFailed = false;
     dependencies.logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
 
     const wordcloudArtifact = await dependencies
@@ -776,6 +786,7 @@ async function generateYesterdayDiary(
           await diaryCallbacks.sendChannelText(diary, abortSignal);
           abortSignal?.throwIfAborted();
         } catch (fallbackErr) {
+          publishFailed = true;
           dependencies.logger.error(
             { err: fallbackErr, yesterdayDate, chatId: dependencies.config.tgDiaryChannelId },
             "diary: channel text fallback after photo failure also failed",
@@ -822,11 +833,12 @@ async function generateYesterdayDiary(
           }
         }
       } catch (err) {
+        publishFailed = true;
         dependencies.logger.warn({ err, yesterdayDate }, "diary: GitHub push or pages wait failed");
       }
     }
 
-    return deliverDiaryNotification(
+    const notified = await deliverDiaryNotification(
       yesterdayDate,
       diary,
       diaryUrl,
@@ -835,10 +847,11 @@ async function generateYesterdayDiary(
       diaryCallbacks,
       abortSignal,
     );
+    return notified && !publishFailed ? "published" : "publish_incomplete";
   } catch (err) {
-    if (abortSignal?.aborted) return false;
+    if (abortSignal?.aborted) return "publish_incomplete";
     dependencies.logger.error({ err, yesterdayDate }, "diary: generation failed");
-    return false;
+    return "publish_incomplete";
   }
 }
 
@@ -927,6 +940,7 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
   };
   const completedDates = new Set<string>();
   let diaryCheckPromise: Promise<void> | undefined;
+  let diaryRetryPromise: Promise<DiaryRetryResult> | undefined;
   let diaryCallbacks: DiaryCallbacks | null = null;
   const abortController = new AbortController();
 
@@ -939,8 +953,43 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
     return result.status === "generated" ? result.diary : null;
   }
 
+  async function retryAndPublishDiary(date: string): Promise<DiaryRetryResult> {
+    if (abortController.signal.aborted) return "stopped";
+    try {
+      if (
+        !dateRangeForTimezone(date, dependencies.config.appTimezone) ||
+        date > dependencies.yesterdayDateStr()
+      ) {
+        return "invalid_date";
+      }
+    } catch {
+      return "invalid_date";
+    }
+    if (diaryCheckPromise || diaryRetryPromise) return "busy";
+    const retry = (async (): Promise<DiaryRetryResult> => {
+      if (await dependencies.getGeneratedDiary(date)) return "already_generated";
+      if (!diaryCallbacks) return "stopped";
+      completedDates.delete(date);
+      const result = await generateYesterdayDiary(
+        date,
+        dependencies,
+        diaryCallbacks,
+        abortController.signal,
+      );
+      if (result !== "publish_incomplete") completedDates.add(date);
+      return result;
+    })();
+    diaryRetryPromise = retry;
+    try {
+      return await retry;
+    } finally {
+      if (diaryRetryPromise === retry) diaryRetryPromise = undefined;
+    }
+  }
+
   async function checkAndGenerateDiary(): Promise<void> {
     if (abortController.signal.aborted || !hasReachedDiaryPublishTime(dependencies)) return;
+    if (diaryRetryPromise) return;
     if (diaryCheckPromise) return diaryCheckPromise;
     const check = (async () => {
       const abortSignal = abortController.signal;
@@ -979,7 +1028,7 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
           diaryCallbacks,
           abortSignal,
         );
-        if (completed) {
+        if (completed !== "publish_incomplete") {
           completedDates.add(date);
           return;
         }
@@ -1000,13 +1049,21 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
   async function stopDiaryService(): Promise<void> {
     abortController.abort(new Error("Diary service stopped"));
     await diaryCheckPromise;
+    await diaryRetryPromise?.catch(() => undefined);
   }
 
-  return { initDiaryCallbacks, generateDiaryForDate, checkAndGenerateDiary, stopDiaryService };
+  return {
+    initDiaryCallbacks,
+    generateDiaryForDate,
+    retryAndPublishDiary,
+    checkAndGenerateDiary,
+    stopDiaryService,
+  };
 }
 
 const defaultDiaryService = createDiaryService();
 export const initDiaryCallbacks = defaultDiaryService.initDiaryCallbacks;
 export const generateDiaryForDate = defaultDiaryService.generateDiaryForDate;
+export const retryAndPublishDiary = defaultDiaryService.retryAndPublishDiary;
 export const checkAndGenerateDiary = defaultDiaryService.checkAndGenerateDiary;
 export const stopDiaryService = defaultDiaryService.stopDiaryService;

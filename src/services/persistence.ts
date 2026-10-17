@@ -8,7 +8,6 @@ import {
 import {
   normalizePromptData,
   prepareDiaryNoteForStorage,
-  prepareMemoryForStorage,
   prepareNicknameForStorage,
 } from "../libs/prompt-safety.js";
 import {
@@ -20,7 +19,6 @@ import {
 import config from "../configs/env.js";
 import { getDatabase } from "./database.js";
 
-const MEMORY_MAX_ENTRIES = 30;
 const DIARY_OBSERVATION_DEDUPE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 const DIARY_OBSERVATION_SAME_SOURCE_MERGE_WINDOW_MS = 2 * 60 * 1000;
 
@@ -46,14 +44,9 @@ function parseJson<T>(json: string): T | null {
 }
 
 function toUser(row: UserRow): User {
-  const memories = getDatabase()
-    .prepare(`SELECT memory FROM user_memories WHERE user_firestore_id = ? ORDER BY position ASC`)
-    .pluck()
-    .all(row.firestore_id) as string[];
   return {
     uid: row.uid,
     nickname: row.nickname,
-    memories,
     ...(row.timezone !== null ? { timeZone: row.timezone } : {}),
     ...(row.nighty_timestamp !== null ? { nightyTimestamp: row.nighty_timestamp } : {}),
     ...(row.last_morning_greet !== null ? { lastMorningGreet: row.last_morning_greet } : {}),
@@ -73,14 +66,6 @@ function requireUpdatedUser(changes: number, uid: string): void {
   if (changes === 0) throw new Error(`User not found: ${uid}`);
 }
 
-function replaceUserMemories(userId: string, memories: string[]): void {
-  getDatabase().prepare(`DELETE FROM user_memories WHERE user_firestore_id = ?`).run(userId);
-  const insert = getDatabase().prepare(
-    `INSERT INTO user_memories (user_firestore_id, position, memory) VALUES (?, ?, ?)`,
-  );
-  memories.forEach((memory, position) => insert.run(userId, position, memory));
-}
-
 const USER_CACHE_TTL_MS = 60_000;
 interface CacheEntry {
   promise: Promise<User>;
@@ -96,7 +81,7 @@ function loadOrCreateUser(uid: string, firstName?: string): User {
   return getDatabase().transaction((): User => {
     const existing = getUserRow(uid);
     if (existing) return toUser(existing);
-    const user: User = { uid, nickname: firstName ?? "", memories: [] };
+    const user: User = { uid, nickname: firstName ?? "" };
     getDatabase()
       .prepare(`INSERT INTO users (firestore_id, uid, nickname, source_json) VALUES (?, ?, ?, ?)`)
       .run(uid, uid, user.nickname, JSON.stringify(user));
@@ -132,60 +117,13 @@ export async function updateUserTimeZone(uid: string, timeZone: string): Promise
   invalidateUserCache(uid);
 }
 
-export async function updateUserMemory(uid: string, memory: string): Promise<string[]> {
-  const trimmed = prepareMemoryForStorage(memory);
-  if (!trimmed) return [];
-  const result = getDatabase().transaction(() => {
-    const row = getUserRow(uid);
-    if (!row) throw new Error(`User not found: ${uid}`);
-    const existing = toUser(row).memories;
-    if (existing.includes(trimmed)) return existing;
-    const next = [...existing, trimmed];
-    const capped = next.length > MEMORY_MAX_ENTRIES ? next.slice(-MEMORY_MAX_ENTRIES) : next;
-    replaceUserMemories(row.firestore_id, capped);
-    return capped;
-  })();
-  invalidateUserCache(uid);
-  return result;
-}
-
-export async function overwriteUserMemories(
-  uid: string,
-  compressedMemories: string[],
-  originalMemories: string[],
-): Promise<void> {
-  getDatabase().transaction(() => {
-    const row = getUserRow(uid);
-    if (!row) return;
-    const originals = new Set(originalMemories);
-    const newMemories = toUser(row).memories.filter((entry) => !originals.has(entry));
-    const merged = [...compressedMemories, ...newMemories];
-    const capped = merged.length > MEMORY_MAX_ENTRIES ? merged.slice(-MEMORY_MAX_ENTRIES) : merged;
-    replaceUserMemories(row.firestore_id, capped);
-  })();
-  invalidateUserCache(uid);
-}
-
-export async function removeUserMemory(uid: string, memory: string): Promise<boolean> {
-  const target = prepareMemoryForStorage(memory);
-  if (!target) return false;
-  const removed = getDatabase().transaction(() => {
-    const row = getUserRow(uid);
-    if (!row) return false;
-    const existing = toUser(row).memories;
-    const next = existing.filter((entry) => normalizePromptData(entry, 160) !== target);
-    if (next.length === existing.length) return false;
-    replaceUserMemories(row.firestore_id, next);
-    return true;
-  })();
-  invalidateUserCache(uid);
-  return removed;
-}
-
 export async function countUsersWithMemories(): Promise<number> {
   const row = getDatabase()
-    .prepare(`SELECT COUNT(DISTINCT user_firestore_id) AS count FROM user_memories`)
-    .get() as { count: number };
+    .prepare(
+      `SELECT COUNT(DISTINCT subject_uid) AS count FROM user_memory_records
+      WHERE status = 'active' AND (expires_at IS NULL OR expires_at > ?)`,
+    )
+    .get(Date.now()) as { count: number };
   return row.count;
 }
 

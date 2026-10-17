@@ -36,9 +36,9 @@ import {
   pickRandomStickerEmoji,
 } from "../libs/stickers.js";
 import { getProactiveHealthSnapshot, touchBotActivity } from "../libs/proactive.js";
-import { generateDiaryForDate } from "../libs/diary.js";
+import { generateDiaryForDate, retryAndPublishDiary } from "../libs/diary.js";
 import { generateWordcloudPreviewForDateWithRetry } from "../libs/wordcloud.js";
-import { formatTimestamp, todayDateStr } from "../libs/time.js";
+import { formatTimestamp, todayDateStr, yesterdayDateStr } from "../libs/time.js";
 import { logger } from "../libs/logger.js";
 import type { User } from "../global.d.js";
 import type { BotContext, BotInfo } from "./context.js";
@@ -1140,6 +1140,7 @@ export interface HandlerDependencies {
   setNightyTimestamp: typeof setNightyTimestamp;
   buildStatusText: typeof buildStatusText;
   generateDiaryForDate: typeof generateDiaryForDate;
+  retryAndPublishDiary: typeof retryAndPublishDiary;
   generateWordcloudPreviewForDateWithRetry: typeof generateWordcloudPreviewForDateWithRetry;
   listDiaryObservationsByDate: typeof listDiaryObservationsByDate;
   retractDiaryObservation: typeof retractDiaryObservation;
@@ -1170,6 +1171,7 @@ const defaultHandlerDependencies: HandlerDependencies = {
   setNightyTimestamp,
   buildStatusText,
   generateDiaryForDate,
+  retryAndPublishDiary,
   generateWordcloudPreviewForDateWithRetry,
   listDiaryObservationsByDate,
   retractDiaryObservation,
@@ -1362,6 +1364,32 @@ export function setupHandlers(
         return;
       }
 
+      if (matchCommand(privEntities, privText, "/diaryretry", botUsername)) {
+        const date =
+          privText.replace(/^\/diaryretry(?:@\w+)?\s*/u, "").trim() || yesterdayDateStr();
+        await ctx.reply(`正在补生成并发布日记 ${date}...`).catch(() => void 0);
+        try {
+          const result = await dependencies.retryAndPublishDiary(date);
+          const messages = {
+            published: `${date} 日记已生成、保存，并完成配置的发布流程。`,
+            no_material: "这一天没有可用的日记素材，未生成或发布。",
+            failed: "日记生成失败，未发布；可稍后再次使用 /diaryretry 重试。",
+            publish_incomplete:
+              "日记流程未全部完成，请检查日志；如已保存日记，将不会重复生成或发布。",
+            invalid_date: "用法: /diaryretry [YYYY-MM-DD]，仅支持昨天及更早的有效日期，默认昨天。",
+            busy: "日记任务正在执行，请完成后再试。",
+            already_generated:
+              "这一天已有保存的日记，不会覆盖或重复发布；未发送的群通知由定时任务补发。",
+            stopped: "日记发布服务未就绪或已停止。",
+          };
+          await ctx.reply(messages[result]).catch(() => void 0);
+        } catch (err) {
+          logger.error({ err, date }, "private /diaryretry failed");
+          await ctx.reply("补生成或发布日记时出错，请检查日志后重试。").catch(() => void 0);
+        }
+        return;
+      }
+
       if (matchCommand(privEntities, privText, "/diaryregen", botUsername)) {
         const date = privText.replace(/^\/diaryregen(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         await ctx.reply(`正在重生日记 ${date}...`).catch(() => void 0);
@@ -1388,17 +1416,22 @@ export function setupHandlers(
     const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
 
     if (matchCommand(entities, rawText, "/nighty", botUsername)) {
-      const replyName = from.first_name || "大哥哥";
+      const user = await dependencies
+        .getOrCreateUser(from.id.toString(), from.first_name)
+        .catch((err: unknown) => {
+          logger.warn({ err, uid: from.id.toString() }, "failed to load /nighty nickname");
+          return null;
+        });
+      const replyName = user?.nickname || from.first_name || "大哥哥";
       await dependencies.replyAndTrack(
         ctx,
-        `晚安安 ${replyName}~ 🌙`,
+        `晚安安，${replyName}~ 🌙`,
         msg.message_id,
         false,
         "command_nighty",
       );
       void dependencies
-        .getOrCreateUser(from.id.toString(), from.first_name)
-        .then((user) => dependencies.setNightyTimestamp(user.uid, Date.now()))
+        .setNightyTimestamp(user?.uid ?? from.id.toString(), Date.now())
         .catch((err: unknown) => {
           logger.warn({ err, uid: from.id.toString() }, "failed to persist /nighty timestamp");
         });

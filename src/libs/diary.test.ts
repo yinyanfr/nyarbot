@@ -84,6 +84,106 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
   return { service: createDiaryService(dependencies), records, generated, notificationDates };
 }
 
+test("manual retry bypasses terminal failures and publishes with scheduled callbacks", async () => {
+  const sent: string[] = [];
+  const f = diaryFixture({
+    hasTerminalDiaryGenerationFailure: async () => true,
+    pushDiaryToGithub: async () => {
+      sent.push("github");
+      return null;
+    },
+  });
+  f.service.initDiaryCallbacks({
+    sendText: async () => {
+      sent.push("group");
+    },
+    sendChannelText: async () => {
+      sent.push("channel");
+    },
+    sendChannelPhoto: async () => {
+      sent.push("photo");
+    },
+  });
+  await f.service.checkAndGenerateDiary();
+  assert.equal(f.generated.length, 0);
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "published");
+  assert.equal(f.generated.length, 1);
+  assert.deepEqual(sent, ["channel", "github", "group"]);
+  assert.deepEqual(f.notificationDates, ["2026-08-11"]);
+});
+
+test("manual retry refuses invalid dates, existing diaries, and unavailable service", async () => {
+  const f = diaryFixture();
+  for (const date of ["nope", "2026-02-30", "2026-08-12", "2026-08-13"]) {
+    assert.equal(await f.service.retryAndPublishDiary(date), "invalid_date");
+  }
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "stopped");
+  const existing = diaryFixture({ getGeneratedDiary: async () => "saved" });
+  assert.equal(await existing.service.retryAndPublishDiary("2026-08-11"), "already_generated");
+  assert.equal(existing.generated.length, 0);
+  await f.service.stopDiaryService();
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "stopped");
+});
+
+test("manual retry distinguishes no material, generation failure, and publication failure", async () => {
+  for (const [overrides, expected] of [
+    [{ listActiveDiaryObservationsByDate: async () => [] }, "no_material"],
+    [
+      {
+        generateText: async () => {
+          throw new Error("model unavailable");
+        },
+      },
+      "failed",
+    ],
+    [
+      {
+        pushDiaryToGithub: async () => {
+          throw new Error("github unavailable");
+        },
+      },
+      "publish_incomplete",
+    ],
+  ] as const) {
+    const f = diaryFixture(overrides as Partial<DiaryDependencies>);
+    f.service.initDiaryCallbacks({
+      sendText: async () => undefined,
+      sendChannelText: async () => undefined,
+      sendChannelPhoto: async () => undefined,
+    });
+    assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), expected);
+  }
+});
+
+test("manual retry shares scheduler exclusion and is aborted and awaited on shutdown", async () => {
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const f = diaryFixture({
+    generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) => {
+      started();
+      await new Promise<void>((resolve) =>
+        input.abortSignal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      input.abortSignal?.throwIfAborted();
+      return { text: "unused" };
+    }) as DiaryDependencies["generateText"],
+  });
+  f.service.initDiaryCallbacks({
+    sendText: async () => undefined,
+    sendChannelText: async () => undefined,
+    sendChannelPhoto: async () => undefined,
+  });
+  const retry = f.service.retryAndPublishDiary("2026-08-11");
+  await ready;
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-10"), "busy");
+  await f.service.checkAndGenerateDiary();
+  await f.service.stopDiaryService();
+  assert.equal(await retry, "publish_incomplete");
+  assert.equal(f.generated.length, 0);
+});
+
 test("material precedence is observations, legacy entries, then bounded runtime events", async () => {
   let legacyCalls = 0;
   let runtimeCalls = 0;

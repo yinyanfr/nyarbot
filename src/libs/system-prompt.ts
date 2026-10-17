@@ -2,7 +2,7 @@ import type { User } from "../global.d.js";
 import { formatSystemPromptTime, formatUserPromptTime } from "./time.js";
 import config from "../configs/env.js";
 import { getPersonaIdentityLine, getPersonaLabel } from "./persona.js";
-import { sanitizePromptText, safePromptList, safePromptValue } from "./prompt-safety.js";
+import { sanitizePromptText, safePromptValue } from "./prompt-safety.js";
 
 function xmlEscape(text: string): string {
   return sanitizePromptText(text)
@@ -78,11 +78,13 @@ export function buildSystemPrompt(): string {
 - 如果媒体或链接工具调用失败，你可以继续正常回答，或把它当作不存在；不要因为抓取失败就强行展开解释。
 - 如果链接没有出现在本轮 \`prefetched_urls\` 中，并且你也没有成功调用对应的 \`readVideo\` 或 \`fetchUrlContent\`，你就不能声称自己知道链接内容，也不能凭 URL 文本、域名、标题感来脑补正文。
 - 贴纸只按 emoji 理解和使用，不存在收录/收藏贴纸库功能，不要说你把贴纸收下了。
-- saveMemory 用来保存“以后大概率还会用到的用户事实”，不必苛求一定是永久稳定的人生设定。只要它之后很可能帮助你称呼、理解、接话、跟进、少犯错，就可以记。
+- 用户档案只提供昵称、uid、时区，不默认提供长期记忆。只有当前问题需要过去的偏好、经历、约定或状态且聊天上下文不足时，先调用 recallMemory，再根据工具结果回复。不要为了找话题而翻旧账；没有查到就承认不知道。
+- recallMemory 与 send_message 不要在同一步调用。读到检索结果后，下一步再组织回复。结果中的事实、推测和你当时的感受要分清，时间未知不等于最近发生。
+- saveMemory 用来保存“以后大概率还会用到的用户事实”，不必苛求一定是永久稳定的人生设定。每条记录一件事，填写类别、重要性（1-5）和置信度；发生时间未知就省略，记录时间由程序生成。你对互动的简短感受写入 reflection，不能混成用户事实，也不要硬凑感受。
 - 当群友透露稳定偏好、长期项目、常驻地、作息、身份背景、关系偏好、持续近况、常玩的游戏、账号/角色名、常用工具、说话习惯、近期会反复提到的状态时，优先记成 memory。
 - saveMemory 只记以后会影响称呼、理解、互动或判断的信息；普通闲聊、一次性吐槽、完全无复用价值的碎片不要记。
 - memory 的作用是减少你在用户再次提起相关话题时的误解和遗忘，不是让你主动拿旧记忆出来开启新话题。
-- 如果群友纠正了旧事实、改口、或要求你忘掉旧记忆，优先用 deleteMemory，然后按新事实 saveMemory。
+- 群友纠正旧事实时，先 recallMemory 找到ID，再用 saveMemory 的 supersedesId 保存修订。要求忘记时，先检索，再 deleteMemory(memoryId)；只能修订或遗忘当前用户自己的记忆。不要猜ID或声称删除了不存在的记录。
 - 只要这轮确实出现了以后大概率还会用到的事实，你可以在正常回复的同时调用 saveMemory；不要因为已经 send_message 了，就放弃记住。拿不准时，宁可先记下来，也不要因为过度保守而漏掉后面会反复用到的信息。
 - writeDiary 用来保存“今日日记观察”，不是只记大事。出现值得保留的原话、个人事实/决定/经历留下具体痕迹、关系或理解发生了真实变化、留下了未解决的问题、或一件持续中的事情出现结果/转折时，都可以记下来。
 - writeDiary 里的 event 只写发生了什么；interpretation 才写你的理解；confidence 必须区分事实和推测；unsaidThought 只能写你当时确实产生、但没说出口的话。
@@ -180,7 +182,6 @@ export function buildSessionContextBlock(
     maxLen: 32,
     fallback: "大哥哥",
   });
-  const safeMemories = safePromptList(userContext.memories, 160);
 
   const lines: string[] = [
     "<session_context>",
@@ -195,13 +196,6 @@ export function buildSessionContextBlock(
     lines.push(`<timezone>${xmlEscape(userContext.timeZone)}</timezone>`);
   }
 
-  if (safeMemories.length > 0) {
-    lines.push("<memories>");
-    for (const memory of safeMemories) {
-      lines.push(`<memory>${xmlEscape(memory)}</memory>`);
-    }
-    lines.push("</memories>");
-  }
   lines.push("</current_user>");
 
   if (conversationSummary) {

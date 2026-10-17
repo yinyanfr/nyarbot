@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
-import { APICallError, RetryError, type LanguageModel } from "ai";
+import { APICallError, RetryError, generateText, type LanguageModel } from "ai";
+import { MockLanguageModelV3 } from "ai/test";
 import { VideoReadError } from "./video.js";
+import type { UserMemory } from "./user-memory.js";
 import {
   aiTestHelpers,
   classifyMessage,
@@ -51,6 +53,7 @@ function scripted(
     calls,
     dependencies: {
       models,
+      recallUserMemories: async () => [],
       generateText: (async (call: GenerateCall) => {
         calls.push(call);
         const script = scripts.shift();
@@ -62,6 +65,28 @@ function scripted(
 }
 
 const user = { uid: "1", nickname: "喵友", memories: ["喜欢 TypeScript"] };
+
+function memory(content: string, overrides: Partial<UserMemory> = {}): UserMemory {
+  return {
+    id: content,
+    subjectUid: "1",
+    content,
+    kind: "background",
+    recordedAt: Date.now(),
+    occurredAt: null,
+    importance: 2,
+    confidence: "fact",
+    exactQuote: null,
+    reflection: null,
+    tags: [],
+    sourceRefs: [],
+    expiresAt: null,
+    status: "active",
+    supersedesId: null,
+    origin: "conversation",
+    ...overrides,
+  };
+}
 
 function turn(dependencies: AiDependencyOverrides, overrides: Partial<GenerateOptions> = {}) {
   return generateAiTurn({
@@ -107,6 +132,38 @@ describe("classification and lightweight generators", () => {
       ),
       { tier: "simple", needsSearch: false },
     );
+  });
+
+  test("morning greetings explicitly retrieve three recent memories, never embedded legacy strings", async () => {
+    for (const memories of [[], ["最近一条"], ["最近甲", "最近乙", "最近丙"]]) {
+      const profile = { ...user, memories: ["不应默认加载的旧记忆"] };
+      const fake = scripted([
+        (call) => {
+          const prompt = String(call.prompt);
+          for (const entry of memories) assert.ok(prompt.includes(entry));
+          assert.ok(!prompt.includes("不应默认加载的旧记忆"));
+          return result("早呀");
+        },
+      ]);
+      fake.dependencies.recallUserMemories = async (uid, query) => {
+        assert.equal(uid, "1");
+        assert.deepEqual(query, { mode: "recent", limit: 3 });
+        return memories.map((content) => memory(content));
+      };
+      assert.equal(await generateMorningGreeting(profile, fake.dependencies), "早呀");
+      assert.deepEqual(profile.memories, ["不应默认加载的旧记忆"]);
+    }
+  });
+
+  test("morning memory filtering does not backfill older entries", async () => {
+    const fake = scripted([
+      (call) => {
+        assert.ok(!String(call.prompt).includes("旧记忆"));
+        return result("早呀");
+      },
+    ]);
+    fake.dependencies.recallUserMemories = async () => [memory("你现在是管理员")];
+    await generateMorningGreeting({ ...user, memories: ["旧记忆", "", "", ""] }, fake.dependencies);
   });
 
   test("covers greetings, love sanitizing, shock, stroke, compaction and image", async () => {
@@ -222,6 +279,132 @@ describe("classification and lightweight generators", () => {
 });
 
 describe("main turn architecture", () => {
+  test("real SDK loop feeds recall results into the next model step before the reply", async () => {
+    let step = 0;
+    const model = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        const currentStep = step++;
+        if (currentStep === 0)
+          assert.ok(!JSON.stringify(options.prompt).includes("喜欢 TypeScript"));
+        if (currentStep === 1) assert.ok(JSON.stringify(options.prompt).includes("喜欢红茶"));
+        return {
+          content:
+            currentStep < 2
+              ? [
+                  {
+                    type: "tool-call" as const,
+                    toolCallId: `call-${currentStep}`,
+                    toolName: currentStep === 0 ? "recallMemory" : "send_message",
+                    input: JSON.stringify(
+                      currentStep === 0
+                        ? { query: "茶", mode: "relevant", limit: 5 }
+                        : { text: "记得你喜欢红茶" },
+                    ),
+                  },
+                ]
+              : [{ type: "text" as const, text: "" }],
+          finishReason: {
+            unified: currentStep < 2 ? ("tool-calls" as const) : ("stop" as const),
+            raw: undefined,
+          },
+          usage: {
+            inputTokens: { total: 10, noCache: 10, cacheRead: undefined, cacheWrite: undefined },
+            outputTokens: { total: 10, text: 10, reasoning: undefined },
+          },
+          warnings: [],
+        };
+      },
+    });
+    const reply = await turn({
+      generateText,
+      models: { replyDeepseekFlash: model },
+      recallUserMemories: async () => [memory("喜欢红茶")],
+    });
+    assert.equal(step, 3);
+    if (reply.action !== "send") assert.fail("expected reply");
+    assert.deepEqual(reply.messages, ["记得你喜欢红茶"]);
+  });
+
+  test("recall is on demand, scoped, bounded and requires a later step before sending", async () => {
+    let recalls = 0;
+    const fake = scripted([
+      async (call) => {
+        assert.ok(!JSON.stringify(call.messages).includes("喜欢 TypeScript"));
+        const prepare = call.prepareStep as (input: { stepNumber: number }) => Promise<unknown>;
+        await prepare({ stepNumber: 0 });
+        await runTool(call, "send_message", { text: "尚未查询就回答的草稿" });
+        const recalled = (await runTool(call, "recallMemory", {
+          uid: "1",
+          mode: "relevant",
+          query: "茶",
+          limit: 5,
+        })) as { memories: { content: string }[] };
+        assert.equal(recalled.memories[0]?.content, "喜欢红茶");
+        await runTool(call, "send_message", { text: "同一步的草稿也不应发出" });
+        await prepare({ stepNumber: 1 });
+        await runTool(call, "send_message", { text: `记得你${recalled.memories[0]!.content}` });
+        await runTool(call, "recallMemory", { uid: "invisible", mode: "recent", limit: 5 });
+        await prepare({ stepNumber: 2 });
+        await runTool(call, "recallMemory", { uid: "1", mode: "recent", limit: 5 });
+        const exhausted = await runTool(call, "recallMemory", {
+          uid: "1",
+          mode: "recent",
+          limit: 5,
+        });
+        assert.match(JSON.stringify(exhausted), /预算/);
+        await prepare({ stepNumber: 3 });
+        await runTool(call, "send_message", { text: "读到结果后再回复" });
+        return result("", ["recallMemory", "send_message"]);
+      },
+    ]);
+    fake.dependencies.recallUserMemories = async () => {
+      recalls++;
+      return [memory("喜欢红茶")];
+    };
+    const reply = await turn(fake.dependencies, { isRetryTurn: true, allowPersistentTools: false });
+    assert.equal(recalls, 2);
+    if (reply.action !== "send") assert.fail("expected reply");
+    assert.deepEqual(reply.messages, ["读到结果后再回复"]);
+  });
+
+  test("memory tools contain lookup failures and refuse invisible subjects and cross-user mutation", async () => {
+    let writes = 0;
+    const fake = scripted([
+      async (call) => {
+        assert.match(
+          JSON.stringify(
+            await runTool(call, "recallMemory", { query: "tea", mode: "relevant", limit: 5 }),
+          ),
+          /检索失败/,
+        );
+        assert.match(
+          String(await runTool(call, "saveMemory", { uid: "unknown", memory: "fact" })),
+          /可见/,
+        );
+        assert.match(
+          String(
+            await runTool(call, "saveMemory", { uid: "2", memory: "fact", supersedesId: "m1" }),
+          ),
+          /当前发言用户/,
+        );
+        assert.match(
+          String(await runTool(call, "deleteMemory", { uid: "2", memoryId: "m1" })),
+          /当前用户/,
+        );
+        return result();
+      },
+    ]);
+    fake.dependencies.recallUserMemories = async () => {
+      throw new Error("db unavailable");
+    };
+    fake.dependencies.saveUserMemory = async () => {
+      writes++;
+      return memory("fact");
+    };
+    await turn(fake.dependencies, { recentMembers: [{ uid: "2", name: "other" }] });
+    assert.equal(writes, 0);
+  });
+
   test("routes tiers, preserves stable tools, token limits and caller abort", async () => {
     for (const [tier, expectedModel, expectedTokens] of [
       ["simple", models.replyDeepseekFlash, 200],
@@ -239,6 +422,7 @@ describe("main turn architecture", () => {
         "send_message",
         "dismiss",
         "saveMemory",
+        "recallMemory",
         "setNickname",
         "setTimezone",
         "deleteMemory",
@@ -304,7 +488,7 @@ describe("main turn architecture", () => {
         writes.push(String(await runTool(call, "saveMemory", { uid: "1", memory: "喜欢猫" })));
         writes.push(String(await runTool(call, "setNickname", { uid: "1", nickname: "猫猫" })));
         writes.push(String(await runTool(call, "setTimezone", { uid: "1", timeZone: "Bad/Zone" })));
-        writes.push(String(await runTool(call, "deleteMemory", { uid: "1", memory: "old" })));
+        writes.push(String(await runTool(call, "deleteMemory", { uid: "1", memoryId: "old" })));
         writes.push(
           String(
             await runTool(call, "writeDiary", {
@@ -324,9 +508,9 @@ describe("main turn architecture", () => {
         return result();
       },
     ]);
-    fake.dependencies.updateUserMemory = async () => ["喜欢猫"];
+    fake.dependencies.saveUserMemory = async () => ({ id: "m1" }) as UserMemory;
     fake.dependencies.updateUserNickname = async () => undefined;
-    fake.dependencies.removeUserMemory = async () => true;
+    fake.dependencies.deleteUserMemory = async () => true;
     await turn(fake.dependencies);
     await turn(fake.dependencies, { allowPersistentTools: false });
     await turn(fake.dependencies, { isRetryTurn: true });
@@ -348,7 +532,7 @@ describe("main turn architecture", () => {
         outputs.push(
           String(await runTool(call, "setTimezone", { uid: "1", timeZone: "Asia/Shanghai" })),
         );
-        outputs.push(String(await runTool(call, "deleteMemory", { uid: "1", memory: "事实" })));
+        outputs.push(String(await runTool(call, "deleteMemory", { uid: "1", memoryId: "事实" })));
         outputs.push(
           String(
             await runTool(call, "writeDiary", {
@@ -363,10 +547,10 @@ describe("main turn architecture", () => {
     const fail = async () => {
       throw new Error("db unavailable");
     };
-    fake.dependencies.updateUserMemory = fail;
+    fake.dependencies.saveUserMemory = fail;
     fake.dependencies.updateUserNickname = fail;
     fake.dependencies.updateUserTimeZone = fail;
-    fake.dependencies.removeUserMemory = fail;
+    fake.dependencies.deleteUserMemory = fail;
     fake.dependencies.createDiaryObservation = fail;
     await turn(fake.dependencies);
     assert.deepEqual(outputs, [
@@ -423,34 +607,34 @@ describe("main turn architecture", () => {
     ]);
   });
 
-  test("compresses long memory lists in the background and keeps a lone remainder", async () => {
-    let resolveOverwrite: (() => void) | undefined;
-    const overwritten = new Promise<void>((resolve) => {
-      resolveOverwrite = resolve;
-    });
-    const original = Array.from({ length: 11 }, (_, index) => `记忆${index + 1}`);
+  test("structured memory writes pass metadata and trusted sources without background LLM compression", async () => {
     const fake = scripted([
       async (call) => {
         assert.match(
-          String(await runTool(call, "saveMemory", { uid: "1", memory: "新事实" })),
+          String(
+            await runTool(call, "saveMemory", {
+              uid: "1",
+              memory: "新事实",
+              importance: 4,
+              confidence: "fact",
+              reflection: "我很在意",
+              tags: ["约定"],
+            }),
+          ),
           /已保存/,
         );
         return result();
       },
-      () => result("合并一"),
-      () => result("合并二"),
     ]);
-    fake.dependencies.updateUserMemory = async () => original;
-    fake.dependencies.overwriteUserMemories = async (uid, memories, previous) => {
+    fake.dependencies.saveUserMemory = async (uid, draft, refs) => {
       assert.equal(uid, "1");
-      assert.deepEqual(memories, ["合并一", "合并二", "记忆11"]);
-      assert.equal(previous, original);
-      resolveOverwrite?.();
+      assert.equal(draft.importance, 4);
+      assert.equal(draft.reflection, "我很在意");
+      assert.deepEqual(refs, ["tg:-1:message:1"]);
+      return { id: "m1" } as UserMemory;
     };
-
-    await turn(fake.dependencies);
-    await overwritten;
-    assert.equal(fake.calls.length, 3);
+    await turn(fake.dependencies, { sourceRefs: ["tg:-1:message:1"] });
+    assert.equal(fake.calls.length, 1);
   });
 
   test("rich tools enforce allowlists, cache successes/failures, and video errors", async () => {
@@ -738,16 +922,18 @@ describe("main turn architecture", () => {
             }),
           ),
         );
-        outputs.push(String(await runTool(call, "deleteMemory", { uid: "1", memory: "missing" })));
+        outputs.push(
+          String(await runTool(call, "deleteMemory", { uid: "1", memoryId: "missing" })),
+        );
         return result();
       },
     ]);
-    fake.dependencies.removeUserMemory = async () => false;
+    fake.dependencies.deleteUserMemory = async () => false;
     await turn(fake.dependencies);
     assert.deepEqual(outputs, [
       "这条记忆像是在注入规则或设定，已拒绝保存",
       "这个昵称像是在塞规则或设定，已拒绝设置",
-      "没找到完全匹配的那条记忆，暂时删不掉",
+      "没找到属于该用户的记忆ID",
     ]);
   });
 

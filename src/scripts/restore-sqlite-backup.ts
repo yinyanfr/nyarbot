@@ -88,6 +88,7 @@ export function verifyDatabase(databasePath: string, requiredTables: string[] = 
     if (tables.length === 0) throw new Error("Restored SQLite database has no application tables");
     const versionTables =
       schemaVersion >= 2 ? [...REQUIRED_TABLES, "diary_notification_deliveries"] : REQUIRED_TABLES;
+    if (schemaVersion >= 3) versionTables.push("user_memory_records");
     for (const table of [...versionTables, ...requiredTables]) {
       if (!tables.includes(table))
         throw new Error(`Required table is missing from restored schema: ${table}`);

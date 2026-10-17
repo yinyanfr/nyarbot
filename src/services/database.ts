@@ -238,6 +238,42 @@ function migrate(db: SqliteDatabase): void {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value;
       `);
     }
+    if (currentVersion < 3) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_memory_records (
+          id TEXT PRIMARY KEY,
+          subject_uid TEXT NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+          content TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          occurred_at INTEGER,
+          recorded_at INTEGER,
+          importance INTEGER NOT NULL CHECK(importance BETWEEN 1 AND 5),
+          confidence TEXT NOT NULL CHECK(confidence IN ('fact', 'inference', 'uncertain')),
+          exact_quote TEXT,
+          reflection TEXT,
+          tags_json TEXT NOT NULL,
+          source_refs_json TEXT NOT NULL,
+          expires_at INTEGER,
+          status TEXT NOT NULL CHECK(status IN ('active', 'superseded')),
+          supersedes_id TEXT,
+          origin TEXT NOT NULL CHECK(origin IN ('conversation', 'legacy')),
+          legacy_position INTEGER
+        ) STRICT;
+        CREATE INDEX IF NOT EXISTS idx_user_memory_subject_time
+          ON user_memory_records (subject_uid, status, recorded_at DESC);
+        INSERT OR IGNORE INTO user_memory_records (
+          id, subject_uid, content, kind, importance, confidence,
+          tags_json, source_refs_json, status, origin, legacy_position
+        ) SELECT 'legacy:' || hex(m.user_firestore_id) || ':' || m.position,
+                 u.uid, m.memory, 'legacy', 1, 'uncertain', '[]', '[]', 'active', 'legacy', m.position
+          FROM user_memories m JOIN users u ON u.firestore_id = m.user_firestore_id;
+        DELETE FROM user_memories;
+        UPDATE users SET source_json = json_remove(source_json, '$.memories')
+          WHERE json_valid(source_json);
+        INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '3')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
 }
