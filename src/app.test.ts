@@ -421,6 +421,14 @@ test("production default application adapters are offline-safe", async () => {
   assert.doesNotThrow(() => productionApplicationDependencies.logError({}, "error"));
 });
 
+test("production bot sends requests to the configured Bot API root", async () => {
+  const bot = productionApplicationDependencies.createBot(
+    "test-token",
+    "http://telegram-bot-api:8081",
+  );
+  assert.equal(bot.api.options?.apiRoot, "http://telegram-bot-api:8081");
+});
+
 test("production default main adapters register and log without starting infrastructure", () => {
   const listener = () => undefined;
   productionMainDependencies.once("SIGINT", listener);

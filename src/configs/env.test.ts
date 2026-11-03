@@ -19,6 +19,30 @@ test("loads defaults and explicit overrides", () => {
   assert.equal(config.appTimezone, "UTC");
   assert.equal(config.databasePath, "data/nyarbot.sqlite");
   assert.equal(config.databaseBackupSchedule, "23:59");
+  assert.equal(config.telegramApiRoot, "https://api.telegram.org");
+  assert.equal(config.telegramLocalFileDirectory, "");
+});
+
+test("custom Telegram API configuration validates endpoint and local directory", () => {
+  const config = loadConfig({
+    ...base,
+    TELEGRAM_API_ROOT: "http://telegram-bot-api:8081/",
+    TELEGRAM_LOCAL_FILE_DIRECTORY: "/var/lib/telegram-bot-api",
+  });
+  assert.equal(config.telegramApiRoot, "http://telegram-bot-api:8081");
+  assert.equal(config.telegramLocalFileDirectory, "/var/lib/telegram-bot-api");
+  for (const root of [
+    "file:///tmp/api",
+    "http://user:secret@localhost",
+    "https://localhost?token=secret",
+    "https://localhost/#fragment",
+  ]) {
+    assert.throws(() => loadConfig({ ...base, TELEGRAM_API_ROOT: root }), /TELEGRAM_API_ROOT/);
+  }
+  assert.throws(
+    () => loadConfig({ ...base, TELEGRAM_LOCAL_FILE_DIRECTORY: "relative/path" }),
+    /absolute path/,
+  );
 });
 
 test("rejects every missing required setting", () => {

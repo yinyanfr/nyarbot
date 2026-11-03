@@ -2,6 +2,14 @@
 
 ## 环境变量
 
+### 复用现有自建 Telegram Bot API
+
+默认仍使用官方 API。设置 `TELEGRAM_API_ROOT` 可切换 HTTP(S) 端点；本地模式还需配置 `TELEGRAM_LOCAL_FILE_DIRECTORY`，将 Bot API 数据目录以相同绝对路径只读挂载，以支持图片读取。只允许读取当前 Token 对应目录内的文件，图片上限仍为 10 MiB。
+
+服务器可使用 `docker compose -f compose.yaml -f compose.local-api.yaml up --build -d` 复用 twprevbot 的服务；后续重建、查看状态和日志也应使用这两个文件。默认复用外部网络 `twprevbot_default` 与 `../twprevbot/data/telegram-bot-api`，可分别通过 `TELEGRAM_API_NETWORK`、`TELEGRAM_API_DATA_PATH` 覆盖。不会启动或重启 twprevbot，不对公网开放 Bot API 端口。
+
+迁移前停止 nyarbot，并对官方 API 调用 `logOut`（不要把含 Token 的 URL 写入终端历史或日志）。确认退出后再启动本地实例，避免云端/本地会话冲突；退出后至少 10 分钟不能切回官方云端。若退出请求超时，不能视为成功，需验证本地能正常接收新消息后才确认迁移完成。不要调用 `drop_pending_updates` 丢弃积压消息。
+
 所有配置通过 `.env` 文件（已 gitignore）。模板在 `.env.example`。
 
 | 变量                         | 必填 | 说明                                                                        |

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const requiredEnv = {
   BOT_USERNAME: "test_bot",
@@ -43,6 +46,76 @@ test("downloads an image, detects its type, and constructs the Telegram URL", as
     `data:image/png;base64,${png.toString("base64")}`,
   );
   assert.deepEqual(fixture.urls, ["https://api.telegram.org/file/botsecret-token/photos/a.png"]);
+});
+
+test("custom API root is used for relative file downloads", async () => {
+  const download = createTelegramImageDownloader({
+    botApiKey: "secret-token",
+    apiRoot: "http://telegram-bot-api:8081/",
+    timeout: () => signal,
+    fetch: async (url) => {
+      assert.equal(String(url), "http://telegram-bot-api:8081/file/botsecret-token/photos/a.jpg");
+      return new Response(Buffer.from([0xff, 0xd8]));
+    },
+  });
+  assert.match((await download("photos/a.jpg"))!, /^data:image\/jpeg;base64,/);
+  for (const path of [
+    "../secret",
+    "photos/../../secret",
+    "https://evil/image.jpg",
+    "image?token=secret",
+  ])
+    assert.equal(await download(path), null);
+});
+
+test("local mode reads only bounded image files inside the current bot directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "nyarbot-local-api-"));
+  const root = join(directory, "api");
+  const bot = join(root, "secret-token");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  let fetches = 0;
+  const dependencies = {
+    botApiKey: "secret-token",
+    localFileDirectory: root,
+    timeout: () => signal,
+    fetch: async () => {
+      fetches++;
+      throw new Error("must not fetch local files");
+    },
+  };
+  try {
+    await mkdir(bot, { recursive: true });
+    await mkdir(join(root, "other-token"));
+    await writeFile(join(bot, "image.png"), png);
+    await writeFile(join(root, "other-token", "image.png"), png);
+    await writeFile(join(directory, "outside.png"), png);
+    await symlink(join(directory, "outside.png"), join(bot, "escape.png"));
+    await writeFile(join(bot, "large.png"), Buffer.alloc(10 * 1024 * 1024 + 1));
+    await writeFile(join(bot, "bad.png"), "not an image");
+    const download = createTelegramImageDownloader(dependencies);
+    assert.equal(
+      await download(join(bot, "image.png")),
+      `data:image/png;base64,${png.toString("base64")}`,
+    );
+    for (const path of [
+      join(root, "other-token", "image.png"),
+      join(bot, "escape.png"),
+      join(bot, "large.png"),
+      join(bot, "bad.png"),
+      join(bot, "missing.png"),
+      bot,
+    ]) {
+      assert.equal(await download(path), null);
+    }
+    const noLocalDirectory = createTelegramImageDownloader({
+      ...dependencies,
+      localFileDirectory: "",
+    });
+    assert.equal(await noLocalDirectory(join(bot, "image.png")), null);
+    assert.equal(fetches, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("accepts a supported image response content type when bytes have no known signature", async () => {

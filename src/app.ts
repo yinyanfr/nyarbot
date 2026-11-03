@@ -130,7 +130,7 @@ interface BackgroundCloser {
 
 export interface ProductionApplicationDependencies {
   config: typeof config;
-  createBot(apiKey: string): Bot<BotContext>;
+  createBot(apiKey: string, apiRoot?: string): Bot<BotContext>;
   configureBot(bot: Bot<BotContext>): void;
   initDatabase: typeof initDatabase;
   setupHandlers(bot: Bot<BotContext>, botInfo: { id: number; username: string }): void;
@@ -164,7 +164,8 @@ export interface ProductionApplicationDependencies {
 
 export const productionApplicationDependencies: ProductionApplicationDependencies = {
   config,
-  createBot: (apiKey) => new Bot<BotContext>(apiKey),
+  createBot: (apiKey, apiRoot = config.telegramApiRoot) =>
+    new Bot<BotContext>(apiKey, { client: { apiRoot } }),
   configureBot: (bot) => {
     bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
   },
@@ -209,7 +210,7 @@ export function createProductionApplication(
   dependencies: ProductionApplicationDependencies = productionApplicationDependencies,
 ): ReturnType<typeof createApplication> {
   const runtimeConfig = dependencies.config;
-  const bot = dependencies.createBot(runtimeConfig.botApiKey);
+  const bot = dependencies.createBot(runtimeConfig.botApiKey, runtimeConfig.telegramApiRoot);
   dependencies.configureBot(bot);
   let diaryTimer: TimerHandle | undefined;
   let wordcloudTimer: TimerHandle | undefined;

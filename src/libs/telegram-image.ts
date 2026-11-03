@@ -1,5 +1,35 @@
 import config from "../configs/env.js";
 import { logger } from "./logger.js";
+import { open, realpath } from "node:fs/promises";
+import { isAbsolute, relative, sep } from "node:path";
+
+const MAX_BYTES = 10 * 1024 * 1024;
+
+async function readLocalImage(filePath: string, directory: string, token: string): Promise<Buffer> {
+  // Limit access to this bot's subtree, including after resolving symlinks.
+  const root = await realpath(`${directory}/${token}`);
+  const path = await realpath(filePath);
+  const child = relative(root, path);
+  if (!child || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
+    throw new Error("Local Telegram file is outside the bot directory");
+  }
+  const file = await open(path, "r");
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > MAX_BYTES)
+      throw new Error("Invalid or oversized Telegram image");
+    const bytes = Buffer.alloc(MAX_BYTES + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    return bytes.subarray(0, length);
+  } finally {
+    await file.close();
+  }
+}
 
 function hasBytesAt(buffer: Buffer, offset: number, expected: readonly number[]): boolean {
   return expected.every((byte, index) => buffer[offset + index] === byte);
@@ -32,46 +62,64 @@ export interface TelegramImageDependencies {
   fetch: typeof fetch;
   timeout: (milliseconds: number) => AbortSignal;
   botApiKey: string;
+  apiRoot?: string;
+  localFileDirectory?: string;
 }
 
 export function createTelegramImageDownloader(
   dependencies: TelegramImageDependencies,
 ): (filePath: string) => Promise<string | null> {
   return async (filePath: string): Promise<string | null> => {
-    const url = `https://api.telegram.org/file/bot${dependencies.botApiKey}/${filePath}`;
-
     try {
-      const res = await dependencies.fetch(url, { signal: dependencies.timeout(15_000) });
-      if (!res.ok) {
-        logger.warn({ status: res.status, filePath }, "telegram file download non-2xx");
-        return null;
+      let buf: Buffer;
+      let responseContentType: string | undefined;
+      if (isAbsolute(filePath)) {
+        if (!dependencies.localFileDirectory) return null;
+        buf = await readLocalImage(
+          filePath,
+          dependencies.localFileDirectory,
+          dependencies.botApiKey,
+        );
+      } else {
+        // getFile normally returns a relative path; reject traversal/URL components.
+        if (
+          !/^[a-zA-Z0-9_/-]+\.[a-zA-Z0-9]+$/.test(filePath) &&
+          !/^[a-zA-Z0-9_/-]+$/.test(filePath)
+        )
+          return null;
+        const url = `${(dependencies.apiRoot ?? "https://api.telegram.org").replace(/\/+$/, "")}/file/bot${dependencies.botApiKey}/${filePath}`;
+        const res = await dependencies.fetch(url, { signal: dependencies.timeout(15_000) });
+        if (!res.ok) {
+          logger.warn({ status: res.status }, "telegram file download non-2xx");
+          return null;
+        }
+        buf = Buffer.from(await res.arrayBuffer());
+        responseContentType = res.headers
+          .get("content-type")
+          ?.split(";", 1)[0]
+          ?.trim()
+          .toLowerCase();
       }
-      const buf = Buffer.from(await res.arrayBuffer());
       // DeepSeek / OpenAI vision have multi-MB limits; Telegram photos are typically < 2MB after compression.
-      const MAX_BYTES = 10 * 1024 * 1024;
       if (buf.length > MAX_BYTES) {
-        logger.warn({ bytes: buf.length, filePath }, "telegram file too large for vision");
+        logger.warn({ bytes: buf.length }, "telegram file too large for vision");
         return null;
       }
       const detectedContentType = detectImageContentType(buf);
-      const responseContentType = res.headers
-        .get("content-type")
-        ?.split(";", 1)[0]
-        ?.trim()
-        .toLowerCase();
       const contentType =
         detectedContentType ??
         (isSupportedImageContentType(responseContentType) ? responseContentType : null);
       if (!contentType) {
         logger.warn(
-          { responseContentType: responseContentType ?? null, filePath },
+          { responseContentType: responseContentType ?? null },
           "telegram file is not a supported image",
         );
         return null;
       }
       return `data:${contentType};base64,${buf.toString("base64")}`;
-    } catch (err) {
-      logger.warn({ err, filePath }, "telegram file download failed");
+    } catch {
+      // Local paths and fetch errors can contain the bot token. Never log them.
+      logger.warn("telegram file download failed");
       return null;
     }
   };
@@ -81,4 +129,6 @@ export const downloadTelegramFileAsDataUrl = createTelegramImageDownloader({
   fetch: globalThis.fetch,
   timeout: AbortSignal.timeout,
   botApiKey: config.botApiKey,
+  apiRoot: config.telegramApiRoot,
+  localFileDirectory: config.telegramLocalFileDirectory,
 });

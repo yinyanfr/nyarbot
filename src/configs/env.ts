@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 function requireEnv(key: string): string {
   const value = process.env[key];
   if (!value) {
@@ -71,12 +73,36 @@ export function loadConfig(env: NodeJS.ProcessEnv) {
       "DATABASE_BACKUP_PASSPHRASE",
     ] as const;
     for (const key of required) requireEnv(key);
+    const telegramApiRoot = (process.env.TELEGRAM_API_ROOT || "https://api.telegram.org").replace(
+      /\/+$/,
+      "",
+    );
+    const apiUrl = new URL(telegramApiRoot);
+    if (
+      !["http:", "https:"].includes(apiUrl.protocol) ||
+      apiUrl.username ||
+      apiUrl.password ||
+      apiUrl.search ||
+      apiUrl.hash
+    ) {
+      throw new Error(
+        "Invalid environment variable: TELEGRAM_API_ROOT must be an HTTP(S) URL without credentials, query or fragment",
+      );
+    }
+    const telegramLocalFileDirectory = process.env.TELEGRAM_LOCAL_FILE_DIRECTORY || "";
+    if (telegramLocalFileDirectory && !isAbsolute(telegramLocalFileDirectory)) {
+      throw new Error(
+        "Invalid environment variable: TELEGRAM_LOCAL_FILE_DIRECTORY must be an absolute path",
+      );
+    }
     return {
       botUsername: requireEnv("BOT_USERNAME"),
       botPersonaName: process.env.BOT_PERSONA_NAME ?? "にゃる",
       botPersonaFullName: process.env.BOT_PERSONA_FULL_NAME ?? "晴海猫月",
       botPersonaReading: process.env.BOT_PERSONA_READING ?? "はるみ にゃる",
       botApiKey: process.env.BOT_API_KEY!,
+      telegramApiRoot,
+      telegramLocalFileDirectory,
       tgAdminUid: process.env.TG_ADMIN_UID!,
       tgGroupId: process.env.TG_GROUP_ID!,
       tgDiaryChannelId: process.env.TG_DIARY_CHANNEL_ID ?? "",
