@@ -1,6 +1,8 @@
 # docker compose -f compose.yaml -f compose.local-api.yaml up --build -d
 services:
   nyarbot:
+    group_add:
+      - "${TELEGRAM_API_DATA_GID:-101}"
     environment:
       TELEGRAM_API_ROOT: http://telegram-bot-api:8081
       TELEGRAM_LOCAL_FILE_DIRECTORY: /var/lib/telegram-bot-api
