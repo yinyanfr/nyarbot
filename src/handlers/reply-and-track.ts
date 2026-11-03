@@ -22,84 +22,100 @@ function isReplyTargetMissingError(err: unknown): boolean {
  * Telegram HTML and sent with parse_mode "HTML". If Telegram rejects the
  * formatted version (e.g. malformed tags), it falls back to plain text.
  */
-export async function replyAndTrack(
-  ctx: BotContext,
-  text: string,
-  replyToMessageId?: number,
-  formatMarkdown = false,
-  kind: HistoryEntryKind = "normal",
-): Promise<void> {
-  const push = () => {
-    pushMessage(
-      config.tgGroupId,
-      "bot",
-      config.botUsername,
-      text.slice(0, MAX_BUFFER_TEXT),
-      undefined,
-      kind,
-    );
-    groupRuntime
-      .recordBotMessages({ messages: [text], kind: "bot_message" })
-      .catch((err: unknown) => {
-        logger.warn({ err }, "replyAndTrack: runtime bot event persist failed");
-      });
-    touchBotActivity();
-  };
+export interface ReplyAndTrackDependencies {
+  pushMessage: typeof pushMessage;
+  recordBotMessages: typeof groupRuntime.recordBotMessages;
+  touchBotActivity: typeof touchBotActivity;
+  formatForTelegramHtml: typeof formatForTelegramHtml;
+}
 
-  if (formatMarkdown) {
-    const formatted = formatForTelegramHtml(text);
-    try {
-      const htmlOpts: Record<string, unknown> = { parse_mode: "HTML" };
-      if (replyToMessageId !== undefined) {
-        htmlOpts.reply_parameters = { message_id: replyToMessageId };
+export function createReplyAndTrack(dependencies: ReplyAndTrackDependencies) {
+  return async function replyAndTrack(
+    ctx: BotContext,
+    text: string,
+    replyToMessageId?: number,
+    formatMarkdown = false,
+    kind: HistoryEntryKind = "normal",
+  ): Promise<void> {
+    const push = () => {
+      dependencies.pushMessage(
+        config.tgGroupId,
+        "bot",
+        config.botUsername,
+        text.slice(0, MAX_BUFFER_TEXT),
+        undefined,
+        kind,
+      );
+      dependencies
+        .recordBotMessages({ messages: [text], kind: "bot_message" })
+        .catch((err: unknown) => {
+          logger.warn({ err }, "replyAndTrack: runtime bot event persist failed");
+        });
+      dependencies.touchBotActivity();
+    };
+
+    if (formatMarkdown) {
+      const formatted = dependencies.formatForTelegramHtml(text);
+      try {
+        const htmlOpts: Record<string, unknown> = { parse_mode: "HTML" };
+        if (replyToMessageId !== undefined) {
+          htmlOpts.reply_parameters = { message_id: replyToMessageId };
+        }
+        await ctx.reply(formatted, htmlOpts);
+        push();
+        return;
+      } catch (err) {
+        if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
+          logger.info(
+            { replyToMessageId },
+            "replyAndTrack: reply target missing, retrying without reply",
+          );
+          try {
+            await ctx.reply(formatted, { parse_mode: "HTML" });
+            push();
+            return;
+          } catch (retryErr) {
+            logger.warn(
+              { err: retryErr },
+              "replyAndTrack: HTML send without reply failed, falling back to plain text",
+            );
+          }
+        } else {
+          logger.warn({ err }, "replyAndTrack: HTML reply failed, falling back to plain text");
+        }
       }
-      await ctx.reply(formatted, htmlOpts);
-      push();
-      return;
+    }
+
+    try {
+      const opts: Record<string, unknown> = {};
+      if (replyToMessageId !== undefined) {
+        opts.reply_parameters = { message_id: replyToMessageId };
+      }
+      await ctx.reply(text, opts);
     } catch (err) {
       if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
         logger.info(
           { replyToMessageId },
-          "replyAndTrack: reply target missing, retrying without reply",
+          "replyAndTrack: plain-text reply target missing, retrying without reply",
         );
         try {
-          await ctx.reply(formatted, { parse_mode: "HTML" });
-          push();
-          return;
+          await ctx.reply(text);
         } catch (retryErr) {
-          logger.warn(
-            { err: retryErr },
-            "replyAndTrack: HTML send without reply failed, falling back to plain text",
-          );
+          logger.warn({ err: retryErr }, "replyAndTrack: plain-text send without reply failed");
+          return;
         }
       } else {
-        logger.warn({ err }, "replyAndTrack: HTML reply failed, falling back to plain text");
-      }
-    }
-  }
-
-  try {
-    const opts: Record<string, unknown> = {};
-    if (replyToMessageId !== undefined) {
-      opts.reply_parameters = { message_id: replyToMessageId };
-    }
-    await ctx.reply(text, opts);
-  } catch (err) {
-    if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
-      logger.info(
-        { replyToMessageId },
-        "replyAndTrack: plain-text reply target missing, retrying without reply",
-      );
-      try {
-        await ctx.reply(text);
-      } catch (retryErr) {
-        logger.warn({ err: retryErr }, "replyAndTrack: plain-text send without reply failed");
+        logger.warn({ err }, "replyAndTrack: reply failed");
         return;
       }
-    } else {
-      logger.warn({ err }, "replyAndTrack: reply failed");
-      return;
     }
-  }
-  push();
+    push();
+  };
 }
+
+export const replyAndTrack = createReplyAndTrack({
+  pushMessage,
+  recordBotMessages: groupRuntime.recordBotMessages.bind(groupRuntime),
+  touchBotActivity,
+  formatForTelegramHtml,
+});

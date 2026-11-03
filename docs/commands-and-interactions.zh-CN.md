@@ -29,7 +29,7 @@
 当用户 @提及bot 或回复它的消息时，触发完整 AI 流程：
 
 1. **分类** — `classifyMessage()` 将消息归类为 `simple`、`complex` 或 `tech`，以及是否需要联网搜索。
-2. **模型选择** — `simple` → flash-无思考、`complex` → flash-思考、`tech` → pro-思考。
+2. **模型选择** — 所有主对话 tier 都使用非思考 `deepseek-flash`；需要深入研究时，主模型调用 high 思考的 `startSubagent` advisor。
 3. **工具增强生成** — `generateAiTurn()` 运行带工具的生成（send_message、dismiss、记忆、昵称、贴纸、可选联网搜索）。
 4. **沉默重试** — 如果模型在被触发时选择 `dismiss`，simple/complex 最多重试 1 次，tech 不重试。之后会先尽量把 raw draft 救成真实的 `send_message`，再回退到贴纸。
 5. **输出** — 消息通过 `formatForTelegramHtml()` 格式化（Markdown → Telegram HTML），带打字指示和可选贴纸分发。
@@ -43,22 +43,22 @@
 
 ### 图片与媒体
 
-- handler 不再预下载、预描述媒体。
-- 上下文只保留原始引用（`file_id` / `thumbnail_file_id`，含当前消息与 reply-to）。
-- 在**被动触发**（@提及/回复）时，模型可按需调用 `describeTelegramMedia`。
-- 在**主动插话**时，URL 抓取仍禁用；最新候选消息中的图片可以预取，bot 在谈论图片前必须先理解图片，旧媒体只作为背景上下文。
-- Telegram 下载优先识别 JPEG、PNG、GIF、WebP、BMP、TIFF、AVIF、HEIC 字节签名；未命中时接受 `image/*` 响应头作为回退，两者都没有才拒绝。
+- handler 只保留原始引用（`file_id` / `thumbnail_file_id`，含当前消息与 reply-to）；AI 轮次按需下载图片。
+- 当前轮完整图片会和文本放入同一个 `deepseek-flash` user message，不再先经 Gemini 预描述。
+- 其他媒体的缩略图仍可由 `describeTelegramMedia` 按需识别；主动插话时 URL 抓取仍禁用，旧媒体只作为背景上下文。
+- Telegram 下载仅接受 DeepSeek 明确支持的 JPEG、PNG、GIF、WebP，并优先按真实字节判断格式。
 
 ### URL
 
 - URL 仍通过 Telegram entity + 正则回退提取。
 - handler 不再预抓取链接内容。
-- 在**被动触发**时，模型可按需调用 `fetchUrlContent`。
+- 在**被动触发**时，模型可按需调用 `fetchUrlContent` 或 `readVideo`。
+- `readVideo` 会把支持的 YouTube URL 直接交给原生 Gemini 理解声音与画面；Bilibili 走只读 MCP 获取字幕和元数据，字幕不可用时只返回元数据。
 - `fetchUrlContent` 三级策略：
   1. Twitter/X 推文链接 → FxEmbed API v2（`/2/status/{id}`）
   2. 其他链接 → 直接抓取 `<title>`/`<meta description>`
   3. 回退 → Tavily Extract
-- 链接摘要缓存为进程内会话缓存，不写入 Firestore。
+- 链接摘要缓存为进程内会话缓存，不写入 SQLite。
 
 ### 贴纸
 
@@ -115,13 +115,14 @@
 | `sendSticker`           | 通过 emoji 从硬编码贴纸表选择；无效 emoji 取消发送     |
 | `describeTelegramMedia` | 按需解析媒体；主动路径只允许查看最新候选消息中的图片   |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容（仅被动触发）                  |
+| `readVideo`             | 理解 YouTube 声画内容；Bilibili 字幕优先、元数据降级   |
 | `writeDiary`            | 创建、更新、取代或撤回结构化日记观察                   |
 | `webSearch`             | Tavily 搜索；schema 固定，runtime flood 禁用时返回原因 |
 | `startSubagent`         | 一次性 URL/媒体/技术研究 helper，不能直接发群消息      |
 
 如果本轮在模型生成前已经完成成功的搜索预取，这次预取就算已经搜索过；只有结果仍不足时，模型才需要再额外调用 `webSearch`。
 
-所有记忆/昵称工具在写入 Firestore 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
+所有记忆/昵称工具在写入 SQLite 前会验证 `uid` 是否在 `allowedUids`（最近对话缓冲区中出现的 UID 集合）中。
 
 ### 工具调用流程
 
@@ -130,12 +131,13 @@
                                         │
                                         ├─ 模型调用 send_message → 文本添加到 messages[]
                                         ├─ 模型调用 dismiss → dismissed = true
-                                        ├─ 模型调用 saveMemory → Firestore 写入
-                                        ├─ 模型调用 setNickname → Firestore 写入
-                                        ├─ 模型调用 deleteMemory → Firestore 删除
+                                        ├─ 模型调用 saveMemory → SQLite 写入
+                                        ├─ 模型调用 setNickname → SQLite 写入
+                                        ├─ 模型调用 deleteMemory → SQLite 删除
                                          ├─ 模型调用 sendSticker → 选择 file_id 分发
                                          ├─ 模型调用 describeTelegramMedia → 按需媒体描述
                                          ├─ 模型调用 fetchUrlContent → 按需 URL 摘要
+                                         ├─ 模型调用 readVideo → YouTube/Bilibili 视频信息
                                          ├─ 模型调用 writeDiary → 修改结构化观察
                                          ├─ 模型调用 webSearch → Tavily 搜索执行
                                          ├─ 模型调用 startSubagent → 一次性研究摘要

@@ -11,7 +11,7 @@ nyarbot 是一个用 TypeScript (ESM) 编写的 Telegram 机器人，拥有单�
 - debounce：被 @ 或回复触发后先等群聊安静，默认 5 秒；新触发会延长，30 秒硬上限。
 - `running` / `dirty` lock：同一时间最多一个 passive/proactive AI turn；运行中有新触发时只标脏，结束后再排队判断。
 - quiet mode：30 秒内真实用户消息达到阈值后进入 3 分钟安静模式；主动插话暂停，普通非 @ / 非回复不触发。
-- Firestore append-only 记录：`events`、`turns`、`compactions` 和 `runtime/group` 是恢复、调试与 compaction 的来源。
+- SQLite append-only 记录：runtime events、turns、compactions 和 group state 是恢复、调试与 compaction 的来源。
 
 ## 数据流
 
@@ -19,7 +19,7 @@ nyarbot 是一个用 TypeScript (ESM) 编写的 Telegram 机器人，拥有单�
 Telegram Update
     │
     ▼
-app.ts（入口：初始化 Firebase、创建 Bot、注册 handler、启动主动插话检查器）
+app.ts（入口：初始化 SQLite、创建 Bot、注册 handler、启动主动插话检查器）
     │
     ▼
 handlers/index.ts（setupHandlers）
@@ -32,11 +32,11 @@ handlers/index.ts（setupHandlers）
     ├─ 群内快速命令
     │     ├─ /nighty → 立即确认 + 后台写入时间戳
     │     └─ /roll → 立即报结果；后台提取内容并 scheduleCommandTurn()
-    ├─ 用户解析（firestore.ts → 60秒进程内缓存）
+    ├─ 用户解析（persistence.ts → 60秒进程内缓存）
     ├─ 内容提取（extract-content.ts）
     │     ├─ URL 检测（entity + 正则回退）
     │     └─ 保留原始 file_id / thumbnail_file_id / 贴纸 emoji 引用
-    ├─ 本地词云持久化（local-wordcloud-store.ts）
+    ├─ 统一 SQLite 词云持久化（local-wordcloud-store.ts）
     │     ├─ 仅目标群活人消息
     │     ├─ 命令消息跳过；编辑成命令时删除旧记录
     │     ├─ 编辑消息按相同 message_id 覆盖
@@ -48,21 +48,20 @@ handlers/index.ts（setupHandlers）
     ├─ 触发检测（@提及 / 回复bot）
     ├─ 本地路由（短聊 / 技术 / 当前事实）
     ├─ AI 分类（classifyMessage）
-    │     └─ simple → flashNoThinkModel
-    │     └─ complex → flashThinkModel
-    │     └─ tech → proThinkModel
+    │     └─ simple / complex / tech → deepseekFlashModel（无思考）
+    │     └─ advisor → advisorModel（high 思考）
     ├─ Runtime 调度（group-runtime.ts）
-    │     ├─ 事件持久化、去重、限流、debounce、running lock
+    │     ├─ 事件写入 SQLite、去重、限流、debounce、running lock
     │     └─ 构造 summary + recent events 上下文
     ├─ AI 轮次（handleAiTurn → generateAiTurn）
     │     ├─ 静态系统提示词（buildSystemPrompt）
     │     ├─ 用户消息尾部 late-binding（当前时间、触发态、工具可用性、runtime 状态）
     │     ├─ 工具调用：send_message、dismiss、saveMemory、setNickname、
 │     │           deleteMemory、sendSticker、writeDiary、webSearch、
-│     │           describeTelegramMedia、fetchUrlContent、startSubagent
-    │     ├─ 富内容按需读取；只做会话缓存，不写 Firestore 图片缓存
-    │     │     ├─ 图片使用原文件，其他媒体/贴纸优先缩略图
-    │     │     └─ 已知字节签名优先，未命中时接受 image/* 响应头
+│     │           describeTelegramMedia、fetchUrlContent、readVideo、startSubagent
+    │     ├─ 富内容按需读取；只做会话缓存，不做持久化图片缓存
+    │     │     ├─ 图片与文本直接进入同一请求，其他媒体/贴纸优先缩略图
+    │     │     └─ 仅接受 JPEG / PNG / GIF / WebP，已知字节签名优先
     │     ├─ 搜索预取：先在模型前做一次 webSearch，成功则视为本轮已搜索
     │     ├─ 搜索策略违规重试（needsSearch 但未搜索且已准备发言时重试一次）
     │     ├─ 沉默重试（simple/complex 1 次；tech 0 次）
@@ -92,7 +91,8 @@ Bot 不再流式输出原始文本，而是使用**工具调用架构**：模型
 | `sendSticker`           | 通过 emoji 直接选择硬编码贴纸。无效 emoji 会取消贴纸发送，不再回退到智能选择。 |
 | `describeTelegramMedia` | 被动触发时按需描述媒体；主动路径仅可查看最新候选中选出的图片。                 |
 | `fetchUrlContent`       | 按需抓取当前轮 URL 内容摘要（仅被动触发轮次可用）。                            |
-| `writeDiary`            | 在 Firestore `diaryObservations` 创建、更新或撤回结构化观察。                  |
+| `readVideo`             | 原生 Gemini 理解 YouTube；Bilibili 字幕读取，失败时仅返回元数据。              |
+| `writeDiary`            | 在统一 SQLite 中创建、更新或撤回结构化观察。                                   |
 | `webSearch`             | Tavily 搜索。工具 schema 保持稳定；若输入层禁用搜索，工具返回禁用原因。        |
 | `startSubagent`         | 启动一次性 helper 处理 URL/媒体/技术检索，返回短摘要，不能直接发群消息。       |
 
@@ -121,18 +121,18 @@ type AiTurnResult =
 
 ## AI 模型路由
 
-| Provider/model                                  | 用途                                     |
-| ----------------------------------------------- | ---------------------------------------- |
-| DeepSeek v4 Flash，无思考                       | 分类、短聊、早安/告白/互动反应、主动探测 |
-| DeepSeek v4 Flash，有思考                       | 复杂对话与工具调用轮次                   |
-| DeepSeek v4 Pro，有思考                         | 技术问题与 advisor-heavy 轮次            |
-| Gemini 3.1 Flash Lite（Cloudflare AI Gateway）  | Telegram/推文图片理解、完整日记导读      |
-| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览       |
+| Provider/model                                  | 用途                                                    |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| DeepSeek Flash，无思考                          | 所有主对话 tier、分类、主动探测、图片理解和轻量后台任务 |
+| DeepSeek Flash，high 思考                       | 仅一次性 `startSubagent` advisor                        |
+| Gemini 3.5 Flash-Lite（Cloudflare AI Gateway）  | DeepSeek 回复回退、完整日记导读和 YouTube 理解          |
+| Gemini 3.1 Pro Preview（Cloudflare AI Gateway） | 午夜日记生成、管理员 `/diary` 预览                      |
 
 ### 为什么用两个提供商？
 
-- **DeepSeek v4** 不支持视觉能力。发送 `image_url` 内容部分会返回 400 错误。
-- **Gemini 3.1 Flash Lite** 经 Cloudflare AI Gateway 处理图片理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- **DeepSeek Flash** 原生支持视觉；Telegram 图片以 `image_url` 与当前文本放入同一个 user message，缩略图和推文配图也由它识别。
+- **Gemini 3.5 Flash-Lite** 经 Cloudflare AI Gateway 处理 DeepSeek 不可用时的回复回退、YouTube 理解和日记通知；**Gemini 3.1 Pro Preview** 负责写日记。
+- 一轮回复会粘在同一提供商上：如果首个 DeepSeek step 触发回退，后续工具 step 全部继续使用 Gemini，以保留有效 thought signature；DeepSeek 已经发出工具调用后不会再中途切换。网络/超时、401–403、408/409/429 和 5xx 会触发回退；错误请求 400 和正常 `dismiss` 不会触发。
 
 ## 本地路由
 
@@ -144,7 +144,7 @@ type AiTurnResult =
 - 当前事实查询会直接标记 `needsSearch`
 - 轻贴纸闲聊会关闭本轮持久化工具，避免无意义写记忆/写日记
 
-`preferAdvisor` 只是提示主轮次先调用 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
+`preferAdvisor` 只是提示非思考主轮次先调用 high 思考的 `startSubagent` 取摘要，helper 不能直接发群消息。普通触发轮次仍然可以写记忆和日记。
 
 ## 超时保护
 
@@ -161,15 +161,15 @@ type AiTurnResult =
 
 ## 上下文管理
 
-- **Runtime events**：Firestore `events` 是恢复、调试和 compaction 的主要来源，append-only 保存用户消息、编辑、命令、bot 输出和忽略原因。
-- **对话缓冲区**：内存环形缓冲区仍保留为热缓存和 proactive 快速扫描窗口；它不是唯一上下文来源，重启恢复依赖 Firestore runtime events 与 `runtime/group.summary`。
-- **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 Firestore，进程内缓存 60 秒。
-- **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化到 Firestore。
-- **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `compactions` 并更新 `runtime/group.summary` 与 `summaryCursorTs`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
+- **Runtime events**：SQLite `runtime_events` 是恢复、调试和 compaction 的主要来源，append-only 保存用户消息、编辑、命令、bot 输出和忽略原因。
+- **对话缓冲区**：内存环形缓冲区仍保留为热缓存和 proactive 快速扫描窗口；它不是唯一上下文来源，重启恢复依赖 SQLite runtime events 与 `runtime_group` 状态。
+- **用户数据**（昵称、记忆、晚安/早安时间戳）：持久化到 SQLite，进程内缓存 60 秒。
+- **富内容缓存**：媒体描述与链接摘要使用进程内会话缓存（TTL + 容量上限），不持久化。
+- **Compaction**：当 recent events 超过阈值时，runtime 使用模型生成 `# 群聊长期摘要`，写入 `runtime_compactions` 并更新 `runtime_group`。摘要注入 prompt 时标记为不可信。Compaction 是工作记忆，diary 是文学归档，二者分离。
 
 ## 词云流水线
 
-- `src/services/local-wordcloud-store.ts` 用 SQLite 保存最近 10 天群消息和词云发布记录。
+- `src/services/local-wordcloud-store.ts` 用统一 SQLite 保存最近 10 天群消息和词云发布记录。
 - `src/libs/wordcloud.ts` 负责分词、词频统计、布局、渲染和发布。
 - 运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场，通过 SQLite slot marker 去重；错过的中午场不补发。
 - 00:02 后发布昨日最终版，重启后也会 catch up。
@@ -239,7 +239,7 @@ type AiTurnResult =
 
 主动路径使用 `ProactiveCallbacks` 接口（`sendText`、`sendSticker`、`sendChatAction`）来格式化消息、分发贴纸和显示打字指示——与 handler 路径的格式化保持一致。
 
-主动插话检查器在连续失败达到环境变量阈值后停止（默认 5 次）。
+主动插话遇到暂时故障时采用有上限的指数退避。任何未抛错的检查（包括合理保持沉默）都会清零连续失败计数；除非显式关闭，检查器会持续调度。管理员 `/status` 会显示其定时器、失败次数、时间戳和最近错误。
 
 ## 日记系统
 
@@ -253,29 +253,32 @@ Bot 通过 `writeDiary` AI 工具记录结构化对话观察。Compaction 始终
 
 ### 午夜生成
 
-一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检测日期变化。进程必须实际观察到跨天；与词云最终版不同，日记目前没有启动补发：
+一个可配置间隔的定时器（`checkAndGenerateDiary`，在 `src/libs/diary.ts` 中，默认 60 秒）基于 `APP_TIMEZONE` 检查日期。启动时会立即运行并扫描最近三个已结束日期，因此重启后可以补生成近期缺失日记：
 
-1. 00:02 后选取昨天最多 12 条 active observations；旧的 `diary/{date}.entries` 只作为回退输入。
-2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 Firestore。
+1. 00:02 后选取最多 12 条 active observations；若没有观察通过筛选，则依次回退到旧的 `diary/{date}.entries` 和当天持久化 runtime `events` 的限量样本。
+2. Gemini 3.1 Pro Preview 生成日记，并将正文和生成记录（模型、prompt/style 版本、观察 id、usage/status）写入 SQLite；异常和空输出最多尝试三次。
 3. 生成或复用昨日词云。推送 Telegram 频道时，日记不超过 1024 字符则作为图片 caption，否则图片后另发正文。
 4. GitHub 发布通过 blobs/tree/commit 一次提交 Markdown 与可选的 `source/img/diary/` 图片，再非 force 更新 `main`；Markdown 使用 `/img/diary/...` 根路径。
-5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.1 Flash Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接。
+5. 如果已配置且 GitHub 发布成功，先等待 Pages；无论 GitHub 是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成 1–2 句克制导读，链接状态与题库文案由程序固定拼接；导读生成和群内发送分别最多尝试三次。成功投递会写入 SQLite；启动和定时检查会基于已保存的日记补发尚未成功的群通知，而不会重复发布频道或 GitHub 内容。
 
 ### 日记管理员命令
 
 管理员私聊提供 `/diary`、`/diaryregen [date]` 预览，以及 `/diaryobs`、`/diaryshow`、`/diaryedit`、`/diaryretract` 观察管理。预览/重新生成不会保存或发布日记正文。
 
-### Firestore Schema
+### SQLite 记录
 
 ```
-diary/{YYYY-MM-DD}
+YYYY-MM-DD 对应的 diary 行
   ├── entries?: DiaryEntry[]              （旧格式回退）
   ├── diary?: string
   ├── generatedAt?: number
   └── generationRecords?: DiaryGenerationRecord[]
 
-diaryObservations/{id}
+id 对应的 diary_observations 行
   └── DiaryObservationV2
+
+YYYY-MM-DD 对应的 diary_notification_deliveries 行
+  └── sentAt: number
 ```
 
 ### 时区

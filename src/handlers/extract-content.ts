@@ -39,14 +39,37 @@ export async function extractContent(
   stickerEmoji: string;
   mediaRefs: MediaRef[];
 }> {
-  // URLs — from both text and caption entity arrays
-  const textUrls: string[] = (msg.entities ?? [])
-    .filter((e) => e.type === "url")
-    .map((e) => (msg.text ?? "").slice(e.offset, e.offset + e.length));
-  const captionUrls: string[] = (msg.caption_entities ?? [])
-    .filter((e) => e.type === "url")
-    .map((e) => (msg.caption ?? "").slice(e.offset, e.offset + e.length));
-  const urls: string[] = [...textUrls, ...captionUrls];
+  const urls: string[] = [];
+
+  function collectUrlsFromMessage(message: Message): void {
+    const collectEntities = (
+      text: string,
+      entities: Message["entities"] | Message["caption_entities"],
+    ): void => {
+      for (const entity of entities ?? []) {
+        const url =
+          entity.type === "url"
+            ? text.slice(entity.offset, entity.offset + entity.length)
+            : entity.type === "text_link"
+              ? entity.url
+              : null;
+        if (url && !urls.includes(url)) urls.push(url);
+      }
+    };
+
+    collectEntities(message.text ?? "", message.entities);
+    collectEntities(message.caption ?? "", message.caption_entities);
+
+    const rawText = message.text ?? message.caption ?? "";
+    const matches = rawText.match(/https?:\/\/[^\s]+/g) ?? [];
+    for (const match of matches) {
+      const cleaned = match.replace(/[)\],.;:!?，。；：！？」』】》]+$/u, "");
+      if (!urls.includes(cleaned)) urls.push(cleaned);
+    }
+  }
+
+  collectUrlsFromMessage(msg);
+  if (msg.reply_to_message) collectUrlsFromMessage(msg.reply_to_message);
 
   // Regex fallback — run regardless of entity presence so bare URLs are never missed
   if (state.rawText) {

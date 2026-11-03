@@ -1,10 +1,11 @@
 /**
- * The info of a telegram user stored in firebase users/{uid}
+ * Persistent Telegram user profile.
  */
 export interface User {
   uid: string;
   nickname: string; // instead of their telegram username, users can explicitly ask you to register a nickname they want you to call them
-  memories: string[]; // an array that contains all memories you add during the conversation with the user
+  /** Legacy input compatibility only. Profiles never load memories; use memory retrieval. */
+  memories?: string[];
   timeZone?: string; // optional IANA timezone gathered from an explicit client-side signal such as a Mini App
   nightyTimestamp?: number; // timestamp of last goodnight (server time, ms)
   lastMorningGreet?: number; // timestamp of last morning greeting (prevents duplicates within same cycle)
@@ -55,4 +56,8 @@ export interface DiaryGenerationRecord {
   outputTokens?: number;
   status: "success" | "failed";
   error?: string;
+  errorKind?: "prohibited_content" | "other";
+  attempts?: number;
+  terminal?: boolean;
+  removedMaterialIds?: string[];
 }

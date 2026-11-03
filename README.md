@@ -11,7 +11,7 @@
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
 [![License](https://img.shields.io/badge/license-ISC-0f172a?style=flat-square)](package.json)
 
-基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek 负责群聊与工具调用，Gemini 经 Cloudflare AI Gateway 负责视觉、日记生成和日记导读，Firestore 负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
+基于 [grammy](https://grammy.dev) 和 [Vercel AI SDK](https://sdk.vercel.ai) 构建：DeepSeek Flash 负责群聊、工具调用和图片理解，日常显式关闭思考，advisor 才启用 high 思考；不可用时由 Gemini 3.5 Flash-Lite 接管回复，Gemini 还经 Cloudflare AI Gateway 负责日记生成与导读。统一 SQLite 数据库负责持久化。它不是一个“问答机器人”，而是一个真正有群聊人格、会主动参与、会记人、会写日记的长期群友。
 
 ## Overview
 
@@ -41,6 +41,7 @@
 - 🔍 **联网搜索**：涉及时事、实时事实、最新 API 时强制联网，不靠过期记忆瞎猜
 - 🔗 **链接理解（按需）**：只有在被动触发且确实需要时，才抓取 URL 内容；推文支持图片说明
 - 🖼️ **媒体理解（按需）**：图片、GIF、视频封面、贴纸、文件缩略图可按需解析
+- 🎬 **视频链接理解**：YouTube 直接理解声音与画面；Bilibili 支持 BV/AV/短链接并读取字幕，无字幕时仅使用元数据
 - 🌅 **早安问候**：`/nighty` 后 8 小时以上，下次发言会收到个性化早安
 - 💔 **告白回应**：`/love` 或告白文本触发记忆驱动的好感度评分与傲娇回应
 - ⚡ **被电反应**：`/shock` 支持强度与附带文本，模拟不同程度的炸毛反应
@@ -53,22 +54,22 @@
 
 ## Tech Stack
 
-| 层                  | 库                                                 |
-| ------------------- | -------------------------------------------------- |
-| Telegram Bot        | `grammy` v1                                        |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek v4              |
-| Gemini              | Gemini 3.1 Flash Lite / Pro Preview via AI Gateway |
-| Search / Extraction | `@tavily/ai-sdk`                                   |
-| Database            | `firebase-admin` (Firestore)                       |
-| Local Storage       | `better-sqlite3` + `nodejieba` + `@napi-rs/canvas` |
-| Runtime             | Node.js + TypeScript ESM                           |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                          |
+| 层                  | 库                                                     |
+| ------------------- | ------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                            |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek Flash               |
+| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                                       |
+| Database            | `better-sqlite3`（统一 SQLite）                        |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
+| Runtime             | Node.js + TypeScript ESM                               |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
 
 ## Project Layout
 
 ```text
 src/
-├── app.ts                      # 入口：初始化 bot / Firebase / diary / wordcloud / proactive / logging
+├── app.ts                      # 入口：初始化 bot / SQLite / diary / wordcloud / proactive / logging
 ├── configs/
 │   └── env.ts                  # 环境变量读取与校验
 ├── handlers/
@@ -87,17 +88,17 @@ src/
 │   ├── proactive.ts            # 主动插话调度
 │   ├── diary.ts                # 日记生成与发布链路
 │   ├── wordcloud.ts            # 词云生成、渲染与发布
+│   ├── database-backup.ts      # 每日加密 SQLite 备份
 │   ├── format-telegram.ts      # Markdown → Telegram HTML
 │   ├── stickers.ts             # emoji → file_id 贴纸路由
 │   ├── telegram-image.ts       # Telegram 文件下载
 │   ├── logger.ts               # pino + admin DM 通知
 │   └── time.ts                 # 时区工具
 ├── services/
-│   ├── firestore.ts            # Firestore CRUD
-│   ├── local-wordcloud-store.ts # 本地 sqlite 消息存储与活跃榜统计
-│   ├── github.ts               # Hexo diary 推送
-│   ├── index.ts                # Firebase Admin 初始化
-│   └── serviceAccountKey.json  # Firebase 凭证（gitignored）
+│   ├── database.ts             # SQLite 连接、schema 与迁移
+│   ├── persistence.ts          # 用户、日记与 runtime 持久化
+│   ├── local-wordcloud-store.ts # 统一 SQLite 中的词云消息与活跃榜统计
+│   └── github.ts               # Hexo diary 推送
 └── global.d.ts                 # 共享类型
 ```
 
@@ -112,74 +113,99 @@ npm ci
 # 2. 配置环境变量
 cp .env.example .env
 
-# 3. 放入 Firebase 服务账号密钥
-# 将 serviceAccountKey.json 放到 src/services/ 下
-
-# 4. 编译
+# 3. 编译
 npm run build
 
-# 5. 运行
+# 4. 运行
 node dist/app.js
 ```
+
+### Docker
+
+准备好 `.env` 后，创建持久化目录并使用 Compose 构建：
+
+```bash
+mkdir -p data
+docker compose up -d --build
+docker compose logs -f nyarbot
+```
+
+统一数据库默认位于 `data/nyarbot.sqlite`，Compose 将整个 `data/` 目录持久化，且不挂载 Firebase 凭据。Compose 要求该目录预先存在，不会自动创建缺失的挂载源。更新代码后再次执行 `docker compose up -d --build`；停止服务使用 `docker compose down`。
 
 ## Commands & Interactions
 
 详见 [命令与交互文档](docs/commands-and-interactions.zh-CN.md)。
 
-| 命令                          | 说明                                          |
-| ----------------------------- | --------------------------------------------- |
-| `/help`                       | 显示帮助                                      |
-| `/love`                       | 向 bot 告白，触发好感度评分与傲娇回应         |
-| `/shock`                      | 电 bot 一下，支持强度与附带文本               |
-| `/stroke`                     | 抚摸 bot 一下，支持强度与附带文本             |
-| `/roll [NdM]`                 | 掷骰子；默认 `1d20`，支持 1–20 颗、2–99999 面 |
-| `/nighty`                     | 晚安，8 小时后下次发言自动早安问候            |
-| `/status`                     | bot 运行状态（仅管理员）                      |
-| `/reset`                      | 清除对话历史缓冲区和运行摘要（仅管理员）      |
-| `/diary`                      | 生成今日日记预览（仅管理员，私聊）            |
-| `/wordcloud [date]`           | 生成指定日期词云预览（仅管理员，私聊）        |
-| `/diaryobs [date]`            | 列出结构化日记观察（仅管理员，私聊）          |
-| `/diaryshow <id>`             | 查看单条日记观察（仅管理员，私聊）            |
-| `/diaryedit <id> <json>`      | 修改日记观察（仅管理员，私聊）                |
-| `/diaryretract <id> [reason]` | 撤回日记观察（仅管理员，私聊）                |
-| `/diaryregen [date]`          | 重新生成预览，不保存或发布（仅管理员，私聊）  |
+| 命令                          | 说明                                                                       |
+| ----------------------------- | -------------------------------------------------------------------------- |
+| `/help`                       | 显示帮助                                                                   |
+| `/love`                       | 向 bot 告白，触发好感度评分与傲娇回应                                      |
+| `/shock`                      | 电 bot 一下，支持强度与附带文本                                            |
+| `/stroke`                     | 抚摸 bot 一下，支持强度与附带文本                                          |
+| `/roll [NdM]`                 | 掷骰子；默认 `1d20`，支持 1–20 颗、2–99999 面                              |
+| `/nighty`                     | 晚安，8 小时后下次发言自动早安问候                                         |
+| `/status`                     | bot 运行状态（仅管理员）                                                   |
+| `/reset`                      | 清除对话历史缓冲区和运行摘要（仅管理员）                                   |
+| `/diary`                      | 生成今日日记预览（仅管理员，私聊）                                         |
+| `/wordcloud [date]`           | 生成指定日期词云预览（仅管理员，私聊）                                     |
+| `/diaryobs [date]`            | 列出结构化日记观察（仅管理员，私聊）                                       |
+| `/diaryshow <id>`             | 查看单条日记观察（仅管理员，私聊）                                         |
+| `/diaryedit <id> <json>`      | 修改日记观察（仅管理员，私聊）                                             |
+| `/diaryretract <id> [reason]` | 撤回日记观察（仅管理员，私聊）                                             |
+| `/diaryregen [date]`          | 重新生成预览，不保存或发布（仅管理员，私聊）                               |
+| `/diaryretry [YYYY-MM-DD]`    | 失败后补生成、保存并正式发布，默认昨天；不覆盖已保存日记（仅管理员，私聊） |
 
-| 场景          | 触发方式                                           |
-| ------------- | -------------------------------------------------- |
-| 聊天          | `@nyarbot` 或回复她的消息                          |
-| 告白          | 说「我喜欢你」「我们结婚吧」等（需 `@` 或回复）    |
-| 设置昵称      | 跟她说「叫我 XX」                                  |
-| 记录记忆      | 跟她说「记住 XXX」                                 |
-| 分享链接      | 直接发链接（被动触发时按需抓取）                   |
-| 发图片 / 贴纸 | 直接发送（被动触发时按需解析媒体）                 |
-| 日记记录      | bot 在群聊中自动通过 `writeDiary` 工具记录观察笔记 |
+| 场景          | 触发方式                                             |
+| ------------- | ---------------------------------------------------- |
+| 聊天          | `@nyarbot` 或回复她的消息                            |
+| 告白          | 说「我喜欢你」「我们结婚吧」等（需 `@` 或回复）      |
+| 设置昵称      | 跟她说「叫我 XX」                                    |
+| 记录记忆      | 跟她说「记住 XXX」                                   |
+| 分享链接      | 直接发链接（被动触发时按需抓取）                     |
+| 发图片 / 贴纸 | 直接发送（被动触发时按需解析媒体）                   |
+| 日记记录      | 优先使用 `writeDiary` 观察，缺失时回退到持久化群事件 |
+
+## 用户记忆
+
+- 昵称、时区属于基础档案；普通回复不默认加载用户记忆，由模型按需调用 `recallMemory`，读取工具结果后再回复。
+- 记忆独立保存在 SQLite `user_memory_records`，包含发生/记录时间、重要性（1–5）、置信度、类别、可选原话与机器人感受、标签、来源和有效期。事实、推测与感受分开保存。
+- 检索采用本地中文分词与 SQLite 字面关键词匹配，不使用向量服务。相关检索按匹配程度、重要性、记录时间排序；近期检索仅按记录时间排序。每轮最多查询两次，每次最多五条，返回文本总预算 5000 字符；无命中不拿无关旧记忆补位。
+- 早安仍专门读取最近三条有效记忆；`/love` 和告白回复读取最近最多十条。晚安只使用已保存的昵称。
+- 保存时超过 60 条或 16000 字符的预算后触发事务内压缩，目标不超过 48 条、12000 字符：淘汰失效记录、时间未知且重要性最低的旧记忆，以及记录超过 7/30/90 天的重要性 1/2/3 记忆；剩余记录按重要性、时间保留。4–5 级不单纯因年久被清理，但仍受总预算限制。不再让模型任意合并事实，精确重复写入也不刷新时间或提高重要性。
+- 纠正使用记忆 ID 建立修订关系；遗忘按 ID 删除整条修订链。不会删除历史聊天、已生成日记或已有备份中的副本。
+- 数据库启动时自动从 v1/v2 升级到 v3：旧字符串原文保留，时间未知、重要性为 1，不编造来源或感受；它们能被关键词检索，但不进入近期列表，并在今后压缩时逐步淘汰。
+
+**升级前请先备份数据库。** 旧程序无法打开 v3 数据库；回滚必须配合恢复升级前备份，不能只回退镜像。备份后的新增数据需要另行保留。恢复工具仍支持校验旧版本备份，启动时再升级。
 
 ## Configuration
 
 详见 [配置文档](docs/configuration.zh-CN.md)。
 
-| 变量                          | 必填 | 说明                                               |
-| ----------------------------- | ---- | -------------------------------------------------- |
-| `BOT_API_KEY`                 | ✅   | Telegram Bot Token                                 |
-| `BOT_USERNAME`                | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致）       |
-| `TG_GROUP_ID`                 | ✅   | 目标群组 ID（bot 只在此群工作）                    |
-| `TG_ADMIN_UID`                | ✅   | 管理员 Telegram 用户 ID                            |
-| `DEEPSEEK_API_KEY`            | ✅   | DeepSeek API Key                                   |
-| `TAVILY_API_KEY`              | ✅   | Tavily Search API Key                              |
-| `CF_AIG_TOKEN`                | ✅   | Cloudflare AI Gateway Token                        |
-| `CF_ACCOUNT_ID`               | ✅   | Cloudflare Account ID                              |
-| `BOT_PERSONA_NAME`            | ❌   | 机器人对话名，默认 `にゃる`                        |
-| `BOT_PERSONA_FULL_NAME`       | ❌   | 机器人全名，默认 `晴海猫月`                        |
-| `BOT_PERSONA_READING`         | ❌   | 名字读音标注，默认 `はるみ にゃる`                 |
-| `GITHUB_TOKEN`                | ❌   | GitHub PAT，用于推送日记到 Hexo 博客               |
-| `GITHUB_REPO`                 | ❌   | GitHub 仓库名，格式 `owner/repo`                   |
-| `TG_DIARY_CHANNEL_ID`         | ❌   | 自动日记全文推送频道 ID                            |
-| `WORDCLOUD_DB_PATH`           | ❌   | 本地词云 sqlite 路径，默认 `data/wordcloud.sqlite` |
-| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌   | 词云发布时段检查间隔，默认 `60000`                 |
+| 变量                          | 必填 | 说明                                         |
+| ----------------------------- | ---- | -------------------------------------------- |
+| `BOT_API_KEY`                 | ✅   | Telegram Bot Token                           |
+| `BOT_USERNAME`                | ✅   | Bot 用户名（必须与 Telegram 实际用户名一致） |
+| `TG_GROUP_ID`                 | ✅   | 目标群组 ID（bot 只在此群工作）              |
+| `TG_ADMIN_UID`                | ✅   | 管理员 Telegram 用户 ID                      |
+| `DEEPSEEK_API_KEY`            | ✅   | DeepSeek API Key                             |
+| `TAVILY_API_KEY`              | ✅   | Tavily Search API Key                        |
+| `CF_AIG_TOKEN`                | ✅   | Cloudflare AI Gateway Token                  |
+| `CF_ACCOUNT_ID`               | ✅   | Cloudflare Account ID                        |
+| `BOT_PERSONA_NAME`            | ❌   | 机器人对话名，默认 `にゃる`                  |
+| `BOT_PERSONA_FULL_NAME`       | ❌   | 机器人全名，默认 `晴海猫月`                  |
+| `BOT_PERSONA_READING`         | ❌   | 名字读音标注，默认 `はるみ にゃる`           |
+| `GITHUB_TOKEN`                | ❌   | GitHub PAT，用于推送日记到 Hexo 博客         |
+| `GITHUB_REPO`                 | ❌   | GitHub 仓库名，格式 `owner/repo`             |
+| `TG_DIARY_CHANNEL_ID`         | ❌   | 自动日记全文推送频道 ID                      |
+| `DATABASE_PATH`               | ❌   | 统一 SQLite 路径，默认 `data/nyarbot.sqlite` |
+| `DATABASE_BACKUP_PASSPHRASE`  | ✅   | SQLite 备份加密口令，至少 20 字符            |
+| `DATABASE_BACKUP_SCHEDULE`    | ❌   | 每日备份时间，默认 `03:30`（`APP_TIMEZONE`） |
+| `DATABASE_BACKUP_PATH`        | ❌   | 本地加密备份目录，默认 `data/backups`        |
+| `WORDCLOUD_CHECK_INTERVAL_MS` | ❌   | 词云发布时段检查间隔，默认 `60000`           |
 
 ## Wordcloud Notes
 
-- 词云消息只保存在本地 SQLite，不上传 Firestore。
+- 词云消息与其他持久化数据位于同一个 SQLite 数据库。
 - 仅统计活人消息；bot 自身和其他 bot 不参与词云和活跃榜。
 - 命令消息不会进入词云；如果一条普通消息后来被编辑成命令，会从本地词云库删除。
 - 编辑消息按同一 `message_id` 覆盖，词云使用最终文本。
@@ -210,6 +236,7 @@ npm run build      # 编译 src/ → dist/
 - [配置文档](docs/configuration.zh-CN.md)
 - [命令与交互](docs/commands-and-interactions.zh-CN.md)
 - [开发文档](docs/development.zh-CN.md)
+- [数据库迁移与备份维护](docs/database-maintenance.zh-CN.md)
 
 English docs:
 
@@ -221,7 +248,7 @@ English docs:
 ## Release Notes
 
 - 当前发布版本：[`1.0.0`](CHANGELOG.md)
-- 最近更新重点：新增 `/roll` 与 `/nighty` 快速路径；主动插话加入候选窗口和活动版本校验，避免重复或过时回复；Telegram 图片按真实字节识别 MIME，动画贴纸只安全读取缩略图；词云增加中午/晚间发布并复用于日记；博客改为批量提交日记与图片；Gemini 3.1 Pro Preview 生成日记，Flash Lite 通读全文生成克制导读
+- 最近更新重点：DeepSeek Flash 统一处理普通对话、工具调用和图片正文，只有 advisor 启用 high 思考；DeepSeek 不可用时由 Gemini 3.5 Flash-Lite 接管主动/被动回复；日记生成、导读和群通知发送加入有界重试；主动插话加入候选窗口和活动版本校验，避免重复或过时回复
 
 ## Disclaimer
 

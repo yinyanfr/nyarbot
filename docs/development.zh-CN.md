@@ -11,8 +11,9 @@
 npm ci
 cp .env.example .env
 # 编辑 .env 填入你的密钥
-# 将 serviceAccountKey.json 放到 src/services/
 ```
+
+生产环境不需要 Firebase 凭据。`src/services/serviceAccountKey.json` 只在切换前供一次性迁移工具使用。
 
 ## 脚本
 
@@ -39,7 +40,7 @@ GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` �
 3. `npm run lint`
 4. `npm run format:check`
 
-没有配置测试套件（`test` 脚本是占位符）。
+`npm test` 会先构建项目，再运行数据库备份测试。
 
 ## 关键设计决策
 
@@ -63,7 +64,7 @@ DeepSeek 的 Chat Completions API 不支持 `json_schema` response_format（返�
 
 ### 为什么用两阶段主动探测？
 
-每次主动检查都运行完整模型很昂贵。探测门使用 `flashNoThinkModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
+每次主动检查都运行完整模型很昂贵。探测门使用非思考 `deepseekFlashModel` 配合简化提示词和只有 `dismiss`/`send_message` 的工具。探测认为话题相关后才运行完整模型。最近一次 bot 输出之后的消息才是候选；`activityRevision` 快照会在出现新用户或 bot 活动时取消 probe/generation 结果。
 
 ### 为什么用 `formatForTelegramHtml`？
 
@@ -73,11 +74,11 @@ DeepSeek 输出 Markdown（粗体、斜体、代码、链接、LaTeX 数学）�
 
 当用户 @提及或回复 bot 时，沉默几乎总是错误的——用户期望得到回复。用递增提示重试确保模型最终会说话。对于主动插话，沉默是合理的预期选择，不需要重试。
 
-当前实现的重试次数是：simple/complex 最多 1 次，tech 0 次。技术问题如果模型选择沉默，直接走兜底，避免昂贵模型重复消耗。
+当前实现的重试次数是：simple/complex 最多 1 次，tech 0 次。这个 tier 级策略独立于模型选择；三个 tier 的主轮次都使用非思考 DeepSeek Flash。
 
 ### 为什么有单群 Runtime？
 
-handler 仍负责 Telegram 细节，但 AI 调度统一交给 `groupRuntime`。这样可以保证 passive/proactive 不并发、群聊白热化时不抢话、刷屏用户不会触发大量模型调用，并且每轮模型输入/输出、工具调用、token usage 都能写入 Firestore 供调试。
+handler 仍负责 Telegram 细节，但 AI 调度统一交给 `groupRuntime`。这样可以保证 passive/proactive 不并发、群聊白热化时不抢话、刷屏用户不会触发大量模型调用，并且每轮模型输入/输出、工具调用、token usage 都能写入 SQLite 供调试。
 
 Runtime 的默认阈值：
 
@@ -116,7 +117,7 @@ Diary 是文学化归档：由 `writeDiary` 和午夜日记流程生成，面向
 
 ### 为什么有日记系统？
 
-Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。只有运行中的定时器观察到跨天后，才会在 00:02 后开始生成；目前没有启动补发。Gemini 3.1 Pro Preview 选择 active observations 并生成第一人称日记。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.1 Flash Lite 都会通读全文生成群通知导读。
+Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳定的 subject identity。定时器会在 00:02 后扫描最近三个已结束日期，且启动时立即检查。Gemini 3.1 Pro Preview 优先选择 active observations 生成第一人称日记；如果没有观察通过筛选，则依次使用旧日记条目和 runtime 持久化事件的首尾限量样本。昨日最终词云会复用于 Telegram/博客发布；GitHub blobs、tree、Markdown 和图片通过一次 Git Data API commit 批量提交。只有已配置且 GitHub 发布成功才检查 Pages；无论发布是否可用，Gemini 3.5 Flash-Lite 都会通读全文生成群通知导读。日记正文、导读生成和群通知投递都使用最多三次的有界退避重试，空模型输出也会重试。成功投递会写入 SQLite，因此之后的启动或定时检查可以用已保存的日记补发失败通知，而不会重复发布其他目标。
 
 ### 为什么用 dayjs 处理日期？
 
@@ -129,7 +130,7 @@ Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳�
 
 ### 进程内状态
 
-对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态仍在进程内存中，但对话恢复和调试不再只依赖缓冲区。Firestore `events` 是 append-only 事实记录，`runtime/group.summary` + recent events 是长期上下文来源；内存 buffer 是热缓存和快速扫描窗口。
+对话缓冲区、用户缓存、更新去重集合、主动插话定时器状态仍在进程内存中，但对话恢复和调试不再只依赖缓冲区。SQLite `runtime_events` 是 append-only 事实记录，`runtime_group` + recent events 是长期上下文来源；内存 buffer 是热缓存和快速扫描窗口。
 
 ### 日志架构
 
@@ -142,21 +143,23 @@ Bot 通过 `writeDiary` 写入结构化 `DiaryObservationV2`，并可携带稳�
 
 ### 按需媒体处理
 
-Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`，不再预描述媒体。被动触发轮次按需查看完整图片或缩略图，主动轮次也可预取最新候选图片。下载文件先按字节识别 MIME；动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
+Handler 只保留 Telegram 原始 `file_id` / `thumbnail_file_id`。AI 轮次下载 JPEG、PNG、GIF 或 WebP 后，将完整图片与动态文本放入同一个 DeepSeek user message；其他媒体缩略图仍可按需描述。动画贴纸原负载不会被当作图片发送；成功描述只进入有容量上限的进程内会话缓存。
 
 ### URL 抓取（三级策略）
 
 `fetchUrlContent()`（`ai.ts`）使用三级策略：
 
-1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 Gemini 配图描述
+1. **Twitter/X** → fxtwitter API（免费，无需认证）+ 批量 DeepSeek Flash 配图描述
 2. **直接抓取** → HTML title/meta 提取
 3. **Tavily Extract** → 回退
 
 URL 摘要只做进程内缓存；历史会保留轻量 URL 标记，但主动路径不抓取 URL 内容。
 
-## Firestore Schema
+## 统一 SQLite Schema
 
-### `users/{uid}`
+`src/services/database.ts` 负责 schema 初始化与版本，`src/services/persistence.ts` 负责应用 CRUD。默认数据库是 `data/nyarbot.sqlite`。
+
+### Users
 
 ```typescript
 interface User {
@@ -191,23 +194,23 @@ interface DiaryObservationV2 {
   status: "active" | "superseded" | "retracted";
 }
 
-// diary/{date}
+// diary 表中以日期为键的记录
 // entries?: DiaryEntry[]（旧格式回退）
 // diary?: string（生成的日记文本）
 // generatedAt?: number（毫秒时间戳）
 // generationRecords?: DiaryGenerationRecord[]
 
-// diaryObservations/{id}: DiaryObservationV2
+// diary_observations 表中以 id 为键的 DiaryObservationV2
 ```
 
 ## 词云发布
 
 本地 SQLite 会记录中午、晚间和昨日最终版三个发布 slot。运行期间，12:00–17:59 尝试中午场，18:00 后尝试晚间场；错过的中午场不补发。生成文件保存在 `wordcloud-artifacts/`，生成/发布最多重试三次；昨日最终图片会被日记频道与 GitHub 发布复用。
 
-### Runtime collections
+### Runtime tables
 
 ```typescript
-// runtime/group
+// runtime_group
 interface RuntimeGroupStateDoc {
   summary: string;
   summaryCursorTs: number;
@@ -216,7 +219,7 @@ interface RuntimeGroupStateDoc {
   updatedAt: number;
 }
 
-// events/{autoId}
+// runtime_events
 interface RuntimeEventRecord {
   chatId: string;
   messageId?: number;
@@ -231,9 +234,9 @@ interface RuntimeEventRecord {
   ignoredReason?: string;
 }
 
-// turns/{autoId}
+// runtime_turns
 // stores model, tier, needsSearch, tool calls, action, messages, token/cache usage, latency, error.
 
-// compactions/{autoId}
+// runtime_compactions
 // append-only compaction snapshots with oldCursorTs/newCursorTs and token usage.
 ```

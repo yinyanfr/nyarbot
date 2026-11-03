@@ -8,6 +8,8 @@ export {
   generateShockResponse,
   generateStrokeResponse,
   fetchUrlContent,
+  isTwitterStatusUrl,
+  containsTwitterStatusUrl,
 } from "./ai.js";
 export type { AiTurnResult, GenerateOptions, ProbeGateOptions } from "./ai.js";
 export {
@@ -24,5 +26,11 @@ export {
   pickRandomStickerEmoji,
   stickerCount,
 } from "./stickers.js";
-export { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./proactive.js";
+export {
+  getProactiveHealthSnapshot,
+  startProactiveChecker,
+  stopProactiveChecker,
+  touchBotActivity,
+} from "./proactive.js";
+export type { ProactiveHealthSnapshot } from "./proactive.js";
 export { logger } from "./logger.js";

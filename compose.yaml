@@ -1,0 +1,16 @@
+name: nyarbot
+
+services:
+  nyarbot:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+    stop_grace_period: 30s

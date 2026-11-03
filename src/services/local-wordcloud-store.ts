@@ -1,9 +1,6 @@
-import { mkdirSync } from "node:fs";
-import path from "node:path";
-import Database from "better-sqlite3";
 import config from "../configs/env.js";
-import { logger } from "../libs/logger.js";
 import { parseTimestampInputForTimezone } from "../libs/time.js";
+import { getDatabase, initDatabase } from "./database.js";
 
 export interface StoredGroupMessage {
   chatId: string;
@@ -30,81 +27,18 @@ export type WordcloudPublicationSlot =
   | "same_day_noon"
   | "same_day_evening";
 
-const DB_PATH = path.resolve(config.wordcloudDbPath);
 const RETENTION_DAYS = 10;
-
-type SqliteDatabase = InstanceType<typeof Database>;
-
-let database: SqliteDatabase | null = null;
-
-function db(): SqliteDatabase {
-  if (database) return database;
-  mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const opened = new Database(DB_PATH, { timeout: 5_000 });
-  opened.pragma("journal_mode = WAL");
-  opened.pragma("foreign_keys = ON");
-  opened.exec(`
-    CREATE TABLE IF NOT EXISTS group_messages (
-      chat_id TEXT NOT NULL,
-      message_id INTEGER NOT NULL,
-      user_id TEXT NOT NULL,
-      display_name TEXT NOT NULL,
-      username TEXT,
-      is_bot INTEGER NOT NULL,
-      is_forwarded INTEGER NOT NULL DEFAULT 0,
-      text TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      edited_at INTEGER,
-      PRIMARY KEY (chat_id, message_id)
-    ) STRICT;
-
-    CREATE INDEX IF NOT EXISTS idx_group_messages_created_at
-      ON group_messages (created_at);
-
-    CREATE INDEX IF NOT EXISTS idx_group_messages_chat_created_at
-      ON group_messages (chat_id, created_at);
-
-    CREATE TABLE IF NOT EXISTS wordcloud_runs (
-      date TEXT PRIMARY KEY,
-      published_at INTEGER NOT NULL
-    ) STRICT;
-
-    CREATE TABLE IF NOT EXISTS wordcloud_publications (
-      date TEXT NOT NULL,
-      slot TEXT NOT NULL,
-      published_at INTEGER NOT NULL,
-      PRIMARY KEY (date, slot)
-    ) STRICT;
-  `);
-  const hasIsForwarded = opened
-    .prepare(
-      `
-        SELECT 1
-        FROM pragma_table_info('group_messages')
-        WHERE name = ?
-      `,
-    )
-    .get("is_forwarded");
-  if (!hasIsForwarded) {
-    opened.exec(`
-      ALTER TABLE group_messages
-      ADD COLUMN is_forwarded INTEGER NOT NULL DEFAULT 0;
-    `);
-  }
-  database = opened;
-  return opened;
-}
 
 function toDayStartMs(date: string): number {
   return parseTimestampInputForTimezone(`${date} 00:00:00`, config.appTimezone) ?? 0;
 }
 
 export function initLocalWordcloudStore(): void {
-  db();
+  initDatabase();
 }
 
 export async function upsertGroupMessage(message: StoredGroupMessage): Promise<void> {
-  db()
+  getDatabase()
     .prepare(
       `
         INSERT INTO group_messages (
@@ -145,7 +79,7 @@ export async function upsertGroupMessage(message: StoredGroupMessage): Promise<v
 }
 
 export async function deleteStoredMessage(chatId: string, messageId: number): Promise<boolean> {
-  const result = db()
+  const result = getDatabase()
     .prepare(
       `
         DELETE FROM group_messages
@@ -159,7 +93,7 @@ export async function deleteStoredMessage(chatId: string, messageId: number): Pr
 export async function listStoredMessagesForDate(date: string): Promise<StoredGroupMessage[]> {
   const startMs = toDayStartMs(date);
   const endMs = startMs + 24 * 60 * 60 * 1000;
-  const rows = db()
+  const rows = getDatabase()
     .prepare(
       `
         SELECT chat_id, message_id, user_id, display_name, username, is_bot, is_forwarded, text, created_at, edited_at
@@ -219,12 +153,14 @@ export async function listTopActiveUsersForDate(
 
 export async function pruneStoredMessages(nowMs = Date.now()): Promise<number> {
   const cutoffMs = nowMs - RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  const result = db().prepare(`DELETE FROM group_messages WHERE created_at < ?`).run(cutoffMs);
+  const result = getDatabase()
+    .prepare(`DELETE FROM group_messages WHERE created_at < ?`)
+    .run(cutoffMs);
   return Number(result.changes ?? 0);
 }
 
 export async function hasWordcloudRunForDate(date: string): Promise<boolean> {
-  const row = db()
+  const row = getDatabase()
     .prepare(
       `
         SELECT date
@@ -240,7 +176,7 @@ export async function hasWordcloudPublication(
   date: string,
   slot: WordcloudPublicationSlot,
 ): Promise<boolean> {
-  const row = db()
+  const row = getDatabase()
     .prepare(
       `
         SELECT date
@@ -256,7 +192,7 @@ export async function markWordcloudRunForDate(
   date: string,
   publishedAt = Date.now(),
 ): Promise<void> {
-  db()
+  getDatabase()
     .prepare(
       `
         INSERT INTO wordcloud_runs (date, published_at)
@@ -273,7 +209,7 @@ export async function markWordcloudPublication(
   slot: WordcloudPublicationSlot,
   publishedAt = Date.now(),
 ): Promise<void> {
-  db()
+  getDatabase()
     .prepare(
       `
         INSERT INTO wordcloud_publications (date, slot, published_at)
@@ -286,12 +222,5 @@ export async function markWordcloudPublication(
 }
 
 export function closeLocalWordcloudStore(): void {
-  if (!database) return;
-  try {
-    database.close();
-  } catch (err) {
-    logger.warn({ err }, "wordcloud store close failed");
-  } finally {
-    database = null;
-  }
+  // The shared database lifecycle is owned by app.ts.
 }

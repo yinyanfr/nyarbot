@@ -29,7 +29,7 @@ Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 When a user @mentions the bot or replies to one of its messages, the full AI pipeline is triggered:
 
 1. **Classification** — `classifyMessage()` categorizes the message as `simple`, `complex`, or `tech`, and whether web search is needed.
-2. **Model selection** — `simple` → flash-no-think, `complex` → flash-think, `tech` → pro-think.
+2. **Model selection** — Every main chat tier uses non-thinking `deepseek-flash`; the main model invokes the high-thinking `startSubagent` advisor when deeper research is needed.
 3. **Tool-augmented generation** — `generateAiTurn()` runs with tools (send_message, dismiss, memory, nickname, sticker, optional web search).
 4. **Dismiss retry** — If the model chooses `dismiss` despite being triggered, simple/complex turns retry once; tech turns do not retry. The handler then tries to rescue a raw draft into real `send_message` output before falling back to a sticker.
 5. **Output** — Messages formatted via `formatForTelegramHtml()` (Markdown→Telegram HTML), sent with typing indicator and optional sticker dispatch.
@@ -43,22 +43,22 @@ Before classification, the handler runs a lightweight local route so short chats
 
 ### Images & Media
 
-- The handler no longer pre-downloads or pre-describes media.
-- Context now includes raw Telegram references only (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media.
-- During **passive replies** (@mention/reply), the model can call `describeTelegramMedia` on demand when media content is actually needed.
-- During **proactive replies**, URL fetching remains disabled. Images attached to the newest response candidates may be prefetched and must be understood before the bot comments on them; older media is context-only.
-- Telegram downloads prefer known JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF, and HEIC byte signatures. If none matches, an `image/*` response header is accepted as fallback; payloads with neither are rejected.
+- The handler retains raw Telegram references (`file_id` / `thumbnail_file_id`) for current-turn and reply-to media; the AI turn downloads images when needed.
+- Full current-turn images and text are placed in one `deepseek-flash` user message instead of being pre-described by Gemini.
+- Other media thumbnails remain available through `describeTelegramMedia`; proactive URL fetching stays disabled and older media remains context-only.
+- Telegram image downloads accept only DeepSeek-supported JPEG, PNG, GIF, and WebP, preferring the actual byte signature over response metadata.
 
 ### URLs
 
 - URLs are extracted from Telegram entities + regex fallback.
 - No eager fetch is performed in handlers.
-- During **passive replies**, the model can call `fetchUrlContent` on demand.
+- During **passive replies**, the model can call `fetchUrlContent` or `readVideo` on demand.
+- `readVideo` sends supported YouTube URLs directly to native Gemini for audio/visual understanding. Bilibili uses a read-only MCP path for subtitles and metadata; when subtitles are unavailable it returns metadata only.
 - `fetchUrlContent` uses a three-tier strategy:
   1. **Twitter/X status links** → FxEmbed API v2 (`/2/status/{id}`)
   2. **Other links** → direct `fetch()` + HTML title/meta description extraction
   3. **Fallback** → Tavily Extract summarization
-- URL content cache is in-memory (session-scoped), not persisted to Firestore.
+- URL content cache is in-memory (session-scoped), not persisted to SQLite.
 
 ### Stickers
 
@@ -115,13 +115,14 @@ The `generateAiTurn()` function exposes these tools to the model:
 | `sendSticker`           | Select a sticker by emoji from the hardcoded pack; invalid emoji cancels sending       |
 | `describeTelegramMedia` | On-demand media description; proactive access is limited to candidate images           |
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive only)        |
+| `readVideo`             | Read YouTube audio/visual content or Bilibili subtitles with metadata-only fallback    |
 | `writeDiary`            | Create, update, supersede, or retract a structured diary observation                   |
 | `webSearch`             | Tavily search; stable schema, returns a reason when runtime flood protection blocks it |
 | `startSubagent`         | One-shot URL/media/technical research helper; cannot send group messages               |
 
 If a web search already succeeded during prefetch before generation, that counts as the turn's required search; the model only needs to call `webSearch` again when the prefetched result is still insufficient.
 
-All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to Firestore.
+All memory/nickname tools validate the `uid` against `allowedUids` (the set of UIDs present in the recent conversation buffer) before writing to SQLite.
 
 ### Tool Call Flow
 
@@ -130,12 +131,13 @@ User message → classifyMessage() → generateAiTurn()
                                         │
                                         ├─ Model calls send_message → text added to messages[]
                                         ├─ Model calls dismiss → dismissed = true
-                                        ├─ Model calls saveMemory → Firestore write
-                                        ├─ Model calls setNickname → Firestore write
-                                        ├─ Model calls deleteMemory → Firestore delete
+                                        ├─ Model calls saveMemory → SQLite write
+                                        ├─ Model calls setNickname → SQLite write
+                                        ├─ Model calls deleteMemory → SQLite delete
                                          ├─ Model calls sendSticker → file_id selected for dispatch
                                          ├─ Model calls describeTelegramMedia → on-demand media description
                                          ├─ Model calls fetchUrlContent → on-demand URL summary
+                                         ├─ Model calls readVideo → YouTube/Bilibili video information
                                          ├─ Model calls writeDiary → structured observation mutation
                                          ├─ Model calls webSearch → Tavily search executed
                                          ├─ Model calls startSubagent → one-shot research summary

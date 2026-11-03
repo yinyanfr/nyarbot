@@ -323,7 +323,9 @@ export function formatForTelegramHtml(text: string): string {
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 
   // 12. Convert [text](url)
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => {
+    return `<a href="${url.replace(/"/g, "&quot;")}">${label}</a>`;
+  });
 
   // 13. Restore placeholders
   for (const { id, html } of placeholders) {

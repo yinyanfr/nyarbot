@@ -11,7 +11,7 @@ Group interactions are scoped to `TG_GROUP_ID`; supported private admin commands
 - debounce with a 5s default quiet wait and a 30s max delay
 - one `running` lock plus a `dirty` flag so passive/proactive turns never overlap
 - quiet mode for hot chat periods; proactive is paused and ordinary non-mention messages do not trigger
-- append-only Firestore records for `events`, `turns`, `compactions`, and `runtime/group`
+- append-only SQLite records for runtime events, turns, compactions, and group state
 
 ## Data Flow
 
@@ -19,7 +19,7 @@ Group interactions are scoped to `TG_GROUP_ID`; supported private admin commands
 Telegram Update
     │
     ▼
-app.ts (entry: init Firebase, create Bot, register handlers, start proactive checker)
+app.ts (entry: init SQLite, create Bot, register handlers, start proactive checker)
     │
     ▼
 handlers/index.ts (setupHandlers)
@@ -32,11 +32,11 @@ handlers/index.ts (setupHandlers)
     ├─ Fast group commands
     │     ├─ /nighty → immediate acknowledgement + background timestamp write
     │     └─ /roll → immediate result; background extraction + scheduleCommandTurn()
-    ├─ User resolution (firestore.ts → 60s in-process cache)
+    ├─ User resolution (persistence.ts → 60s in-process cache)
     ├─ Content extraction (extract-content.ts)
     │     ├─ URL detection (entity + regex fallback)
     │     └─ Raw file_id / thumbnail_file_id / sticker emoji references
-    ├─ Local wordcloud persistence (local-wordcloud-store.ts)
+    ├─ Unified SQLite wordcloud persistence (local-wordcloud-store.ts)
     │     ├─ target-group human messages only
     │     ├─ command messages skipped; edited-to-command messages deleted from store
     │     ├─ edited messages overwrite by the same message_id
@@ -48,21 +48,20 @@ handlers/index.ts (setupHandlers)
     ├─ Trigger detection (@mention / reply-to-bot)
     ├─ Local routing (short chat / tech / current-fact)
     ├─ AI classification (classifyMessage)
-    │     └─ simple → flashNoThinkModel
-    │     └─ complex → flashThinkModel
-    │     └─ tech → proThinkModel
+    │     └─ simple / complex / tech → deepseekFlashModel (no thinking)
+    │     └─ advisor → advisorModel (high thinking)
     ├─ Runtime scheduling (group-runtime.ts)
-    │     ├─ Persist event, dedup, rate-limit, debounce, running lock
+    │     ├─ Persist event in SQLite, dedup, rate-limit, debounce, running lock
     │     └─ Build summary + recent events context
     ├─ AI turn (handleAiTurn → generateAiTurn)
     │     ├─ Static system prompt (buildSystemPrompt)
     │     ├─ User-tail late binding (time, trigger state, tool availability, runtime state)
     │     ├─ Tool calls: send_message, dismiss, saveMemory, setNickname,
 │     │               deleteMemory, sendSticker, writeDiary, webSearch,
-│     │               describeTelegramMedia, fetchUrlContent, startSubagent
-    │     ├─ Rich content on demand; session-only cache, no Firestore image cache
-    │     │     ├─ Photos use full file; other media/stickers prefer thumbnails
-    │     │     └─ Known signatures win; image/* headers are accepted as fallback
+│     │               describeTelegramMedia, fetchUrlContent, readVideo, startSubagent
+    │     ├─ Rich content on demand; session-only cache, no persistent image cache
+    │     │     ├─ Images and text share one request; other media/stickers prefer thumbnails
+    │     │     └─ JPEG / PNG / GIF / WebP only; known byte signatures win
     │     ├─ Search prefetch: run webSearch before the model; if it succeeds, that counts as this turn's search
     │     ├─ Search-policy retry when `needsSearch` sends without `webSearch`
     │     ├─ Dismiss retry (simple/complex 1×, tech 0×)
@@ -92,7 +91,8 @@ Instead of streaming raw text, the bot uses a **tool-call architecture** where t
 | `sendSticker`           | Select a sticker by emoji from the hardcoded pack. Invalid emoji cancels sticker sending.                    |
 | `describeTelegramMedia` | On-demand media description for triggered turns, plus selected newest-candidate images in proactive turns.   |
 | `fetchUrlContent`       | On-demand URL extraction/summarization for links in current turn (passive-triggered turns only).             |
-| `writeDiary`            | Create/update/retract a structured observation in Firestore `diaryObservations`.                             |
+| `readVideo`             | YouTube native Gemini understanding; Bilibili subtitle reading with metadata-only fallback.                  |
+| `writeDiary`            | Create/update/retract a structured observation in unified SQLite.                                            |
 | `webSearch`             | Tavily search. Tool schema stays stable; when flood protection disables search, the tool returns the reason. |
 | `startSubagent`         | One-shot helper for URL/media/technical research. It returns a short summary and cannot send group messages. |
 
@@ -123,16 +123,16 @@ If all retries still dismiss:
 
 | Provider/model                                   | Usage                                                                            |
 | ------------------------------------------------ | -------------------------------------------------------------------------------- |
-| DeepSeek v4 Flash, thinking disabled             | Classification, short chat, greetings, affection/reaction flows, proactive probe |
-| DeepSeek v4 Flash, thinking enabled              | Complex conversations and tool-calling turns                                     |
-| DeepSeek v4 Pro, thinking enabled                | Technical questions and advisor-heavy turns                                      |
-| Gemini 3.1 Flash Lite via Cloudflare AI Gateway  | Telegram/tweet vision and full-diary notification copy                           |
+| DeepSeek Flash, thinking disabled                | Every main chat tier, classification, proactive probes, vision, and light tasks  |
+| DeepSeek Flash, high thinking                    | One-shot `startSubagent` advisors only                                           |
+| Gemini 3.5 Flash-Lite via Cloudflare AI Gateway  | DeepSeek reply fallback, full-diary notification copy, and YouTube understanding |
 | Gemini 3.1 Pro Preview via Cloudflare AI Gateway | Midnight diary generation and admin `/diary` previews                            |
 
 ### Why two providers?
 
-- **DeepSeek v4** has no vision capability. Sending `image_url` content parts results in a 400 error.
-- **Gemini 3.1 Flash Lite** handles image understanding and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
+- **DeepSeek Flash** supports native vision. Telegram images are sent as `image_url` parts beside current text in one user message; it also handles thumbnails and tweet photos.
+- **Gemini 3.5 Flash-Lite** handles unavailable-DeepSeek reply fallback, YouTube understanding, and diary notification copy through Cloudflare AI Gateway; **Gemini 3.1 Pro Preview** writes diaries.
+- Provider selection is sticky for the whole reply: if the first DeepSeek step falls back, every later tool step stays on Gemini so thought signatures remain valid. The bot never switches providers after DeepSeek has already emitted a tool call. Fallback activates for network/timeouts, 401–403, 408/409/429, and 5xx responses, but not malformed 400 requests or normal dismissals.
 
 ## Local Routing
 
@@ -144,7 +144,7 @@ Not every triggered turn starts with `classifyMessage()`. The handler first runs
 - Current-fact questions are marked `needsSearch`
 - Light sticker-only chat disables persistent tools for that turn to avoid pointless memory/diary writes
 
-`preferAdvisor` only nudges the main turn to call `startSubagent` for a short summary first; the helper cannot speak in the group. Normal triggered turns still can write memory and diary entries.
+`preferAdvisor` only nudges the non-thinking main turn to call the high-thinking `startSubagent` for a short summary first; the helper cannot speak in the group. Normal triggered turns still can write memory and diary entries.
 
 ## Timeout Guards
 
@@ -161,15 +161,15 @@ This prevents the model from skipping the search tool call.
 
 ## Context Management
 
-- **Runtime events**: Firestore `events` are the append-only source for recovery, debugging, and compaction.
-- **Conversation buffer**: The in-memory ring buffer remains a hot cache and quick proactive scan window. It is no longer the only context source; restart recovery uses Firestore runtime events plus `runtime/group.summary`.
-- **User data** (nickname, memories, nighty/morning timestamps): Persisted in Firestore. Cached in-process for 60 seconds.
-- **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted to Firestore.
-- **Compaction**: When recent events exceed thresholds, the runtime generates a working-memory summary, appends a `compactions` record, and updates `runtime/group.summary` / `summaryCursorTs`. Compaction is untrusted working memory; diary is literary archive.
+- **Runtime events**: SQLite `runtime_events` are the append-only source for recovery, debugging, and compaction.
+- **Conversation buffer**: The in-memory ring buffer remains a hot cache and quick proactive scan window. It is no longer the only context source; restart recovery uses SQLite runtime events plus `runtime_group` state.
+- **User data** (nickname, memories, nighty/morning timestamps): Persisted in SQLite and cached in-process for 60 seconds.
+- **Rich-content cache**: On-demand media descriptions and URL summaries are cached in-process for the current session only (TTL + size cap), not persisted.
+- **Compaction**: When recent events exceed thresholds, the runtime generates a working-memory summary, appends a `runtime_compactions` row, and updates `runtime_group`. Compaction is untrusted working memory; diary is literary archive.
 
 ## Wordcloud Pipeline
 
-- `src/services/local-wordcloud-store.ts` keeps the most recent 10 days of group messages plus per-day publish markers in SQLite.
+- `src/services/local-wordcloud-store.ts` keeps the most recent 10 days of group messages plus per-day publish markers in the unified SQLite database.
 - `src/libs/wordcloud.ts` handles tokenization, frequency counting, layout, rendering, preview captions, and publishing.
 - While running, the noon slot is attempted from 12:00–17:59 and the evening slot after 18:00, tracked by SQLite markers. A missed noon slot is not backfilled.
 - After 00:02, the runtime publishes yesterday's final rollup and can catch up after restart.
@@ -239,7 +239,7 @@ If cooldown has elapsed, the checker finds the latest bot output and treats only
 
 The proactive path uses `ProactiveCallbacks` interface (`sendText`, `sendSticker`, `sendChatAction`) to format messages, dispatch stickers, and show typing indicators — matching the handler path's formatting.
 
-The proactive checker stops after env-configurable consecutive failures (default: 5).
+Transient proactive failures trigger bounded exponential backoff. Any non-throwing check, including a valid silent result, clears the consecutive-failure count; the checker continues scheduling until explicit shutdown. Admin `/status` exposes its timer, failure count, timestamps, and latest error.
 
 ## Diary System
 
@@ -253,29 +253,32 @@ The bot records structured conversational observations via the `writeDiary` AI t
 
 ### Midnight Generation
 
-An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) detects date changes based on `APP_TIMEZONE`. Generation requires the process to observe rollover; unlike the wordcloud final rollup, it has no startup catch-up:
+An env-configurable interval timer (`checkAndGenerateDiary` in `src/libs/diary.ts`, default 60s) checks dates based on `APP_TIMEZONE`. It runs once at startup and scans the previous three dates, so restarts can catch up recent missing diaries:
 
-1. After 00:02, it selects up to 12 active observations for yesterday; legacy `diary/{date}.entries` are fallback input only.
-2. Gemini 3.1 Pro Preview composes the diary. The text and a generation record (model, prompt/style versions, observation ids, usage/status) are saved to Firestore.
+1. After 00:02, it selects up to 12 active observations. If none survive selection, legacy `diary/{date}.entries` are used; if those are also absent, a bounded sample from that day's persisted runtime `events` provides fallback material.
+2. Gemini 3.1 Pro Preview composes the diary. The text and a generation record (model, prompt/style versions, observation ids, usage/status) are saved to SQLite; errors and empty output receive up to three attempts.
 3. The previous-day wordcloud artifact is generated or reused. Telegram channel publishing sends it as the photo caption when the diary fits 1024 characters, otherwise it sends the diary as following text.
 4. GitHub publishing creates blobs, a tree, and one commit containing the Markdown and optional `source/img/diary/` image, then non-force updates `main`. Markdown uses root-relative `/img/diary/...` URLs.
-5. If configured GitHub publishing succeeds, the bot polls Pages readiness. Gemini 3.1 Flash Lite then reads the full diary and writes a restrained 1–2 sentence group notice regardless of GitHub availability; link state and challenge copy are appended deterministically.
+5. If configured GitHub publishing succeeds, the bot polls Pages readiness. Gemini 3.5 Flash-Lite then reads the full diary and writes a restrained 1–2 sentence group notice regardless of GitHub availability; link state and challenge copy are appended deterministically. Notice generation and group delivery each receive up to three attempts. Successful delivery is recorded in SQLite; startup and interval checks retry an unsent notice from the persisted diary without repeating channel or GitHub publication.
 
 ### Admin Diary Commands
 
 Private admin DMs provide `/diary` and `/diaryregen [date]` previews plus `/diaryobs`, `/diaryshow`, `/diaryedit`, and `/diaryretract` observation management. Preview/regeneration commands do not save or publish the generated diary.
 
-### Firestore Schema
+### SQLite Records
 
 ```
-diary/{YYYY-MM-DD}
+diary row for YYYY-MM-DD
   ├── entries?: DiaryEntry[]              (legacy fallback)
   ├── diary?: string
   ├── generatedAt?: number
   └── generationRecords?: DiaryGenerationRecord[]
 
-diaryObservations/{id}
+diary_observations row for id
   └── DiaryObservationV2
+
+diary_notification_deliveries row for YYYY-MM-DD
+  └── sentAt: number
 ```
 
 ### Timezone

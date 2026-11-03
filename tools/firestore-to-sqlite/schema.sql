@@ -1,0 +1,189 @@
+PRAGMA foreign_keys = ON;
+PRAGMA user_version = 1;
+
+CREATE TABLE schema_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE users (
+  firestore_id TEXT PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
+  nickname TEXT NOT NULL,
+  timezone TEXT,
+  nighty_timestamp INTEGER,
+  last_morning_greet INTEGER,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE user_memories (
+  user_firestore_id TEXT NOT NULL REFERENCES users(firestore_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  memory TEXT NOT NULL,
+  PRIMARY KEY (user_firestore_id, position)
+) STRICT;
+
+CREATE TABLE diary (
+  firestore_id TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  generated_diary TEXT,
+  generated_at INTEGER,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE diary_entries (
+  diary_firestore_id TEXT NOT NULL REFERENCES diary(firestore_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  ts INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  PRIMARY KEY (diary_firestore_id, position)
+) STRICT;
+
+CREATE TABLE diary_generation_records (
+  diary_firestore_id TEXT NOT NULL REFERENCES diary(firestore_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK(position >= 0),
+  date TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  model_provider TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  style_reference_version TEXT NOT NULL,
+  observation_ids_json TEXT NOT NULL,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  status TEXT NOT NULL CHECK(status IN ('success', 'failed')),
+  error TEXT,
+  source_json TEXT NOT NULL,
+  PRIMARY KEY (diary_firestore_id, position)
+) STRICT;
+
+CREATE TABLE diary_observations (
+  firestore_id TEXT PRIMARY KEY,
+  observation_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL CHECK(schema_version = 2),
+  occurred_at TEXT,
+  recorded_at TEXT NOT NULL,
+  local_date TEXT NOT NULL,
+  subject_uid TEXT,
+  subject_name TEXT,
+  subject_username TEXT,
+  event TEXT NOT NULL,
+  exact_quote TEXT,
+  immediate_reaction TEXT,
+  interpretation TEXT,
+  unsaid_thought TEXT,
+  unresolved_question TEXT,
+  confidence TEXT NOT NULL CHECK(confidence IN ('fact', 'inference', 'uncertain')),
+  salience INTEGER NOT NULL CHECK(salience BETWEEN 1 AND 5),
+  tags_json TEXT,
+  source_refs_json TEXT,
+  status TEXT NOT NULL CHECK(status IN ('active', 'superseded', 'retracted')),
+  supersedes_id TEXT,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_diary_observations_date_recorded
+  ON diary_observations(local_date, recorded_at);
+CREATE INDEX idx_diary_observations_recent
+  ON diary_observations(recorded_at, local_date, status);
+
+CREATE TABLE runtime_group (
+  firestore_id TEXT PRIMARY KEY CHECK(firestore_id = 'group'),
+  summary TEXT NOT NULL,
+  summary_cursor_ts INTEGER NOT NULL,
+  last_processed_message_id INTEGER,
+  last_compacted_at INTEGER,
+  updated_at INTEGER NOT NULL,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE runtime_events (
+  firestore_id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  message_id INTEGER,
+  update_id INTEGER,
+  kind TEXT NOT NULL CHECK(kind IN ('user_message', 'edited_message', 'bot_message', 'command', 'system')),
+  uid TEXT NOT NULL,
+  name TEXT NOT NULL,
+  username TEXT,
+  text TEXT NOT NULL,
+  media_refs_json TEXT NOT NULL,
+  urls_json TEXT NOT NULL,
+  reply_to_json TEXT,
+  ts INTEGER NOT NULL,
+  ignored_reason TEXT,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_runtime_events_ts ON runtime_events(ts);
+
+CREATE TABLE runtime_turns (
+  firestore_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('passive', 'proactive', 'retry', 'subagent', 'compaction')),
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  tier TEXT CHECK(tier IN ('simple', 'complex', 'tech')),
+  needs_search INTEGER NOT NULL CHECK(needs_search IN (0, 1)),
+  tool_calls_json TEXT NOT NULL,
+  action TEXT NOT NULL CHECK(action IN ('send', 'dismiss', 'error')),
+  messages_json TEXT NOT NULL,
+  sticker_file_id TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cached_input_tokens INTEGER,
+  latency_ms INTEGER,
+  error TEXT,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_runtime_turns_started_at ON runtime_turns(started_at);
+
+CREATE TABLE runtime_compactions (
+  firestore_id TEXT PRIMARY KEY,
+  old_cursor_ts INTEGER NOT NULL,
+  new_cursor_ts INTEGER NOT NULL,
+  summary TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  source_json TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_runtime_compactions_created_at ON runtime_compactions(created_at);
+
+CREATE TABLE group_messages (
+  chat_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL,
+  user_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  username TEXT,
+  is_bot INTEGER NOT NULL CHECK(is_bot IN (0, 1)),
+  is_forwarded INTEGER NOT NULL DEFAULT 0 CHECK(is_forwarded IN (0, 1)),
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  edited_at INTEGER,
+  PRIMARY KEY (chat_id, message_id)
+) STRICT;
+
+CREATE INDEX idx_group_messages_created_at ON group_messages(created_at);
+CREATE INDEX idx_group_messages_chat_created_at ON group_messages(chat_id, created_at);
+
+CREATE TABLE wordcloud_runs (
+  date TEXT PRIMARY KEY,
+  published_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE wordcloud_publications (
+  date TEXT NOT NULL,
+  slot TEXT NOT NULL,
+  published_at INTEGER NOT NULL,
+  PRIMARY KEY (date, slot)
+) STRICT;
+
+CREATE TABLE database_backup_runs (
+  schedule_date TEXT PRIMARY KEY,
+  completed_at INTEGER NOT NULL,
+  archive_name TEXT NOT NULL,
+  archive_bytes INTEGER NOT NULL
+) STRICT;
