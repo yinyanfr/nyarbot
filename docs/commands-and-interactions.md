@@ -59,6 +59,7 @@ Before classification, the handler runs a lightweight local route so short chats
   2. **Other links** → direct `fetch()` + HTML title/meta description extraction
   3. **Fallback** → Tavily Extract summarization
 - URL content cache is in-memory (session-scoped), not persisted to SQLite.
+- When fetching is permitted, Twitter/X content is verified first. An initial failure receives up to three retries (four attempts total, with short exponential backoff), stopping immediately on success. Exhausted triggered turns send an explicit fetch-failure message instead of silently dismissing or inventing content. Search/URL protection is not bypassed: blocked turns make no request and report the reason. Untriggered proactive turns remain silent.
 
 ### Stickers
 

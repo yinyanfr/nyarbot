@@ -114,7 +114,7 @@ DeepSeek Flash 默认启用 high 思考，因此普通模式必须通过自定�
 Gemini 调用通过 Cloudflare AI Gateway 路由，以获得缓存和可观测性。网关名称可通过 `CF_AIG_GATEWAY` 配置（默认 `gem`）；账户 ID（`CF_ACCOUNT_ID`）和 API token（`CF_AIG_TOKEN`）必须在 `.env` 中设置。
 
 - 通过原生 Google provider adapter 调用 `gemini-3.5-flash-lite`：用于 DeepSeek 不可用时的回复回退和完整日记导读；原生 adapter 会在多步工具调用中保留 Gemini thought signature。
-- `google-ai-studio/gemini-3.1-pro-preview`：午夜日记生成和管理员 `/diary` 预览。
+- `google-ai-studio/gemini-4-hydrogen`：午夜日记生成和管理员 `/diary` 预览，仍通过 Cloudflare AI Gateway。
 
 YouTube 视频理解同样通过 Cloudflare AI Gateway 调用 `gemini-3.5-flash-lite`。由于 gateway wrapper 不会声明原生 URL 支持，这一路径使用受限的 AI SDK URL passthrough，把公开 YouTube URL 保留为 Gemini `fileData`。Bot 不会直连 Google API，也不会下载视频；每次调用只读取一个视频。
 

@@ -106,7 +106,7 @@ Reply-facing DeepSeek calls reserve 12 seconds for the initial attempt. Network/
 Gemini calls are routed through Cloudflare AI Gateway for caching and observability. Gateway name is configurable via `CF_AIG_GATEWAY` (default `gem`); account ID (`CF_ACCOUNT_ID`) and API token (`CF_AIG_TOKEN`) must be set in `.env`.
 
 - `gemini-3.5-flash-lite` through the native Google provider adapter: unavailable-DeepSeek reply fallback and full-diary notification copy. The native adapter preserves Gemini thought signatures across tool steps.
-- `google-ai-studio/gemini-3.1-pro-preview`: midnight diary generation and admin `/diary` previews.
+- `google-ai-studio/gemini-4-hydrogen`: midnight diary generation and admin `/diary` previews, still through Cloudflare AI Gateway.
 
 YouTube video understanding also uses Cloudflare AI Gateway with `gemini-3.5-flash-lite`. A restricted AI SDK URL-passthrough hook preserves the public YouTube URL as Gemini `fileData` even though the gateway wrapper does not advertise native URL support. The bot process does not contact Google directly or download the video, and each call accepts one video.
 

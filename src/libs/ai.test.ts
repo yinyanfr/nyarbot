@@ -16,6 +16,7 @@ import {
   generateMorningGreeting,
   generateShockResponse,
   generateStrokeResponse,
+  geminiDiaryModel,
   isTwitterStatusUrl,
   probeGate,
   rescueSendMessagesFromDraft,
@@ -937,17 +938,81 @@ describe("main turn architecture", () => {
     ]);
   });
 
-  test("Twitter verification fails closed", async () => {
+  test("diary uses Gemini 4 Hydrogen through Cloudflare AI Gateway", () => {
+    assert.match(geminiDiaryModel.modelId, /gemini-4-hydrogen/);
+  });
+
+  test("Twitter retries three times then sends an explicit failure without generating guesses", async () => {
     const twitter = scripted([]);
-    twitter.dependencies.fetch = async () => new Response("", { status: 503 });
+    let requests = 0;
+    twitter.dependencies.fetch = async () => {
+      requests++;
+      return new Response("", { status: 503 });
+    };
     assert.deepEqual(
       await turn(twitter.dependencies, {
         userMessage: "看看链接",
         urls: ["https://x.com/cat/status/1"],
         allowRichContentTools: true,
       }),
+      {
+        action: "send",
+        messages: ["推特内容读取失败了，重试三次后还是没能读到，请稍后再试喵。"],
+        stickerFileId: null,
+      },
+    );
+    assert.equal(requests, 4);
+    assert.equal(twitter.calls.length, 0);
+  });
+
+  test("Twitter protection sends a failure without bypassing the fetch gate; passive turns stay silent", async () => {
+    const twitter = scripted([]);
+    twitter.dependencies.fetch = async () => {
+      assert.fail("protected or passive turn must not fetch");
+    };
+    const protectedResult = await turn(twitter.dependencies, {
+      urls: ["https://x.com/cat/status/1"],
+      allowRichContentTools: true,
+      allowWebSearch: false,
+    });
+    assert.equal(protectedResult.action, "send");
+    if (protectedResult.action === "send") {
+      assert.match(protectedResult.messages.join(""), /读取失败.*保护/);
+    }
+    assert.deepEqual(
+      await turn(twitter.dependencies, {
+        urls: ["https://x.com/cat/status/1"],
+        allowRichContentTools: false,
+      }),
       { action: "dismiss", dismissReason: "twitter_fetch_failed" },
     );
+  });
+
+  test("Twitter retry success continues with verified content and stops retrying", async () => {
+    const twitter = scripted([
+      async (call) => {
+        assert.match(JSON.stringify(call.messages), /verified tweet/);
+        await runTool(call, "send_message", { text: "读到了" });
+        return result("", ["send_message"]);
+      },
+    ]);
+    let requests = 0;
+    twitter.dependencies.fetch = async () => {
+      requests++;
+      if (requests === 1) throw new Error("offline");
+      if (requests === 2) return Response.json({ code: 200 });
+      return Response.json({
+        code: 200,
+        status: { type: "status", text: "verified tweet" },
+      });
+    };
+    const response = await turn(twitter.dependencies, {
+      userMessage: "看看链接",
+      urls: ["https://x.com/cat/status/1"],
+      allowRichContentTools: true,
+    });
+    assert.equal(response.action, "send");
+    assert.equal(requests, 3);
   });
 
   test("required search retries once, uses disabled stable tool, and subagent is isolated", async () => {

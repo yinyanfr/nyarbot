@@ -54,16 +54,16 @@
 
 ## Tech Stack
 
-| 层                  | 库                                                     |
-| ------------------- | ------------------------------------------------------ |
-| Telegram Bot        | `grammy` v1                                            |
-| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek Flash               |
-| Gemini              | Gemini 3.5 Flash-Lite / 3.1 Pro Preview via AI Gateway |
-| Search / Extraction | `@tavily/ai-sdk`                                       |
-| Database            | `better-sqlite3`（统一 SQLite）                        |
-| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                        |
-| Runtime             | Node.js + TypeScript ESM                               |
-| Timezone            | `dayjs` (`Asia/Shanghai`)                              |
+| 层                  | 库                                                           |
+| ------------------- | ------------------------------------------------------------ |
+| Telegram Bot        | `grammy` v1                                                  |
+| AI / LLM            | `ai` (Vercel AI SDK v6) + DeepSeek Flash                     |
+| Gemini              | Gemini 3.5 Flash-Lite / 4 Hydrogen via Cloudflare AI Gateway |
+| Search / Extraction | `@tavily/ai-sdk`                                             |
+| Database            | `better-sqlite3`（统一 SQLite）                              |
+| Text / Rendering    | `nodejieba` + `@napi-rs/canvas`                              |
+| Runtime             | Node.js + TypeScript ESM                                     |
+| Timezone            | `dayjs` (`Asia/Shanghai`)                                    |
 
 ## Project Layout
 

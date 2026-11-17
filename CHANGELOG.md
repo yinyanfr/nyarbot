@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Maintenance — 2026-11-17
+
+- **Diary model**: replace Gemini 3.1 Pro Preview with `gemini-4-hydrogen`, retaining the native Google AI Studio route through Cloudflare AI Gateway and updating persisted generation model metadata. Notification and reply-fallback models are unchanged.
+- **Twitter/X fetch reliability**: verify status links before replying, retry failed reads up to three times after the initial attempt with short exponential backoff, and stop on success. Exhausted triggered turns now send an explicit failure message rather than silently dismissing. Search/URL flood protection remains enforced and blocked triggered turns report the reason without making requests; proactive turns remain silent.
+- **Dependency security**: audit the application and isolated Firestore migration tool; refresh vulnerable migration-tool dependencies and pin patched glob/minimatch versions without changing the production dependency tree.
+
 ### Added
 
 - **Unified SQLite persistence and encrypted backups** (`src/services/database.ts`, `src/services/persistence.ts`, `src/libs/database-backup.ts`, `tools/firestore-to-sqlite`): production persistence now uses `data/nyarbot.sqlite`; a one-shot maintenance tool migrates Firestore and the legacy wordcloud database, and daily encrypted SQLite backups are sent to the Telegram admin.

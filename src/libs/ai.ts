@@ -1,4 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { setTimeout as delay } from "node:timers/promises";
 import { createAiGateway } from "ai-gateway-provider";
 import { createGoogleGenerativeAI } from "ai-gateway-provider/providers/google";
 import {
@@ -525,7 +526,7 @@ const aigateway = createAiGateway({
 
 const google = createGoogleGenerativeAI();
 export const geminiFlashLiteModel = aigateway(google("gemini-3.5-flash-lite"));
-export const geminiDiaryModel = aigateway(google("gemini-3.1-pro-preview"));
+export const geminiDiaryModel = aigateway(google("gemini-4-hydrogen"));
 
 // ---------------------------------------------------------------------------
 // Model instances
@@ -884,6 +885,7 @@ function shouldPrefetchUrls(params: {
 }): boolean {
   const { userMessage, urls, needsSearch } = params;
   if (!urls || urls.length === 0) return false;
+  if (urls.some(isTwitterStatusUrl)) return true;
   if (needsSearch) return true;
 
   const normalized = userMessage.trim();
@@ -1180,8 +1182,19 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
           allowRichContentTools: allowRichContentTools ?? false,
           allowWebSearch: allowWebSearch ?? true,
         },
-        "generateAiTurn: dismissing because Twitter content could not be verified",
+        "generateAiTurn: Twitter content could not be verified",
       );
+      if (allowRichContentTools) {
+        return {
+          action: "send",
+          messages: [
+            allowWebSearch === false
+              ? "推特内容读取失败了：本轮触发了链接／搜索保护，请稍后再试喵。"
+              : "推特内容读取失败了，重试三次后还是没能读到，请稍后再试喵。",
+          ],
+          stickerFileId: null,
+        };
+      }
       return { action: "dismiss", dismissReason: "twitter_fetch_failed" };
     }
   }
@@ -2674,6 +2687,24 @@ interface FxStatusResponse {
 }
 
 async function fetchTwitterContent(
+  url: string,
+  username: string,
+  tweetId: string,
+  dependencies: AiDependencies,
+): Promise<string | null> {
+  // One initial request plus at most three retries. Never substitute guessed content.
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    if (attempt > 0) {
+      logger.info({ url, retry: attempt }, "retrying Twitter content fetch");
+      await delay(250 * 2 ** (attempt - 1));
+    }
+    const content = await fetchTwitterContentOnce(url, username, tweetId, dependencies);
+    if (content !== null) return content;
+  }
+  return null;
+}
+
+async function fetchTwitterContentOnce(
   url: string,
   username: string,
   tweetId: string,
