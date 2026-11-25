@@ -95,6 +95,31 @@ export function loadConfig(env: NodeJS.ProcessEnv) {
         "Invalid environment variable: TELEGRAM_LOCAL_FILE_DIRECTORY must be an absolute path",
       );
     }
+    const memorySearchMode = env.MEMORY_SEARCH_MODE ?? "off";
+    if (
+      memorySearchMode !== "off" &&
+      memorySearchMode !== "shadow" &&
+      memorySearchMode !== "hybrid"
+    ) {
+      throw new Error("Invalid MEMORY_SEARCH_MODE: expected off, shadow or hybrid");
+    }
+    const embeddingUrl = env.MEMORY_EMBEDDING_URL ?? "";
+    if (memorySearchMode !== "off" && !URL.canParse(embeddingUrl)) {
+      throw new Error("Invalid MEMORY_EMBEDDING_URL: required for shadow and hybrid memory search");
+    }
+    const memoryEmbeddingUrl = memorySearchMode === "off" ? null : new URL(embeddingUrl);
+    if (
+      memoryEmbeddingUrl &&
+      (!["http:", "https:"].includes(memoryEmbeddingUrl.protocol) ||
+        memoryEmbeddingUrl.username ||
+        memoryEmbeddingUrl.password ||
+        memoryEmbeddingUrl.search ||
+        memoryEmbeddingUrl.hash)
+    ) {
+      throw new Error(
+        "Invalid MEMORY_EMBEDDING_URL: use an HTTP(S) endpoint without credentials, query or fragment",
+      );
+    }
     return {
       botUsername: requireEnv("BOT_USERNAME"),
       botPersonaName: process.env.BOT_PERSONA_NAME ?? "にゃる",
@@ -130,6 +155,10 @@ export function loadConfig(env: NodeJS.ProcessEnv) {
       conversationBufferPath:
         process.env.CONVERSATION_BUFFER_PATH ?? "data/conversation-buffer.json",
       databasePath: process.env.DATABASE_PATH ?? "data/nyarbot.sqlite",
+      memorySearchMode,
+      memoryEmbeddingUrl,
+      memoryEmbeddingModel: env.MEMORY_EMBEDDING_MODEL?.trim() || "bge-m3:567m",
+      memoryEmbeddingRevision: env.MEMORY_EMBEDDING_REVISION?.trim() || "1",
       databaseBackupPassphrase: validateBackupPassphrase(requireEnv("DATABASE_BACKUP_PASSPHRASE")),
       databaseBackupSchedule: validateBackupSchedule(
         process.env.DATABASE_BACKUP_SCHEDULE ?? "03:30",

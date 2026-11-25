@@ -82,6 +82,16 @@ Additional optional envs with defaults:
 - Repeated occurrences of the same token inside one message count once.
 - Rendering ships with a bundled full Source Han Sans variable font for Simplified Chinese, Traditional Chinese, Japanese, and Korean.
 
+## Long-term Memory Search
+
+Clearly phrased requests about the speaker's own past trigger a lookup before the reply. References to earlier preferences or agreements prompt a lookup if recent context is insufficient. Ordinary chat does not automatically retrieve long-term memories.
+
+- `MEMORY_SEARCH_MODE`: `off` (default, keyword search), `shadow` (compare keyword and hybrid rankings, but return only keyword results), or `hybrid` (return combined results).
+- `MEMORY_EMBEDDING_URL`: full URL of a private, self-hosted [Ollama embedding endpoint](https://docs.ollama.com/api/embed), e.g. `http://ollama:11434/api/embed`. Required for `shadow` and `hybrid`. Do not use a public endpoint or publish the service port.
+- `MEMORY_EMBEDDING_MODEL`: local model tag, default `bge-m3:567m`. Pull it on the Ollama host first. Increase `MEMORY_EMBEDDING_REVISION` (default `1`) when replacing weights behind the same tag so vectors are rebuilt.
+
+SQLite stores rebuildable vectors for active memories. Indexing sends only memory text and tags; queries send only the search phrase. Chat history and diaries are not indexed. Recent-mode queries and greetings are unchanged. If the endpoint is too slow or unavailable, retrieval falls back to keywords. Start in `shadow`, measure recall and latency on redacted fixtures, then enable `hybrid` if it improves results. Set `off` to revert search without restoring the database.
+
 ## Backups and Firebase Maintenance
 
 At the default schedule, the bot creates an online SQLite snapshot daily at 03:30 in `APP_TIMEZONE`, compresses and encrypts it with `DATABASE_BACKUP_PASSPHRASE`, stores it under `DATABASE_BACKUP_PATH`, and sends it to `TG_ADMIN_UID`. Local archives use names like `nyarbot-20260812T193000Z.sqlite.gz.enc`; the newest seven are retained. A failed upload is reported by admin DM and retried after 15 minutes.

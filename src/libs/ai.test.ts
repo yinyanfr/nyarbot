@@ -285,9 +285,14 @@ describe("main turn architecture", () => {
     const model = new MockLanguageModelV3({
       doGenerate: async (options) => {
         const currentStep = step++;
-        if (currentStep === 0)
+        if (currentStep === 0) {
           assert.ok(!JSON.stringify(options.prompt).includes("喜欢 TypeScript"));
-        if (currentStep === 1) assert.ok(JSON.stringify(options.prompt).includes("喜欢红茶"));
+          assert.deepEqual(options.toolChoice, { type: "tool", toolName: "recallMemory" });
+        }
+        if (currentStep === 1) {
+          assert.ok(JSON.stringify(options.prompt).includes("喜欢红茶"));
+          assert.notEqual(options.toolChoice?.type, "tool");
+        }
         return {
           content:
             currentStep < 2
@@ -316,14 +321,61 @@ describe("main turn architecture", () => {
         };
       },
     });
-    const reply = await turn({
-      generateText,
-      models: { replyDeepseekFlash: model },
-      recallUserMemories: async () => [memory("喜欢红茶")],
-    });
+    const reply = await turn(
+      {
+        generateText,
+        models: { replyDeepseekFlash: model },
+        recallUserMemories: async (uid) => {
+          assert.equal(uid, user.uid);
+          return [memory("喜欢红茶")];
+        },
+      },
+      { userMessage: "@bot 你还记得我喜欢喝什么吗？", wasMentioned: true },
+    );
     assert.equal(step, 3);
     if (reply.action !== "send") assert.fail("expected reply");
     assert.deepEqual(reply.messages, ["记得你喜欢红茶"]);
+  });
+
+  test("implicit memory queries only get a nudge; quotes and ordinary chat do not", async () => {
+    for (const [userMessage, wasRepliedTo, expected] of [
+      ["还是上次那个口味", true, true],
+      [
+        "<current_turn><reply_to><quoted_text>你还记得我喜欢喝什么吗？</quoted_text></reply_to><text>你好</text></current_turn>",
+        true,
+        false,
+      ],
+      ["你还记得我喜欢喝什么吗？", false, false],
+      ["你还记得吗？", true, false],
+    ] as const) {
+      const fake = scripted([
+        async (call) => {
+          assert.equal(JSON.stringify(call.messages).includes("memory_recall_hint"), expected);
+          const prepare = call.prepareStep as (input: { stepNumber: number }) => Promise<unknown>;
+          assert.equal(await prepare({ stepNumber: 0 }), undefined);
+          return result();
+        },
+      ]);
+      await turn(fake.dependencies, { userMessage, wasRepliedTo });
+    }
+  });
+
+  test("explicit self recall cannot query another visible user", async () => {
+    const fake = scripted([
+      async (call) => {
+        assert.deepEqual(await runTool(call, "recallMemory", { uid: "2", query: "红茶" }), {
+          ok: false,
+          reason: "此请求只查询当前发言者自己的记忆",
+        });
+        return result();
+      },
+    ]);
+    fake.dependencies.recallUserMemories = async () => assert.fail("must not query another user");
+    await turn(fake.dependencies, {
+      userMessage: "上次我说要考什么？",
+      wasRepliedTo: true,
+      recentMembers: [{ uid: "2", name: "另一位群友" }],
+    });
   });
 
   test("recall is on demand, scoped, bounded and requires a later step before sending", async () => {

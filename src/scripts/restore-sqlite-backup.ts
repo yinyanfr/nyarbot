@@ -89,6 +89,7 @@ export function verifyDatabase(databasePath: string, requiredTables: string[] = 
     const versionTables =
       schemaVersion >= 2 ? [...REQUIRED_TABLES, "diary_notification_deliveries"] : REQUIRED_TABLES;
     if (schemaVersion >= 3) versionTables.push("user_memory_records");
+    if (schemaVersion >= 4) versionTables.push("user_memory_embeddings");
     for (const table of [...versionTables, ...requiredTables]) {
       if (!tables.includes(table))
         throw new Error(`Required table is missing from restored schema: ${table}`);

@@ -53,6 +53,36 @@ test("rejects every missing required setting", () => {
   }
 });
 
+test("memory embeddings require an explicit endpoint and mode", () => {
+  assert.equal(loadConfig(base).memorySearchMode, "off");
+  assert.equal(loadConfig(base).memoryEmbeddingUrl, null);
+  assert.throws(() => loadConfig({ ...base, MEMORY_SEARCH_MODE: "yes" }), /MEMORY_SEARCH_MODE/);
+  for (const endpoint of [
+    "",
+    "file:///tmp/model",
+    "http://user:pass@ollama/api/embed",
+    "http://ollama/api/embed?q=1",
+    "http://ollama/api/embed#fragment",
+  ]) {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...base,
+          MEMORY_SEARCH_MODE: "shadow",
+          MEMORY_EMBEDDING_URL: endpoint,
+        }),
+      /MEMORY_EMBEDDING_URL/,
+    );
+  }
+  const enabled = loadConfig({
+    ...base,
+    MEMORY_SEARCH_MODE: "hybrid",
+    MEMORY_EMBEDDING_URL: "http://ollama:11434/api/embed",
+  });
+  assert.equal(enabled.memoryEmbeddingUrl?.pathname, "/api/embed");
+  assert.equal(enabled.memoryEmbeddingModel, "bge-m3:567m");
+});
+
 test("validates numeric, timezone, passphrase, and schedule settings", () => {
   assert.throws(() => loadConfig({ ...base, BOT_MESSAGE_DELAY_MS: "-1" }), /non-negative/);
   assert.throws(() => loadConfig({ ...base, BILIBILI_CACHE_SIZE: "1.5" }), /positive integer/);

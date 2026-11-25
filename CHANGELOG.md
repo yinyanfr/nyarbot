@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Long-term memory recall**: look up clearly requested memories before replying, and nudge the bot to check past preferences and agreements when recent context is insufficient. SQLite schema v4 adds optional self-hosted semantic search with shadow mode and keyword fallback; retention and greeting behavior are unchanged.
+
 ### Maintenance — 2026-11-17
 
 - **Diary model**: replace Gemini 3.1 Pro Preview with `gemini-4-hydrogen`, retaining the native Google AI Studio route through Cloudflare AI Gateway and updating persisted generation model metadata. Notification and reply-fallback models are unchanged.

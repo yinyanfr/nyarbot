@@ -46,6 +46,10 @@ npm run migrate -- \
 
 验收完成后，撤销/删除迁移服务账号密钥并移除本地 JSON。Firebase 只保留为历史数据源，不再是生产依赖。
 
+## 退役旧 Firebase 项目
+
+移除迁移工具或撤销凭据之前，确认生产使用 SQLite，并在独立路径演练恢复近期加密备份。盘点仅存在于 Firestore 的数据及仓库外的消费者，特别是未知集合和导入时跳过的 `_backup` 集合。妥善保留经校验的必要数据归档、迁移报告和工具最后可运行的 Git 版本。不要对现役 SQLite 文件重跑导入。确认没有其他消费者后再撤销旧密钥；删除 Firebase 项目需另行确认。
+
 ## 每日加密备份
 
 Bot 默认每天在 `APP_TIMEZONE` 的 `DATABASE_BACKUP_SCHEDULE=03:30` 创建在线 SQLite 快照，使用 `DATABASE_BACKUP_PASSPHRASE` 压缩加密，保存到 `DATABASE_BACKUP_PATH=data/backups`，并作为 Telegram 文件发送给 `TG_ADMIN_UID`。归档名为 `nyarbot-<UTC timestamp>.sqlite.gz.enc`，本地保留最新七份。口令必须与本地和 Telegram 归档分开保管。

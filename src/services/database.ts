@@ -274,6 +274,22 @@ function migrate(db: SqliteDatabase): void {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value;
       `);
     }
+    if (currentVersion < 4) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS user_memory_embeddings (
+          memory_id TEXT PRIMARY KEY REFERENCES user_memory_records(id) ON DELETE CASCADE,
+          model_key TEXT NOT NULL,
+          vector BLOB NOT NULL CHECK(length(vector) BETWEEN 4 AND 16384 AND length(vector) % 4 = 0)
+        ) STRICT;
+        CREATE TRIGGER IF NOT EXISTS invalidate_user_memory_embedding
+        AFTER UPDATE OF content, tags_json, status, expires_at ON user_memory_records
+        BEGIN
+          DELETE FROM user_memory_embeddings WHERE memory_id = NEW.id;
+        END;
+        INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '4')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
 }

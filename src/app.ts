@@ -5,6 +5,7 @@ import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
 import { closeDatabase, initDatabase } from "./services/database.js";
+import { startMemoryEmbeddingIndex } from "./services/memory-embeddings.js";
 import { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./libs/proactive.js";
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
@@ -216,6 +217,7 @@ export function createProductionApplication(
   let wordcloudTimer: TimerHandle | undefined;
   let bufferSaveTimer: TimerHandle | undefined;
   let databaseBackup: BackgroundCloser | undefined;
+  let memoryEmbeddingIndex: Pick<BackgroundCloser, "close"> | undefined;
 
   return createApplication({
     bot,
@@ -232,6 +234,7 @@ export function createProductionApplication(
       dependencies.initAdminNotify(bot);
       databaseBackup = dependencies.createDatabaseBackup(database, bot);
       databaseBackup.start();
+      memoryEmbeddingIndex = startMemoryEmbeddingIndex(database, runtimeConfig);
     },
     startBackgroundServices() {
       const proactiveCallbacks: ProactiveCallbacks = {
@@ -427,7 +430,7 @@ export function createProductionApplication(
       await dependencies.stopDiaryService();
     },
     async closeBackgroundServices() {
-      await databaseBackup?.close();
+      await Promise.all([databaseBackup?.close(), memoryEmbeddingIndex?.close()]);
     },
   });
 }

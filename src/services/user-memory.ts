@@ -8,6 +8,13 @@ import {
   type UserMemoryDraft,
 } from "../libs/user-memory.js";
 import { normalizePromptData } from "../libs/prompt-safety.js";
+import { logger } from "../libs/logger.js";
+import {
+  configuredMemorySearch,
+  memorySimilarity,
+  normalizeVector,
+  type SemanticMemorySearch,
+} from "./memory-embeddings.js";
 
 interface MemoryRow {
   id: string;
@@ -175,6 +182,7 @@ export async function recallUserMemories(
   uid: string,
   query: MemoryQuery = {},
   currentTime = Date.now(),
+  semantic: SemanticMemorySearch | undefined = configuredMemorySearch(),
 ): Promise<UserMemory[]> {
   const limit = Math.max(1, Math.min(10, Math.trunc(query.limit ?? 5)));
   if (!Number.isFinite(limit)) return [];
@@ -192,38 +200,101 @@ export async function recallUserMemories(
     filters.push("recorded_at <= ?");
     params.push(query.until);
   }
-  let score = "0";
-  let scoreParams: string[] = [];
   if (query.mode === "recent") {
     filters.push("recorded_at IS NOT NULL");
-  } else {
-    const keywords = memoryKeywords(query.query ?? "");
-    if (!keywords.length) return [];
-    const matching = keywords.map(
-      () => "(instr(lower(content), ?) > 0 OR instr(lower(tags_json), ?) > 0)",
-    );
-    const keywordParams = keywords.flatMap((word) => [word, word]);
-    filters.push(`(${matching.join(" OR ")})`);
-    params.push(...keywordParams);
-    score = keywords
-      .map(
-        () =>
-          "(CASE WHEN instr(lower(content), ?) > 0 THEN 2 ELSE 0 END + CASE WHEN instr(lower(tags_json), ?) > 0 THEN 1 ELSE 0 END)",
-      )
-      .join(" + ");
-    scoreParams = keywordParams;
+    return (
+      getDatabase()
+        .prepare(
+          `
+      SELECT * FROM user_memory_records WHERE ${filters.join(" AND ")}
+      ORDER BY recorded_at DESC, id ASC LIMIT ?`,
+        )
+        .all(...params, limit) as MemoryRow[]
+    ).map(decode);
   }
-  const order =
-    query.mode === "recent"
-      ? "recorded_at DESC, id ASC"
-      : "score DESC, importance DESC, recorded_at DESC, id ASC";
-  return (
-    getDatabase()
-      .prepare(
-        `SELECT *, (${score}) AS score FROM user_memory_records WHERE ${filters.join(" AND ")} ORDER BY ${order} LIMIT ?`,
-      )
-      .all(...scoreParams, ...params, limit) as MemoryRow[]
-  ).map(decode);
+
+  const text = normalizePromptData(query.query ?? "", 200);
+  const keywords = memoryKeywords(text);
+  if (!keywords.length) return [];
+  const db = getDatabase();
+  const where = filters.join(" AND ");
+  const indexed = `FROM user_memory_records JOIN user_memory_embeddings ON memory_id = id
+    WHERE ${where} AND model_key = ?`;
+  let semanticRows: MemoryRow[] = [];
+  let semanticLatencyMs: number | undefined;
+  if (semantic && db.prepare(`SELECT 1 ${indexed} LIMIT 1`).get(...params, semantic.modelKey)) {
+    const startedAt = Date.now();
+    const budget = AbortSignal.timeout(750);
+    const signal = query.signal ? AbortSignal.any([budget, query.signal]) : budget;
+    try {
+      const [raw] = await semantic.embed([text], signal);
+      signal.throwIfAborted();
+      const vector = normalizeVector(raw!);
+      params[1] = currentTime + Math.max(0, Date.now() - startedAt);
+      // Select *after* the await so deletions and revisions during inference are respected.
+      const rows = db
+        .prepare(`SELECT user_memory_records.*, vector ${indexed}`)
+        .all(...params, semantic.modelKey) as (MemoryRow & { vector: Buffer })[];
+      semanticRows = rows
+        .map((row) => ({ row, score: memorySimilarity(vector, row.vector) }))
+        .filter(({ score }) => score >= 0.55)
+        .sort(
+          (a, b) =>
+            b.score - a.score ||
+            b.row.importance - a.row.importance ||
+            a.row.id.localeCompare(b.row.id),
+        )
+        .slice(0, 10)
+        .map(({ row }) => row);
+    } catch {
+      logger.debug("memory semantic search unavailable; using keywords");
+    }
+    semanticLatencyMs = Date.now() - startedAt;
+  }
+  query.signal?.throwIfAborted();
+  const match = keywords.map(
+    () => "(instr(lower(content), ?) > 0 OR instr(lower(tags_json), ?) > 0)",
+  );
+  const weights = keywords.map(
+    () =>
+      "(CASE WHEN instr(lower(content), ?) > 0 THEN 2 ELSE 0 END + CASE WHEN instr(lower(tags_json), ?) > 0 THEN 1 ELSE 0 END)",
+  );
+  const terms = keywords.flatMap((word) => [word, word]);
+  const lexical = db
+    .prepare(
+      `
+    SELECT *, (${weights.join(" + ")}) AS score FROM user_memory_records
+    WHERE ${where} AND (${match.join(" OR ")})
+    ORDER BY score DESC, importance DESC, recorded_at DESC, id ASC LIMIT ?`,
+    )
+    .all(...terms, ...params, ...terms, semanticRows.length ? 10 : limit) as MemoryRow[];
+  if (!semanticRows.length && !(semantic?.mode === "shadow" && semanticLatencyMs !== undefined)) {
+    return lexical.map(decode);
+  }
+  const fused = new Map<string, { row: MemoryRow; score: number }>();
+  for (const list of [lexical, semanticRows]) {
+    list.forEach((row, i) => {
+      const score = (fused.get(row.id)?.score ?? 0) + 1 / (60 + i + 1);
+      fused.set(row.id, { row, score });
+    });
+  }
+  const hybrid = [...fused.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+  if (semantic?.mode === "shadow" && semanticLatencyMs !== undefined) {
+    const baseline = new Set(lexical.slice(0, limit).map((row) => row.id));
+    logger.info(
+      {
+        lexicalCount: baseline.size,
+        hybridCount: hybrid.length,
+        overlap: hybrid.filter(({ row }) => baseline.has(row.id)).length,
+        semanticHits: semanticRows.length,
+        semanticLatencyMs,
+      },
+      "memory recall shadow comparison",
+    );
+  }
+  return semantic?.mode === "hybrid"
+    ? hybrid.map(({ row }) => decode(row))
+    : lexical.slice(0, limit).map(decode);
 }
 
 /** Forget the whole revision chain, not just its visible head. */

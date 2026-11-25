@@ -1112,6 +1112,26 @@ async function prefetchTurnContext(params: {
   return prefetched;
 }
 
+function memoryRecallIntent(message: string): "explicit" | "implicit" | undefined {
+  // Inspect only the current speaker's text, never the replied-to message.
+  const text = (
+    message.startsWith("<current_turn>")
+      ? (/<text>([\s\S]*?)<\/text>/u.exec(message)?.[1] ?? "")
+      : message
+  )
+    .replace(/^(?:\s*@\w+[\s,，:：]*)+/u, "")
+    .trim();
+  if (
+    /^(?:你还?记得我(?:上次|之前|以前|平时|喜欢|习惯|说过|提过|约过|的).+|(?:上次|之前|以前)我(?:说|提|问|约)过?.*(?:什么|啥|哪|怎么|多少).*)$/u.test(
+      text,
+    )
+  )
+    return "explicit";
+  if (/(?:上次|之前|以前)(?:那[个件次种]|说过|提过|约定)|(?:还是|照旧).{0,6}上次/u.test(text)) {
+    return "implicit";
+  }
+}
+
 export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResult> {
   const dependencies = resolveAiDependencies(opts.dependencies);
   const turnStartedAt = Date.now();
@@ -1144,6 +1164,10 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     abortSignal,
   } = opts;
 
+  const recallIntent =
+    (wasMentioned || wasRepliedTo) && userContext.uid !== "proactive"
+      ? memoryRecallIntent(userMessage)
+      : undefined;
   const systemPrompt = buildSystemPrompt();
   const sessionContext = buildSessionContextBlock(
     userContext,
@@ -1205,23 +1229,30 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
   const prefetchedContextBlock = buildPrefetchedContextBlock(prefetchedContext);
 
   // Build the late-binding prompt that goes at the end of the user message
-  const lateBinding = buildLateBindingPrompt({
-    wasMentioned: wasMentioned ?? false,
-    wasRepliedTo: wasRepliedTo ?? false,
-    recentBotMessages: recentBotMessages ?? [],
-    ...(userContext.timeZone ? { userTimeZone: userContext.timeZone } : {}),
-    needsSearch,
-    allowMediaTools: (allowRichContentTools ?? false) && (allowMediaTools ?? true),
-    ...(runtimeStatus ? { runtimeStatus } : {}),
-    ...(allowWebSearch != null ? { allowWebSearch } : {}),
-    ...(mandatorySearchHint != null ? { mandatorySearchHint } : {}),
-    ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
-    ...(isRetryTurn ? { isRetryTurn } : {}),
-    ...(requireImageUnderstanding ? { requireImageUnderstanding } : {}),
-    ...(requireImageUnderstanding ? { hasImageUnderstanding } : {}),
-    ...(allowPersistentTools != null ? { allowPersistentTools } : {}),
-    ...(preferAdvisor ? { preferAdvisor } : {}),
-  });
+  const recallHint =
+    recallIntent === "explicit"
+      ? "\n<memory_recall_hint>对方明确要求回忆自己的过往。先用 recallMemory 查询当前用户，再根据结果回复；查不到就直说，不要猜。</memory_recall_hint>"
+      : recallIntent === "implicit"
+        ? "\n<memory_recall_hint>对方可能在接续过去的约定、偏好或经历。若当前对话不足以回答且对象明确，优先调用 recallMemory；指代不清先澄清。</memory_recall_hint>"
+        : "";
+  const lateBinding =
+    buildLateBindingPrompt({
+      wasMentioned: wasMentioned ?? false,
+      wasRepliedTo: wasRepliedTo ?? false,
+      recentBotMessages: recentBotMessages ?? [],
+      ...(userContext.timeZone ? { userTimeZone: userContext.timeZone } : {}),
+      needsSearch,
+      allowMediaTools: (allowRichContentTools ?? false) && (allowMediaTools ?? true),
+      ...(runtimeStatus ? { runtimeStatus } : {}),
+      ...(allowWebSearch != null ? { allowWebSearch } : {}),
+      ...(mandatorySearchHint != null ? { mandatorySearchHint } : {}),
+      ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
+      ...(isRetryTurn ? { isRetryTurn } : {}),
+      ...(requireImageUnderstanding ? { requireImageUnderstanding } : {}),
+      ...(requireImageUnderstanding ? { hasImageUnderstanding } : {}),
+      ...(allowPersistentTools != null ? { allowPersistentTools } : {}),
+      ...(preferAdvisor ? { preferAdvisor } : {}),
+    }) + recallHint;
 
   const promptText = systemHint
     ? `${sessionContext}\n\n${prefetchedContextBlock}\n\n${systemHint}\n\n${userMessage}\n\n${lateBinding}`
@@ -1298,10 +1329,16 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
 
   const recallMemoryTool = tool({
     description:
-      "按需查询群友记忆。只有当前问题需要过去的偏好、经历、约定或近况，而当前聊天不足以回答时才查。不要为了闲聊或打招呼翻旧账。先读取结果，下一步再 send_message；结果为空不代表事实不存在，不要编造。",
+      "查询群友过去的偏好、经历、约定或近况。明确被问到长期记忆时先查；聊天提到过去且当前上下文不足时，优先查而非猜。不为闲聊或打招呼翻旧账。先读取结果，下一步再 send_message。",
     inputSchema: z.object({
       uid: z.string().optional().describe("可见群友的 Telegram uid，省略为当前用户"),
-      query: z.string().max(200).optional().describe("具体关键词；relevant 模式必须填写"),
+      query: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          "简短描述要找的记忆，保留关键人名以外的主题词，如「平时喜欢喝什么」；relevant 模式必须填写",
+        ),
       mode: z.enum(["relevant", "recent"]).default("relevant"),
       limit: z.number().int().min(1).max(5).default(5),
       since: z.string().optional().describe("可选：记录时间下界，准确 ISO 时间；未知省略"),
@@ -1312,6 +1349,8 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
       recallingThisStep = true;
       sentMessages.splice(stepMessageStart);
       const subjectUid = uid ?? userContext.uid;
+      if (recallIntent === "explicit" && subjectUid !== userContext.uid)
+        return { ok: false, reason: "此请求只查询当前发言者自己的记忆" };
       if (!visibleUids.has(subjectUid) || subjectUid === "proactive")
         return { ok: false, reason: "只能查询本轮可见的真实群友" };
       if (++memoryReadCount > 2 || memoryResultChars >= 5_000)
@@ -1333,6 +1372,7 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
           ...(query ? { query } : {}),
           ...(sinceMs !== null ? { since: sinceMs } : {}),
           ...(untilMs !== null ? { until: untilMs } : {}),
+          ...(abortSignal ? { signal: abortSignal } : {}),
         });
         const memories: ReturnType<typeof memoryForPrompt>[] = [];
         for (const record of records) {
@@ -1983,6 +2023,9 @@ export async function generateAiTurn(opts: GenerateOptions): Promise<AiTurnResul
     prepareStep: async ({ stepNumber }) => {
       stepMessageStart = sentMessages.length;
       recallingThisStep = false;
+      if (stepNumber === 0 && recallIntent === "explicit") {
+        return { toolChoice: { type: "tool", toolName: "recallMemory" } };
+      }
       if (stepNumber === 0 && needsSearch && allowWebSearch !== false) {
         logger.info(
           {

@@ -48,6 +48,7 @@ export interface MemoryQuery {
   limit?: number;
   since?: number;
   until?: number;
+  signal?: AbortSignal;
 }
 
 const kinds = new Set(["preference", "background", "project", "recent_state", "interaction"]);

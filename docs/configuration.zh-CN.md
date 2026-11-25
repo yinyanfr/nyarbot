@@ -90,6 +90,16 @@
 - 同一条消息里重复出现的同一个词只计 1 次。
 - 词云渲染内置完整 Source Han Sans 可变字体，支持简中、繁中、日文、韩文。
 
+## 长期记忆检索
+
+明确询问自己的过往时，bot 会先查再答；提到以前的偏好、经历或约定时，如果当前聊天不足以回答，bot 会优先查。普通闲聊不会自动加载长期记忆。
+
+- `MEMORY_SEARCH_MODE`：`off`（默认，只用关键词）、`shadow`（对比关键词与混合排序，但只返回关键词结果）、`hybrid`（返回混合结果）。
+- `MEMORY_EMBEDDING_URL`：私有、自托管的 [Ollama embedding 接口](https://docs.ollama.com/api/embed)完整地址，例如 `http://ollama:11434/api/embed`。`shadow` 和 `hybrid` 必填。不要使用公开接口，也不要向公网暴露服务端口。
+- `MEMORY_EMBEDDING_MODEL`：本地模型标签，默认 `bge-m3:567m`，需先在 Ollama 主机上拉取。同一标签下更换模型权重时，提高 `MEMORY_EMBEDDING_REVISION`（默认 `1`），让旧向量重新生成。
+
+向量是 SQLite 中可重建的派生数据。索引只发送记忆正文和标签，查询只发送检索短语，不索引群聊原文或日记。按时间检索和早安逻辑不变；服务慢或不可用时退回关键词。先用 `shadow` 和脱敏样例评估召回与延迟，确认有改善后再启用 `hybrid`。设回 `off` 即可回退检索，无需恢复数据库。
+
 ## 备份与 Firebase 维护
 
 默认情况下，bot 每天在 `APP_TIMEZONE` 的 03:30 创建在线 SQLite 快照，使用 `DATABASE_BACKUP_PASSPHRASE` 压缩加密，保存到 `DATABASE_BACKUP_PATH`，并发送给 `TG_ADMIN_UID`。本地文件名形如 `nyarbot-20260812T193000Z.sqlite.gz.enc`，保留最新七份。上传失败会通过管理员私聊报告，并在 15 分钟后重试。
