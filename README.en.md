@@ -5,7 +5,7 @@
 A tsundere high-school catgirl AI that lives inside your Telegram group chat.
 
 [![Release](https://img.shields.io/badge/release-1.0.0-8b5cf6?style=flat-square)](CHANGELOG.md)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20-3c873a?style=flat-square&logo=nodedotjs&logoColor=white)](package.json)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D24-3c873a?style=flat-square&logo=nodedotjs&logoColor=white)](docs/development.md#prerequisites)
 [![TypeScript](https://img.shields.io/badge/typescript-ESM-3178c6?style=flat-square&logo=typescript&logoColor=white)](tsconfig.json)
 [![Telegram](https://img.shields.io/badge/telegram-bot-26a5e4?style=flat-square&logo=telegram&logoColor=white)](https://core.telegram.org/bots/api)
 [![AI SDK](https://img.shields.io/badge/AI%20SDK-v6-black?style=flat-square&logo=vercel&logoColor=white)](https://sdk.vercel.ai)
@@ -152,6 +152,7 @@ See [Commands & Interactions Docs](docs/commands-and-interactions.md).
 | `/diaryedit <id> <json>`      | Patch a diary observation (admin only, DM only)                        |
 | `/diaryretract <id> [reason]` | Retract a diary observation (admin only, DM only)                      |
 | `/diaryregen [date]`          | Regenerate a preview without saving/publishing (admin only, DM only)   |
+| `/diaryretry [YYYY-MM-DD]`    | Retry and publish a missing diary, default yesterday (admin DM only)   |
 
 | Scenario     | Trigger                                                            |
 | ------------ | ------------------------------------------------------------------ |

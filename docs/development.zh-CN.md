@@ -2,7 +2,7 @@
 
 ## 前置条件
 
-- Node.js 24+（CI 工作流要求）
+- Node.js 24 或更高版本。CI 和 Docker 使用 Node.js `24.19.0`。
 - npm
 
 ## 安装
@@ -33,14 +33,18 @@ Prompt 与动态上下文的 XML 标签约定见 `docs/prompt-xml-schema.md`。
 
 ## CI
 
-GitHub Actions（`.github/workflows/ci.yml`）在 push/PR 到 `main`/`master` 时运行：
+[CI 工作流](../.github/workflows/ci.yml)会在推送到 `main`、`master` 或 `v3`，以及 PR 以这些分支为目标时运行。推送到 `v4` 或以 `v4` 为目标的 PR 不会触发此工作流。
 
 1. `npm ci`
 2. `npm run typecheck`
 3. `npm run lint`
 4. `npm run format:check`
+5. `npm run test:coverage`
+6. `npm run test:random`
+7. 在 `tools/firestore-to-sqlite` 中运行 `npm ci`、`npm run typecheck` 和 `npm run coverage`
+8. `docker build --tag nyarbot:ci .`
 
-`npm test` 会先构建项目，再运行数据库备份测试。
+`npm test` 会先构建 bot，再运行主项目的完整测试套件。`npm run test:coverage` 要求行、分支和函数覆盖率分别至少达到 85%、82% 和 90%。独立迁移工具的 `npm run coverage` 对应的门槛为 95%、90% 和 95%。
 
 ## 关键设计决策
 

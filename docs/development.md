@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Node.js 24+ (per CI workflow)
+- Node.js 24 or newer. CI and Docker use Node.js `24.19.0`.
 - npm
 
 ## Setup
@@ -33,14 +33,18 @@ Prompt and dynamic context XML tags are documented in `docs/prompt-xml-schema.md
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on push/PR to `main`/`master`:
+The [CI workflow](../.github/workflows/ci.yml) runs on pushes to `main`, `master`, or `v3` and on pull requests targeting those branches. Pushes to `v4` and PRs targeting `v4` do not trigger it.
 
 1. `npm ci`
 2. `npm run typecheck`
 3. `npm run lint`
 4. `npm run format:check`
+5. `npm run test:coverage`
+6. `npm run test:random`
+7. In `tools/firestore-to-sqlite`: `npm ci`, `npm run typecheck`, and `npm run coverage`
+8. `docker build --tag nyarbot:ci .`
 
-`npm test` builds the project and runs the database backup tests.
+`npm test` builds the bot and runs its full test suite. `npm run test:coverage` requires at least 85% line, 82% branch, and 90% function coverage. The separate migration tool's `npm run coverage` requires 95% line, 90% branch, and 95% function coverage.
 
 ## Key Design Decisions
 

@@ -21,7 +21,7 @@ node dist/app.js   # run the compiled bot
 ## CI pipeline (local & GitHub Actions)
 
 - **Pre-commit** (Husky + lint-staged): auto-formats and lints staged `.ts` files
-- **GitHub Actions** (`.github/workflows/ci.yml`): typecheck → lint → format-check on push/PR
+- **GitHub Actions** (`.github/workflows/ci.yml`): on pushes to `main`, `master`, or `v3` and PRs targeting those branches, runs typecheck, lint, formatting, coverage, randomized tests, migration-tool checks, and Docker build.
 
 ## Project type
 
@@ -88,5 +88,5 @@ node dist/app.js   # run the compiled bot
 - **`exactOptionalPropertyTypes: true`** in tsconfig — can't pass `undefined` for optional props; use conditional spread or separate assignment instead.
 - **`webSearch` tool**: Keep schema stable. When flood protection disables search, expose a disabled tool that returns the reason; do not set the tool to `undefined`.
 - **`zod/v4`**: Import Zod from `zod/v4` (new mini API), not plain `zod`.
-- **Diary system**: Model writes structured observations via `writeDiary`. After 00:02, startup and interval checks scan the previous three dates; missing structured material falls back to legacy entries and then a bounded sample of persisted runtime events. Gemini 4 Hydrogen writes the diary through Cloudflare AI Gateway and Gemini 3.5 Flash-Lite writes its group notice; both model operations and the group notice delivery use bounded retries. Successful group delivery is persisted so startup checks can retry an unsent notice without regenerating or republishing the diary. Shutdown aborts active diary model, retry, Telegram, wordcloud, and GitHub operations before the database closes. Admin `/diary` is preview-only; scheduled generation alone saves/publishes.
+- **Diary system**: Model writes structured observations via `writeDiary`. After 00:02, startup and interval checks scan the previous three dates; missing structured material falls back to legacy entries and then a bounded sample of persisted runtime events. Gemini 4 Hydrogen writes the diary through Cloudflare AI Gateway and Gemini 3.5 Flash-Lite writes its group notice; both model operations and the group notice delivery use bounded retries. Successful group delivery is persisted so startup checks can retry an unsent notice without regenerating or republishing the diary. Shutdown aborts active diary model, retry, Telegram, wordcloud, and GitHub operations before the database closes. Admin `/diary` is preview-only; `/diaryretry` can save and publish a missing diary for yesterday or earlier.
 - **Timezone**: Date formatting is centralized in `src/libs/time.ts` and uses `APP_TIMEZONE` (default `Asia/Shanghai`). Use `todayDateStr()`, `formatTimestamp()`, etc. — never manual Date offset math.

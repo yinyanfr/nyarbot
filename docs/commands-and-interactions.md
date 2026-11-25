@@ -19,6 +19,9 @@
 | `/diaryedit <id> <json>`      | Admin only | Patch an observation with JSON (private chat only)                     |
 | `/diaryretract <id> [reason]` | Admin only | Retract an observation (private chat only)                             |
 | `/diaryregen [date]`          | Admin only | Regenerate a preview without saving or publishing (private chat)       |
+| `/diaryretry [YYYY-MM-DD]`    | Admin only | Retry a missing diary, then save and publish it (private chat)         |
+
+`/diaryretry` defaults to yesterday and accepts only yesterday or earlier. It does not overwrite an already saved diary.
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 
