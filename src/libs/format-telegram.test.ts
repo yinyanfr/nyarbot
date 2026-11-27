@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatForTelegramHtml } from "./format-telegram.js";
+import {
+  formatForTelegramHtml,
+  splitTelegramText,
+  telegramMessageParts,
+} from "./format-telegram.js";
 
 test("formats supported Markdown while escaping raw HTML", () => {
   assert.equal(
@@ -48,4 +52,15 @@ test("supports alternate math delimiters, grouped scripts, and text commands", (
 test("leaves unmatched Markdown and code fences as escaped plain text", () => {
   assert.equal(formatForTelegramHtml("**open <tag>"), "**open &lt;tag&gt;");
   assert.equal(formatForTelegramHtml("```unterminated"), "```unterminated");
+});
+
+test("long Telegram messages preserve code fences, entities and surrogate pairs across chunks", () => {
+  const code = "x".repeat(4095) + "&🐱<";
+  const markdown = `\`\`\`ts\n${code}\n\`\`\``;
+  const parts = telegramMessageParts(markdown, formatForTelegramHtml(markdown));
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0]?.html, `<pre><code>${"x".repeat(4095)}&amp;</code></pre>`);
+  assert.equal(parts[1]?.html, "<pre><code>🐱&lt;</code></pre>");
+  assert.equal(parts.map((part) => part.text).join(""), code);
+  assert.deepEqual(splitTelegramText("x".repeat(4095) + "🐱"), ["x".repeat(4095), "🐱"]);
 });

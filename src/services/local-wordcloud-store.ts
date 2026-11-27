@@ -1,5 +1,5 @@
 import config from "../configs/env.js";
-import { parseTimestampInputForTimezone } from "../libs/time.js";
+import { dateRangeForTimezone } from "../libs/time.js";
 import { getDatabase, initDatabase } from "./database.js";
 
 export interface StoredGroupMessage {
@@ -28,10 +28,6 @@ export type WordcloudPublicationSlot =
   | "same_day_evening";
 
 const RETENTION_DAYS = 10;
-
-function toDayStartMs(date: string): number {
-  return parseTimestampInputForTimezone(`${date} 00:00:00`, config.appTimezone) ?? 0;
-}
 
 export function initLocalWordcloudStore(): void {
   initDatabase();
@@ -91,8 +87,8 @@ export async function deleteStoredMessage(chatId: string, messageId: number): Pr
 }
 
 export async function listStoredMessagesForDate(date: string): Promise<StoredGroupMessage[]> {
-  const startMs = toDayStartMs(date);
-  const endMs = startMs + 24 * 60 * 60 * 1000;
+  const range = dateRangeForTimezone(date, config.appTimezone);
+  if (!range) return [];
   const rows = getDatabase()
     .prepare(
       `
@@ -104,7 +100,7 @@ export async function listStoredMessagesForDate(date: string): Promise<StoredGro
         ORDER BY created_at ASC, message_id ASC
       `,
     )
-    .all(config.tgGroupId, startMs, endMs) as Record<string, unknown>[];
+    .all(config.tgGroupId, range.startMs, range.endMs) as Record<string, unknown>[];
 
   return rows.map((row) => ({
     chatId: String(row.chat_id ?? ""),

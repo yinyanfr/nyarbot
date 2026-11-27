@@ -5,18 +5,24 @@ import { deepseekFlashModel, geminiDiaryModel, geminiFlashLiteModel } from "./ai
 import {
   appendDiaryGenerationRecord,
   getDiaryEntries,
+  getDiaryPublication,
   getGeneratedDiary,
   hasDiaryNotificationBeenSent,
   hasTerminalDiaryGenerationFailure,
   listActiveDiaryObservationsByDate,
   loadRuntimeEventsForLocalDate,
   markDiaryNotificationSent,
+  markDiaryPublication,
   writeGeneratedDiary,
 } from "../services/persistence.js";
 import type { RuntimeEventRecord } from "../services/persistence.js";
 import { dateRangeForTimezone, formatTimestamp, now, yesterdayDateStr } from "./time.js";
 import { logger } from "./logger.js";
-import { pushDiaryToGithub, waitForGithubPagesPublish } from "../services/github.js";
+import {
+  pushDiaryToGithub,
+  waitForGithubPagesPublish,
+  type GithubDiaryPushResult,
+} from "../services/github.js";
 import config from "../configs/env.js";
 import { getPersonaLabel } from "./persona.js";
 import type { HistoryEntryKind } from "./conversation-buffer.js";
@@ -29,6 +35,7 @@ import {
   serializeDiaryObservationsXml,
 } from "./diary-observations.js";
 import { normalizePromptData } from "./prompt-safety.js";
+import { withTimeout } from "./abort.js";
 import type { DiaryEntry, DiaryObservationV2 } from "../global.d.js";
 
 const DIARY_NOTIFICATION_TIMEOUT_MS = 20_000;
@@ -80,7 +87,7 @@ export interface DiaryCallbacks {
     options?: { inlineKeyboardUrl?: string; inlineKeyboardText?: string },
     abortSignal?: AbortSignal,
   ) => Promise<void>;
-  sendChannelText: (text: string, abortSignal?: AbortSignal) => Promise<void>;
+  sendChannelText: (text: string, abortSignal?: AbortSignal, date?: string) => Promise<void>;
   sendChannelPhoto: (
     photo: InputFile,
     caption?: string,
@@ -93,12 +100,14 @@ export interface DiaryDependencies {
   generateText: typeof generateText;
   appendDiaryGenerationRecord: typeof appendDiaryGenerationRecord;
   getDiaryEntries: typeof getDiaryEntries;
+  getDiaryPublication: typeof getDiaryPublication;
   getGeneratedDiary: typeof getGeneratedDiary;
   hasDiaryNotificationBeenSent: typeof hasDiaryNotificationBeenSent;
   hasTerminalDiaryGenerationFailure: typeof hasTerminalDiaryGenerationFailure;
   listActiveDiaryObservationsByDate: typeof listActiveDiaryObservationsByDate;
   loadRuntimeEventsForLocalDate: typeof loadRuntimeEventsForLocalDate;
   markDiaryNotificationSent: typeof markDiaryNotificationSent;
+  markDiaryPublication: typeof markDiaryPublication;
   writeGeneratedDiary: typeof writeGeneratedDiary;
   formatTimestamp: typeof formatTimestamp;
   now: typeof now;
@@ -146,7 +155,7 @@ async function retryDiaryOperation<T>(
 
 function buildDiaryUrl(date: string, dependencies: DiaryDependencies): string | null {
   const repo = dependencies.config.githubRepo;
-  if (!repo) return null;
+  if (!repo || !dependencies.config.githubToken) return null;
   const [owner, repoName] = repo.split("/");
   if (!owner || !repoName) return null;
   return `https://${owner}.github.io/${repoName}/${date}-diary/`;
@@ -164,7 +173,6 @@ async function generateDiaryNotification(
   yesterdayDate: string,
   diary: string,
   diaryUrl: string | null,
-  options: { pagesReady: boolean },
   dependencies: DiaryDependencies,
   abortSignal?: AbortSignal,
 ): Promise<string> {
@@ -205,11 +213,7 @@ async function generateDiaryNotification(
 
   const dateLabel =
     yesterdayDate === dependencies.yesterdayDateStr() ? "昨日日记" : `${yesterdayDate} 日记`;
-  const linkNotice = diaryUrl
-    ? options.pagesReady
-      ? `${dateLabel}已经更新：${diaryUrl}`
-      : `${dateLabel}页面还在发布中，链接先放在这里：${diaryUrl}`
-    : `${dateLabel}已经整理好了。`;
+  const linkNotice = diaryUrl ? `${dateLabel}已经更新：${diaryUrl}` : `${dateLabel}已经整理好了。`;
 
   return `${text.trim()}\n\n${linkNotice}\n\n日语姬本日题库已更新，欢迎打卡`;
 }
@@ -714,12 +718,16 @@ async function attemptDiaryGeneration(
 }
 
 type DiaryPublishResult = "published" | "no_material" | "failed" | "publish_incomplete";
+export type DiaryRetryDestination = "channel" | "github";
 
 export type DiaryRetryResult =
   | DiaryPublishResult
   | "invalid_date"
   | "busy"
   | "already_generated"
+  | "legacy_unverified"
+  | "destination_unconfigured"
+  | "no_saved_diary"
   | "stopped";
 
 async function generateYesterdayDiary(
@@ -727,126 +735,151 @@ async function generateYesterdayDiary(
   dependencies: DiaryDependencies,
   diaryCallbacks: DiaryCallbacks | null,
   abortSignal?: AbortSignal,
+  existingDiary?: string,
+  destination?: DiaryRetryDestination,
 ): Promise<DiaryPublishResult> {
   try {
-    const result = await attemptDiaryGeneration(yesterdayDate, dependencies, abortSignal, true);
-    if (result.status === "no_material") return "no_material";
-    if (result.status === "failed") return "failed";
-    const diary = result.diary;
+    let diary = existingDiary;
+    if (!diary) {
+      const result = await attemptDiaryGeneration(yesterdayDate, dependencies, abortSignal, true);
+      if (result.status === "no_material") return "no_material";
+      if (result.status === "failed") return "failed";
+      diary = result.diary;
+      dependencies.logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
+    }
     let publishFailed = false;
-    dependencies.logger.info({ yesterdayDate, len: diary.length }, "diary: generated and saved");
+    const diaryUrl = destination !== "channel" ? buildDiaryUrl(yesterdayDate, dependencies) : null;
+    const channel =
+      destination !== "github" && diaryCallbacks && dependencies.config.tgDiaryChannelId;
+    const [storedChannel, storedGithub, noticeSent] = await Promise.all([
+      channel ? dependencies.getDiaryPublication(yesterdayDate, "channel") : null,
+      diaryUrl ? dependencies.getDiaryPublication(yesterdayDate, "github") : null,
+      diaryCallbacks && !destination
+        ? dependencies.hasDiaryNotificationBeenSent(yesterdayDate)
+        : true,
+    ]);
+    const channelStatus =
+      destination === "channel" && storedChannel === "legacy" ? null : storedChannel;
+    const githubStatus =
+      storedGithub === "skipped" || (destination === "github" && storedGithub === "legacy")
+        ? null
+        : storedGithub;
+    const wordcloudArtifact =
+      (channel && !channelStatus) || (diaryUrl && !githubStatus)
+        ? await dependencies
+            .ensureWordcloudArtifactForDateWithRetry(yesterdayDate, abortSignal)
+            .catch((err: unknown) => {
+              abortSignal?.throwIfAborted();
+              dependencies.logger.warn(
+                { err, yesterdayDate },
+                "diary: failed to ensure wordcloud artifact",
+              );
+              return null;
+            })
+        : null;
 
-    const wordcloudArtifact = await dependencies
-      .ensureWordcloudArtifactForDateWithRetry(yesterdayDate, abortSignal)
-      .catch((err: unknown) => {
-        dependencies.logger.warn(
-          { err, yesterdayDate },
-          "diary: failed to ensure wordcloud artifact",
-        );
-        return null;
-      });
-
-    if (diaryCallbacks && dependencies.config.tgDiaryChannelId) {
+    if (diaryCallbacks && channel && !channelStatus) {
       try {
-        if (wordcloudArtifact) {
+        let captionSent = false;
+        const photoStatus = await dependencies.getDiaryPublication(yesterdayDate, "channel_photo");
+        if (photoStatus === "caption") captionSent = true;
+        if (wordcloudArtifact && !photoStatus) {
           const caption = canSendDiaryAsPhotoCaption(diary) ? diary : undefined;
-          dependencies.logger.info(
-            {
-              yesterdayDate,
-              chatId: dependencies.config.tgDiaryChannelId,
-              len: diary.length,
-              withCaption: Boolean(caption),
-            },
-            "diary: publishing diary channel photo",
-          );
-          await diaryCallbacks.sendChannelPhoto(
-            dependencies.makeInputFile(wordcloudArtifact.image, wordcloudArtifact.fileName),
-            caption,
-            abortSignal,
-          );
-          abortSignal?.throwIfAborted();
-          if (!caption) {
-            await diaryCallbacks.sendChannelText(diary, abortSignal);
+          try {
+            await diaryCallbacks.sendChannelPhoto(
+              dependencies.makeInputFile(wordcloudArtifact.image, wordcloudArtifact.fileName),
+              caption,
+              abortSignal,
+            );
+            captionSent = caption !== undefined;
+          } catch (err) {
             abortSignal?.throwIfAborted();
+            dependencies.logger.warn(
+              { err, yesterdayDate },
+              "diary: photo failed; sending channel text",
+            );
           }
-        } else {
-          dependencies.logger.info(
-            { yesterdayDate, chatId: dependencies.config.tgDiaryChannelId, len: diary.length },
-            "diary: publishing full diary to telegram channel without wordcloud photo",
+          await dependencies.markDiaryPublication(
+            yesterdayDate,
+            "channel_photo",
+            captionSent ? "caption" : "attempted",
           );
-          await diaryCallbacks.sendChannelText(diary, abortSignal);
-          abortSignal?.throwIfAborted();
         }
+        if (!captionSent) await diaryCallbacks.sendChannelText(diary, abortSignal, yesterdayDate);
+        await dependencies.markDiaryPublication(yesterdayDate, "channel", "sent");
       } catch (err) {
+        abortSignal?.throwIfAborted();
+        publishFailed = true;
         dependencies.logger.error(
           { err, yesterdayDate, chatId: dependencies.config.tgDiaryChannelId },
           "diary: channel publish failed",
         );
-        try {
-          await diaryCallbacks.sendChannelText(diary, abortSignal);
-          abortSignal?.throwIfAborted();
-        } catch (fallbackErr) {
-          publishFailed = true;
-          dependencies.logger.error(
-            { err: fallbackErr, yesterdayDate, chatId: dependencies.config.tgDiaryChannelId },
-            "diary: channel text fallback after photo failure also failed",
-          );
-        }
       }
-    } else if (!dependencies.config.tgDiaryChannelId) {
-      dependencies.logger.info(
-        { yesterdayDate },
-        "diary: channel publish skipped (TG_DIARY_CHANNEL_ID not configured)",
-      );
     }
 
-    const diaryUrl = buildDiaryUrl(yesterdayDate, dependencies);
     let pagesReady = false;
-    if (diaryUrl) {
+    if (diaryUrl && githubStatus !== "legacy") {
       try {
-        const pushResult = await dependencies.pushDiaryToGithub(
-          yesterdayDate,
-          diary,
-          {
-            ...(wordcloudArtifact
-              ? {
-                  imageAsset: {
-                    path: `source/img/diary/${wordcloudArtifact.fileName}`,
-                    content: wordcloudArtifact.image,
-                  },
-                }
-              : {}),
-          },
-          abortSignal,
-        );
-        if (pushResult) {
+        const pushResult = !githubStatus
+          ? await dependencies.pushDiaryToGithub(
+              yesterdayDate,
+              diary,
+              {
+                ...(wordcloudArtifact
+                  ? {
+                      imageAsset: {
+                        path: `source/img/diary/${wordcloudArtifact.fileName}`,
+                        content: wordcloudArtifact.image,
+                      },
+                    }
+                  : {}),
+              },
+              withTimeout(abortSignal, 30_000),
+            )
+          : (JSON.parse(githubStatus) as GithubDiaryPushResult);
+        if (!pushResult) throw new Error("Configured GitHub publication returned no commit");
+        if (!githubStatus) {
+          await dependencies.markDiaryPublication(
+            yesterdayDate,
+            "github",
+            JSON.stringify(pushResult),
+          );
+        }
+        pagesReady = Boolean(await dependencies.getDiaryPublication(yesterdayDate, "github_pages"));
+        if (!pagesReady) {
           const publishStatus = await dependencies.waitForGithubPagesPublish(
             pushResult,
-            abortSignal,
+            withTimeout(abortSignal, 120_000),
+            noticeSent || Boolean(githubStatus),
           );
           pagesReady = publishStatus.ready;
-          if (!publishStatus.ready) {
+          if (pagesReady) {
+            await dependencies.markDiaryPublication(yesterdayDate, "github_pages", "ready");
+          } else {
+            publishFailed = true;
             dependencies.logger.warn(
               { yesterdayDate, state: publishStatus.state, detail: publishStatus.detail },
-              "diary: pages not ready before notification fallback",
+              "diary: Pages status is not ready",
             );
           }
         }
       } catch (err) {
+        abortSignal?.throwIfAborted();
         publishFailed = true;
         dependencies.logger.warn({ err, yesterdayDate }, "diary: GitHub push or pages wait failed");
       }
     }
 
-    const notified = await deliverDiaryNotification(
-      yesterdayDate,
-      diary,
-      diaryUrl,
-      pagesReady,
-      dependencies,
-      diaryCallbacks,
-      abortSignal,
-    );
+    const notified =
+      noticeSent ||
+      (await deliverDiaryNotification(
+        yesterdayDate,
+        diary,
+        pagesReady ? diaryUrl : null,
+        dependencies,
+        diaryCallbacks,
+        abortSignal,
+      ));
     return notified && !publishFailed ? "published" : "publish_incomplete";
   } catch (err) {
     if (abortSignal?.aborted) return "publish_incomplete";
@@ -859,7 +892,6 @@ async function deliverDiaryNotification(
   date: string,
   diary: string,
   diaryUrl: string | null,
-  pagesReady: boolean,
   dependencies: DiaryDependencies,
   diaryCallbacks: DiaryCallbacks | null,
   abortSignal?: AbortSignal,
@@ -871,7 +903,6 @@ async function deliverDiaryNotification(
       date,
       diary,
       diaryUrl,
-      { pagesReady },
       dependencies,
       abortSignal,
     );
@@ -892,7 +923,6 @@ async function deliverDiaryNotification(
       dependencies,
       abortSignal,
     );
-    abortSignal?.throwIfAborted();
     await dependencies.markDiaryNotificationSent(date);
     return true;
   } catch (err) {
@@ -915,12 +945,14 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
     generateText,
     appendDiaryGenerationRecord,
     getDiaryEntries,
+    getDiaryPublication,
     getGeneratedDiary,
     hasDiaryNotificationBeenSent,
     hasTerminalDiaryGenerationFailure,
     listActiveDiaryObservationsByDate,
     loadRuntimeEventsForLocalDate,
     markDiaryNotificationSent,
+    markDiaryPublication,
     writeGeneratedDiary,
     formatTimestamp,
     now,
@@ -953,7 +985,10 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
     return result.status === "generated" ? result.diary : null;
   }
 
-  async function retryAndPublishDiary(date: string): Promise<DiaryRetryResult> {
+  async function retryAndPublishDiary(
+    date: string,
+    destination?: DiaryRetryDestination,
+  ): Promise<DiaryRetryResult> {
     if (abortController.signal.aborted) return "stopped";
     try {
       if (
@@ -967,7 +1002,21 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
     }
     if (diaryCheckPromise || diaryRetryPromise) return "busy";
     const retry = (async (): Promise<DiaryRetryResult> => {
-      if (await dependencies.getGeneratedDiary(date)) return "already_generated";
+      const existing = await dependencies.getGeneratedDiary(date);
+      if (destination && !existing) return "no_saved_diary";
+      if (
+        (destination === "channel" && !dependencies.config.tgDiaryChannelId) ||
+        (destination === "github" && !buildDiaryUrl(date, dependencies))
+      ) {
+        return "destination_unconfigured";
+      }
+      if (!destination && existing && (await isFullyPublished(date))) {
+        const legacy = await Promise.all([
+          dependencies.config.tgDiaryChannelId && dependencies.getDiaryPublication(date, "channel"),
+          buildDiaryUrl(date, dependencies) && dependencies.getDiaryPublication(date, "github"),
+        ]);
+        return legacy.includes("legacy") ? "legacy_unverified" : "already_generated";
+      }
       if (!diaryCallbacks) return "stopped";
       completedDates.delete(date);
       const result = await generateYesterdayDiary(
@@ -975,8 +1024,10 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
         dependencies,
         diaryCallbacks,
         abortController.signal,
+        existing ?? undefined,
+        destination,
       );
-      if (result !== "publish_incomplete") completedDates.add(date);
+      if (!destination && result !== "publish_incomplete") completedDates.add(date);
       return result;
     })();
     diaryRetryPromise = retry;
@@ -985,6 +1036,21 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
     } finally {
       if (diaryRetryPromise === retry) diaryRetryPromise = undefined;
     }
+  }
+
+  async function isFullyPublished(date: string): Promise<boolean> {
+    if (
+      dependencies.config.tgDiaryChannelId &&
+      !(await dependencies.getDiaryPublication(date, "channel"))
+    )
+      return false;
+    if (buildDiaryUrl(date, dependencies)) {
+      const github = await dependencies.getDiaryPublication(date, "github");
+      if (!github || github === "skipped") return false;
+      if (github !== "legacy" && !(await dependencies.getDiaryPublication(date, "github_pages")))
+        return false;
+    }
+    return dependencies.hasDiaryNotificationBeenSent(date);
   }
 
   async function checkAndGenerateDiary(): Promise<void> {
@@ -998,21 +1064,22 @@ export function createDiaryService(overrides: Partial<DiaryDependencies> = {}) {
         if (completedDates.has(date)) continue;
         const existingDiary = await dependencies.getGeneratedDiary(date);
         if (existingDiary) {
-          if (!diaryCallbacks || (await dependencies.hasDiaryNotificationBeenSent(date))) {
+          if (!diaryCallbacks || (await isFullyPublished(date))) {
             completedDates.add(date);
             continue;
           }
-          const completed = await deliverDiaryNotification(
+          const result = await generateYesterdayDiary(
             date,
-            existingDiary,
-            buildDiaryUrl(date, dependencies),
-            false,
             dependencies,
             diaryCallbacks,
             abortSignal,
+            existingDiary,
           );
-          if (completed) completedDates.add(date);
-          return;
+          if (result === "published") {
+            completedDates.add(date);
+            return;
+          }
+          continue;
         }
         if (await dependencies.hasTerminalDiaryGenerationFailure(date, DIARY_PROMPT_VERSION)) {
           dependencies.logger.warn(

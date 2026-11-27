@@ -112,8 +112,16 @@ function fixture(options: FixtureOptions = {}) {
       },
       schedulePassiveTurn: (turn: { label: string; execute(): Promise<void> }) =>
         scheduled.push(turn),
-      scheduleCommandTurn: (turn: { label: string; execute(): Promise<void> }) =>
-        scheduled.push(turn),
+      scheduleCommandTurn: (turn: {
+        label: string;
+        execute(signal: AbortSignal): Promise<void>;
+      }) => {
+        scheduled.push({
+          label: turn.label,
+          execute: () => turn.execute(new AbortController().signal),
+        });
+        return true;
+      },
     },
     handleAiTurn: async (params: unknown) => void dispatched.push(params),
     ...options.overrides,
@@ -349,13 +357,14 @@ test("public commands reply and short-circuit AI dispatch", async (t) => {
         entities: [{ type: "bot_command", offset: 0, length: 7 }],
       }),
     );
+    for (const turn of setup.scheduled) await turn.execute();
     assert.deepEqual(
       setup.generated.map((item) => item.kind),
       ["love", "shock", "stroke"],
     );
     assert.deepEqual(setup.generated[1]?.args[1], { intensity: 20, extraText: "hello" });
     assert.deepEqual(setup.generated[2]?.args[1], { extraText: "gently" });
-    assert.equal(setup.scheduled.length, 0);
+    assert.equal(setup.scheduled.length, 3);
   });
 });
 
@@ -373,8 +382,24 @@ test("roll command sends deterministic result shape and schedules a forced follo
   assert.equal(dispatch.forceReply, true);
   assert.deepEqual(dispatch.sourceRefs, ["tg:-100:roll:10"]);
   assert.match(String(dispatch.systemHint), /command_roll/);
-  assert.equal(setup.activities(), 2);
-  assert.equal(setup.releases(), 2);
+  assert.equal(setup.activities(), 1);
+  assert.equal(setup.releases(), 1);
+});
+
+test("rate-limited commands do not schedule model turns; dice results still work", async () => {
+  const setup = fixture({ allowAiTrigger: false });
+  for (const [index, command] of ["/love", "/shock", "/stroke", "/roll"].entries()) {
+    await setup.bot.handleUpdate(
+      update({
+        updateId: index + 1,
+        text: command,
+        entities: [{ type: "bot_command", offset: 0, length: command.length }],
+      }),
+    );
+  }
+  assert.equal(setup.scheduled.length, 0);
+  assert.equal(setup.generated.length, 0);
+  assert.equal(setup.replies[0]?.[4], "command_roll");
 });
 
 test("invalid roll reports parser failure but still schedules contextual follow-up", async () => {
@@ -511,11 +536,12 @@ test("edited commands dispatch stroke, shock, love, and contain wordcloud storag
       ],
     }),
   );
+  for (const turn of setup.scheduled) await turn.execute();
   assert.deepEqual(
     setup.generated.map((item) => item.kind),
     ["stroke", "love", "shock"],
   );
-  assert.equal(setup.scheduled.length, 0);
+  assert.equal(setup.scheduled.length, 3);
 });
 
 test("group wordcloud persistence stores forwarded messages and contains storage rejection", async () => {
@@ -556,7 +582,7 @@ test("roll follow-up contains asynchronous user resolution failure and releases 
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(setup.scheduled.length, 0);
-  assert.equal(setup.releases(), 2);
+  assert.equal(setup.releases(), 1);
 });
 
 const privateCommand = (text: string, updateId = 1) =>
@@ -649,7 +675,23 @@ test("diaryretry is private admin only and defaults to yesterday", async () => {
     );
   }
   assert.deepEqual(dates, [yesterdayDateStr(), "2026-08-10"]);
-  assert.ok(setup.apiCalls.some((call) => String(call.payload.text).includes("已生成、保存")));
+  assert.ok(setup.apiCalls.some((call) => String(call.payload.text).includes("日记已保存")));
+});
+
+test("diaryretry accepts a single explicit historical destination", async () => {
+  const requests: string[][] = [];
+  const setup = fixture({
+    overrides: {
+      retryAndPublishDiary: async (date, destination) => {
+        requests.push([date, destination!]);
+        return "published";
+      },
+    },
+  });
+  await setup.bot.handleUpdate(privateCommand("/diaryretry 2026-08-10 channel"));
+  await setup.bot.handleUpdate(privateCommand("/diaryretry 2026-08-10 other", 2));
+  assert.deepEqual(requests, [["2026-08-10", "channel"]]);
+  assert.match(String(setup.apiCalls.at(-1)?.payload.text), /channel\|github/);
 });
 
 test("diaryretry reports service outcomes and errors", async () => {
@@ -665,7 +707,7 @@ test("diaryretry reports service outcomes and errors", async () => {
     const setup = fixture({ overrides: { retryAndPublishDiary: async () => result } });
     await setup.bot.handleUpdate(privateCommand("/diaryretry"));
     assert.equal(setup.apiCalls.length, 2);
-    assert.doesNotMatch(String(setup.apiCalls.at(-1)?.payload.text), /已生成、保存/);
+    assert.doesNotMatch(String(setup.apiCalls.at(-1)?.payload.text), /完成配置的发布流程/);
   }
   const setup = fixture({
     overrides: {
@@ -1191,6 +1233,7 @@ function aiTurnFixture(results: unknown[], apiFailures: Record<string, number[]>
   const apiCalls: { method: string; args: unknown[] }[] = [];
   const callCounts = new Map<string, number>();
   const callApi = async (method: string, ...args: unknown[]) => {
+    while (args.length && args.at(-1) === undefined) args.pop();
     apiCalls.push({ method, args });
     const count = (callCounts.get(method) ?? 0) + 1;
     callCounts.set(method, count);
@@ -1358,6 +1401,14 @@ test("AI turn dismiss fallbacks cover configured text, rescued draft, sticker, a
     );
     assert.equal(setup.turns[0]?.action, "dismiss");
   });
+});
+
+test("AI turn never sends original draft when rescue fails", async () => {
+  const draft = { action: "dismiss", rawText: "Internal draft" };
+  const setup = aiTurnFixture([draft, draft]);
+  await setup.run();
+  assert.ok(!setup.apiCalls.some((call) => call.method === "sendMessage"));
+  assert.ok(setup.apiCalls.some((call) => call.method === "sendSticker"));
 });
 
 test("AI turn handles Telegram fallback failures, file resolution, and generation exceptions", async (t) => {

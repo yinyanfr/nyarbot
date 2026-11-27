@@ -332,14 +332,15 @@ test("preview empty branches and exhausted retries do not create artifacts", asy
   assert.equal(attempts, 3);
 });
 
-test("scheduler catches startup and rollover failures and skips published days", async () => {
+test("scheduler retries a failed daily rollup on the same day", async () => {
   const errors: string[] = [];
-  let today = "2026-08-12";
+  let checks = 0;
   const f = wcFixture({
-    todayDateStr: () => today,
+    todayDateStr: () => "2026-08-12",
     now: () => ({ hour: () => 1, minute: () => 0 }) as ReturnType<WordcloudDependencies["now"]>,
     hasWordcloudRunForDate: async () => {
-      throw new Error("database unavailable");
+      if (++checks === 1) throw new Error("database unavailable");
+      return true;
     },
     hasWordcloudPublication: async () => true,
     logger: {
@@ -350,9 +351,8 @@ test("scheduler catches startup and rollover failures and skips published days",
   });
   f.service.checkAndGenerateWordcloud();
   await new Promise((resolve) => setImmediate(resolve));
-  today = "2026-08-13";
   f.service.checkAndGenerateWordcloud();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.ok(errors.some((message) => message.includes("startup catch-up failed")));
-  assert.ok(errors.some((message) => message.includes("checkAndGenerateWordcloud failed")));
+  assert.equal(checks, 2);
+  assert.deepEqual(errors, ["wordcloud: publication failed"]);
 });

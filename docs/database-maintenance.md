@@ -50,6 +50,10 @@ After acceptance, revoke/delete the migration service-account key and remove the
 
 Before removing the migration tool or revoking credentials, confirm the deployed bot uses SQLite and rehearse restoring a recent encrypted backup to a separate staging path. Inventory Firestore-only data and external consumers, including unknown collections and `_backup` collections skipped by the importer. Keep a protected, verified archive of any data still needed, along with the migration report and the last usable revision of the tool. Do not rerun the importer against the live SQLite file. Revoke the old key only after confirming there are no remaining consumers; delete the Firebase project only after separate approval.
 
+The migration report covers only the import scope. It does not account for nested subcollections or `runtime` documents other than `runtime/group`. Before retirement, run a [managed Firestore export](https://firebase.google.com/docs/firestore/manage-data/export-import) without a collection filter, record the archive location, and verify it by importing into an isolated database and checking unknown collections, `_backup`, `runtime`, and nested documents.
+
+SQLite schema v5 tracks diary publication by destination. Historical channel and GitHub deliveries are marked unknown so the scheduler does not replay them. Existing group notification records are preserved. After verifying that a historical delivery is missing, an admin can retry that specific destination. Keep an encrypted pre-upgrade backup because older builds cannot open a v5 database.
+
 ## Daily Encrypted Backups
 
 The bot takes an online SQLite snapshot daily at `DATABASE_BACKUP_SCHEDULE=03:30` in `APP_TIMEZONE`, compresses and encrypts it with `DATABASE_BACKUP_PASSPHRASE`, stores it under `DATABASE_BACKUP_PATH=data/backups`, and sends it as a Telegram document to `TG_ADMIN_UID`. Archives are named `nyarbot-<UTC timestamp>.sqlite.gz.enc`; the newest seven local archives are retained. Keep the passphrase separately from both local and Telegram copies.

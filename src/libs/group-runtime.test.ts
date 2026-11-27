@@ -96,6 +96,7 @@ function createHarness(
     },
     commitRuntimeCompaction: async (...args) => {
       commits.push(args);
+      return true;
     },
     generateConversationCompaction: async () => ({
       summary: "compacted",
@@ -681,4 +682,65 @@ test("compaction is single-flight, retries after generation failure, and propaga
   });
   commitFailure.setRecentEvents([event(10), event(20), event(30), event(40), event(50)]);
   await assert.rejects(commitFailure.runtime.maybeCompact(), /transaction failed/);
+});
+
+test("closing cancels the active turn, waits for it, and discards queued work", async () => {
+  const { runtime, drainMicrotasks } = createHarness();
+  const release = deferred();
+  let activeSignal: AbortSignal | undefined;
+  let queuedRan = false;
+  runtime.scheduleCommandTurn({
+    label: "active",
+    execute: async (signal) => {
+      activeSignal = signal;
+      await release.promise;
+    },
+  });
+  await drainMicrotasks();
+  runtime.scheduleCommandTurn({
+    label: "queued",
+    execute: async () => {
+      queuedRan = true;
+    },
+  });
+  let closed = false;
+  const closing = runtime.close().then(() => {
+    closed = true;
+  });
+  await flush();
+  assert.equal(activeSignal?.aborted, true);
+  assert.equal(closed, false);
+  release.resolve();
+  await closing;
+  await drainMicrotasks();
+  assert.equal(queuedRan, false);
+  assert.equal(runtime.state.running, false);
+});
+
+test("compaction keeps every event sharing the retained boundary timestamp", async () => {
+  const harness = createHarness();
+  harness.setRecentEvents([event(10), event(20), event(30), event(30), event(40)]);
+  await harness.runtime.maybeCompact();
+  assert.equal(harness.commits[0]?.[1].summaryCursorTs, 20);
+});
+
+test("command admission reports a full queue and expires requests while another turn runs", async () => {
+  const { runtime, tick } = createHarness();
+  const release = deferred();
+  const running = runtime.runProactiveTurn(() => release.promise);
+  let expired = 0;
+  const command = {
+    label: "queued",
+    execute: async () => assert.fail("expired command must not call the model"),
+    onExpired: async () => {
+      expired++;
+    },
+  };
+  for (let i = 0; i < 8; i++) assert.equal(runtime.scheduleCommandTurn(command), true);
+  assert.equal(runtime.scheduleCommandTurn(command), false);
+  await tick(60_000);
+  assert.equal(expired, 8);
+  release.resolve();
+  await running;
+  await runtime.close();
 });

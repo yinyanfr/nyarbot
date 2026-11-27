@@ -182,18 +182,11 @@ test("rejects unsafe redirect, malformed metadata, MCP error, and caller abort",
     const controller = new AbortController();
     controller.abort();
     const read = createVideoReader({
-      getBilibiliClient: async () => ({
-        callTool: async (_request, _schema, options) => {
-          assert.equal(options?.signal, controller.signal);
-          throw options?.signal?.reason;
-        },
-      }),
+      getBilibiliClient: async () => assert.fail("aborted reads must not connect to MCP"),
     });
     await assert.rejects(
       read("https://bilibili.com/video/BV1ab411c7de", undefined, controller.signal),
-      {
-        code: "provider_failed",
-      },
+      (err) => err === controller.signal.reason,
     );
   });
 });

@@ -17,6 +17,7 @@ Object.assign(process.env, {
 });
 
 const { createDiaryService } = await import("./diary.js");
+const githubPush = { owner: "owner", repo: "repo", path: "diary", commitSha: "commit" };
 
 const observation: DiaryObservationV2 = {
   schemaVersion: 2,
@@ -33,9 +34,11 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
   const records: unknown[] = [];
   const generated: unknown[] = [];
   const notificationDates: string[] = [];
+  const publications = new Map<string, string>();
   const dependencies: Partial<DiaryDependencies> = {
     config: {
       githubRepo: "owner/repo",
+      githubToken: "test-token",
       tgDiaryChannelId: "-2",
       appTimezone: "Asia/Shanghai",
     } as DiaryDependencies["config"],
@@ -52,6 +55,11 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
     getDiaryEntries: async () => [],
     loadRuntimeEventsForLocalDate: async () => [],
     getGeneratedDiary: async () => null,
+    getDiaryPublication: async (date, destination) =>
+      publications.get(`${date}:${destination}`) ?? (overrides.getGeneratedDiary ? "legacy" : null),
+    markDiaryPublication: async (date, destination, detail) => {
+      publications.set(`${date}:${destination}`, detail);
+    },
     hasDiaryNotificationBeenSent: async (date) => notificationDates.includes(date),
     hasTerminalDiaryGenerationFailure: async () => false,
     markDiaryNotificationSent: async (date) => {
@@ -68,7 +76,7 @@ function diaryFixture(overrides: Partial<DiaryDependencies> = {}) {
         ? { text: "2026-08-11 猫娘日记\n正文", usage: { inputTokens: 10, outputTokens: 20 } }
         : { text: "导读" }) as DiaryDependencies["generateText"],
     ensureWordcloudArtifactForDateWithRetry: async () => null,
-    pushDiaryToGithub: async () => null,
+    pushDiaryToGithub: async () => githubPush,
     waitForGithubPagesPublish: async () => ({ ready: true, state: "ready", detail: "ok" }),
     makeInputFile: (_data, fileName) => ({ fileName }) as never,
     delay: async () => undefined,
@@ -90,7 +98,7 @@ test("manual retry bypasses terminal failures and publishes with scheduled callb
     hasTerminalDiaryGenerationFailure: async () => true,
     pushDiaryToGithub: async () => {
       sent.push("github");
-      return null;
+      return githubPush;
     },
   });
   f.service.initDiaryCallbacks({
@@ -118,8 +126,11 @@ test("manual retry refuses invalid dates, existing diaries, and unavailable serv
     assert.equal(await f.service.retryAndPublishDiary(date), "invalid_date");
   }
   assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "stopped");
-  const existing = diaryFixture({ getGeneratedDiary: async () => "saved" });
-  assert.equal(await existing.service.retryAndPublishDiary("2026-08-11"), "already_generated");
+  const existing = diaryFixture({
+    getGeneratedDiary: async () => "saved",
+    hasDiaryNotificationBeenSent: async () => true,
+  });
+  assert.equal(await existing.service.retryAndPublishDiary("2026-08-11"), "legacy_unverified");
   assert.equal(existing.generated.length, 0);
   await f.service.stopDiaryService();
   assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "stopped");
@@ -153,6 +164,124 @@ test("manual retry distinguishes no material, generation failure, and publicatio
     });
     assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), expected);
   }
+});
+
+test("manual retry resumes a saved diary after GitHub fails without republishing its channel", async () => {
+  const state = new Map<string, string>();
+  let saved: string | null = null;
+  let pushes = 0;
+  let channel = 0;
+  const notices: string[] = [];
+  const f = diaryFixture({
+    getGeneratedDiary: async () => saved,
+    writeGeneratedDiary: async (_date, diary) => {
+      saved = diary;
+    },
+    getDiaryPublication: async (_date, destination) => state.get(destination) ?? null,
+    markDiaryPublication: async (_date, destination, detail) => {
+      state.set(destination, detail);
+    },
+    pushDiaryToGithub: async () => {
+      if (++pushes === 1) throw new Error("temporarily unavailable");
+      return { owner: "owner", repo: "repo", path: "diary", commitSha: "commit" };
+    },
+  });
+  f.service.initDiaryCallbacks({
+    sendChannelText: async () => {
+      channel++;
+    },
+    sendChannelPhoto: async () => assert.fail("no artifact"),
+    sendText: async (text) => {
+      notices.push(text);
+    },
+  });
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "publish_incomplete");
+  assert.equal(notices.length, 1);
+  assert.doesNotMatch(notices[0]!, /github\.io/);
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "published");
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "already_generated");
+  assert.equal(f.records.length, 1);
+  assert.equal(channel, 1);
+  assert.equal(pushes, 2);
+  assert.equal(notices.length, 1);
+});
+
+test("a Pages failure does not block the group notice, and recovery does not push or notify twice", async () => {
+  const stage = new Map([["github", JSON.stringify(githubPush)]]);
+  let delivered = false;
+  let checks = 0;
+  const f = diaryFixture({
+    getGeneratedDiary: async () => "日记",
+    getDiaryPublication: async (_date, key) =>
+      stage.get(key) ?? (key === "channel" ? "sent" : null),
+    markDiaryPublication: async (_date, key, detail) => {
+      stage.set(key, detail);
+    },
+    hasDiaryNotificationBeenSent: async () => delivered,
+    markDiaryNotificationSent: async () => {
+      delivered = true;
+    },
+    pushDiaryToGithub: async () => assert.fail("commit was already pushed"),
+    waitForGithubPagesPublish: async (_commit, _signal, singleCheck) => {
+      assert.equal(singleCheck, true);
+      if (++checks === 1) throw new Error("Pages API unavailable");
+      return { ready: true, state: "ready" };
+    },
+  });
+  let notices = 0;
+  f.service.initDiaryCallbacks({
+    sendText: async (text) => {
+      notices++;
+      assert.doesNotMatch(text, /github\.io/);
+    },
+    sendChannelText: async () => assert.fail("channel already published"),
+    sendChannelPhoto: async () => assert.fail("channel already published"),
+  });
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "publish_incomplete");
+  assert.equal(notices, 1);
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "published");
+  assert.equal(stage.get("github_pages"), "ready");
+  assert.equal(notices, 1);
+});
+
+test("manual recovery only publishes the selected legacy destination and can recover a skipped GitHub push", async () => {
+  const stage = new Map([
+    ["channel", "legacy"],
+    ["github", "legacy"],
+  ]);
+  let sent = 0;
+  let pushes = 0;
+  const f = diaryFixture({
+    getGeneratedDiary: async () => "日记",
+    getDiaryPublication: async (_date, key) => stage.get(key) ?? null,
+    markDiaryPublication: async (_date, key, detail) => {
+      stage.set(key, detail);
+    },
+    hasDiaryNotificationBeenSent: async () => true,
+    pushDiaryToGithub: async () => {
+      pushes++;
+      return githubPush;
+    },
+  });
+  f.service.initDiaryCallbacks({
+    sendText: async () => assert.fail("group was already notified"),
+    sendChannelText: async () => {
+      sent++;
+    },
+    sendChannelPhoto: async () => assert.fail("no artifact"),
+  });
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11", "channel"), "published");
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11", "channel"), "published");
+  assert.equal(sent, 1);
+  assert.equal(pushes, 0);
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "legacy_unverified");
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11", "github"), "published");
+  assert.equal(pushes, 1);
+  assert.equal(sent, 1);
+  stage.set("github", "skipped");
+  stage.delete("github_pages");
+  assert.equal(await f.service.retryAndPublishDiary("2026-08-11"), "published");
+  assert.equal(pushes, 2);
 });
 
 test("manual retry shares scheduler exclusion and is aborted and awaited on shutdown", async () => {
@@ -694,11 +823,12 @@ test("channel, GitHub, wordcloud failure, caption fallback, and notification are
   assert.ok(channelText.length > 0);
 });
 
-test("long diaries send photo then text and report pages still publishing", async () => {
+test("long diaries send photo then text but omit an unconfirmed Pages link", async () => {
   const channelText: string[] = [];
   const notices: string[] = [];
   const captions: (string | undefined)[] = [];
   const f = diaryFixture({
+    listActiveDiaryObservationsByDate: async (date) => (date === "2026-08-09" ? [observation] : []),
     generateText: (async (input: Parameters<DiaryDependencies["generateText"]>[0]) =>
       "messages" in input
         ? { text: "长".repeat(1_025) }
@@ -737,7 +867,7 @@ test("long diaries send photo then text and report pages still publishing", asyn
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(captions, [undefined]);
   assert.equal(channelText[0]?.length, 1_025);
-  assert.match(notices[0]!, /页面还在发布中/);
+  assert.doesNotMatch(notices[0]!, /github\.io/);
 });
 
 test("photo failure falls back to channel text and malformed repo omits diary URL", async () => {
@@ -746,6 +876,7 @@ test("photo failure falls back to channel text and malformed repo omits diary UR
   const f = diaryFixture({
     config: {
       githubRepo: "invalid",
+      githubToken: "test-token",
       tgDiaryChannelId: "-2",
       appTimezone: "Asia/Shanghai",
     } as DiaryDependencies["config"],

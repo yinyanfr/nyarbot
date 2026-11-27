@@ -128,6 +128,16 @@ test("runtime event advancement and compaction commits are atomic", async () => 
     );
     assert.equal(database.prepare("SELECT COUNT(*) FROM runtime_compactions").pluck().get(), 0);
     assert.equal((await persistence.loadRuntimeGroupState()).summary, "old");
+    database.exec("DROP TRIGGER fail_group_update");
+    await persistence.resetRuntimeConversationSummary();
+    const reset = await persistence.loadRuntimeGroupState();
+    await persistence.commitRuntimeCompaction(compaction, {
+      summary: "stale",
+      summaryCursorTs: 20,
+      lastCompactedAt: 30,
+    });
+    assert.deepEqual(await persistence.loadRuntimeGroupState(), reset);
+    assert.equal(database.prepare("SELECT COUNT(*) FROM runtime_compactions").pluck().get(), 0);
   } finally {
     databaseModule.closeDatabase();
     await rm(directory, { recursive: true, force: true });

@@ -2,6 +2,7 @@ import config from "../configs/env.js";
 import { logger } from "./logger.js";
 import { open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
+import { readResponseWithSizeLimit } from "@ai-sdk/provider-utils";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -68,9 +69,10 @@ export interface TelegramImageDependencies {
 
 export function createTelegramImageDownloader(
   dependencies: TelegramImageDependencies,
-): (filePath: string) => Promise<string | null> {
-  return async (filePath: string): Promise<string | null> => {
+): (filePath: string, signal?: AbortSignal) => Promise<string | null> {
+  return async (filePath: string, signal?: AbortSignal): Promise<string | null> => {
     try {
+      signal?.throwIfAborted();
       let buf: Buffer;
       let responseContentType: string | undefined;
       if (isAbsolute(filePath)) {
@@ -88,12 +90,19 @@ export function createTelegramImageDownloader(
         )
           return null;
         const url = `${(dependencies.apiRoot ?? "https://api.telegram.org").replace(/\/+$/, "")}/file/bot${dependencies.botApiKey}/${filePath}`;
-        const res = await dependencies.fetch(url, { signal: dependencies.timeout(15_000) });
+        const timeout = dependencies.timeout(15_000);
+        const res = await dependencies.fetch(url, {
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+          redirect: "error",
+        });
         if (!res.ok) {
+          await res.body?.cancel();
           logger.warn({ status: res.status }, "telegram file download non-2xx");
           return null;
         }
-        buf = Buffer.from(await res.arrayBuffer());
+        buf = Buffer.from(
+          await readResponseWithSizeLimit({ response: res, url, maxBytes: MAX_BYTES }),
+        );
         responseContentType = res.headers
           .get("content-type")
           ?.split(";", 1)[0]
@@ -116,6 +125,7 @@ export function createTelegramImageDownloader(
         );
         return null;
       }
+      signal?.throwIfAborted();
       return `data:${contentType};base64,${buf.toString("base64")}`;
     } catch {
       // Local paths and fetch errors can contain the bot token. Never log them.

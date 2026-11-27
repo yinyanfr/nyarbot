@@ -19,9 +19,11 @@
 | `/diaryedit <id> <json>`      | Admin only | Patch an observation with JSON (private chat only)                     |
 | `/diaryretract <id> [reason]` | Admin only | Retract an observation (private chat only)                             |
 | `/diaryregen [date]`          | Admin only | Regenerate a preview without saving or publishing (private chat)       |
-| `/diaryretry [YYYY-MM-DD]`    | Admin only | Retry a missing diary, then save and publish it (private chat)         |
+| `/diaryretry [YYYY-MM-DD]`    | Admin only | Generate or resume diary publication (private chat)                    |
 
-`/diaryretry` defaults to yesterday and accepts only yesterday or earlier. It does not overwrite an already saved diary.
+`/diaryretry` defaults to yesterday and accepts only yesterday or earlier. It reuses an existing diary and resumes incomplete channel, GitHub, or group notification steps.
+
+For a historical diary with unknown delivery status, verify it is missing before running `/diaryretry YYYY-MM-DD channel` or `/diaryretry YYYY-MM-DD github`. A targeted retry only publishes to the selected destination. Group notices include a link only if Pages is confirmed ready at the time of delivery.
 
 Admin-only commands check `TG_ADMIN_UID` against the sender's user ID.
 

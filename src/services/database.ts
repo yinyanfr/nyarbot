@@ -290,6 +290,24 @@ function migrate(db: SqliteDatabase): void {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value;
       `);
     }
+    if (currentVersion < 5) {
+      db.exec(`
+        CREATE TABLE diary_publications (
+          date TEXT NOT NULL REFERENCES diary(firestore_id) ON DELETE CASCADE,
+          destination TEXT NOT NULL CHECK(destination IN ('channel', 'channel_photo', 'github', 'github_pages')),
+          detail TEXT NOT NULL,
+          PRIMARY KEY (date, destination)
+        ) STRICT;
+
+        -- Historical deliveries have no per-destination metadata; avoid replaying them.
+        INSERT INTO diary_publications (date, destination, detail)
+          SELECT firestore_id, destination, 'legacy'
+          FROM diary CROSS JOIN (SELECT 'channel' AS destination UNION ALL SELECT 'github')
+          WHERE length(trim(generated_diary)) > 0;
+        INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '5')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+      `);
+    }
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
   })();
 }

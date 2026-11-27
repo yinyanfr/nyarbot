@@ -45,9 +45,9 @@ function fixture(options: {
   const runtime = {
     canRunProactive: () => options.canRun ?? true,
     getActivityRevision: () => revision,
-    runProactiveTurn: async (task: () => Promise<void>) => {
+    runProactiveTurn: async (task: (signal: AbortSignal) => Promise<void>) => {
       if (options.runLock === false) return false;
-      await task();
+      await task(new AbortController().signal);
       return true;
     },
     recordBotMessages: async () => undefined,
