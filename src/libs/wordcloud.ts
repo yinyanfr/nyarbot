@@ -248,7 +248,7 @@ const STOP_WORDS = new Set([
 ]);
 
 export interface WordcloudCallbacks {
-  sendPhoto: (photo: InputFile, caption: string) => Promise<void>;
+  sendPhoto: (photo: InputFile, caption: string, signal?: AbortSignal) => Promise<void>;
 }
 
 export interface WordcloudArtifact {
@@ -885,8 +885,8 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
     ...overrides,
   };
   let callbacks: WordcloudCallbacks | null = null;
-  let lastDate: string | null = null;
-  const sameDayPublishInFlight = new Set<string>();
+  const publicationsInFlight = new Map<string, Promise<void>>();
+  const shutdown = new AbortController();
 
   async function retryTask<T>(
     label: string,
@@ -990,9 +990,13 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
     date: string,
     slot: WordcloudPublicationSlot,
   ): Promise<WordcloudArtifact | null> {
-    return retryTask(`ensure wordcloud artifact ${slot}`, async () => {
-      return await ensureWordcloudArtifactForPublication(date, slot);
-    });
+    return retryTask(
+      `ensure wordcloud artifact ${slot}`,
+      async () => {
+        return await ensureWordcloudArtifactForPublication(date, slot);
+      },
+      shutdown.signal,
+    );
   }
 
   async function publishWordcloudForDate(params: {
@@ -1002,6 +1006,7 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
   }): Promise<void> {
     const { date, slot, markPublished } = params;
     const artifact = await ensureWordcloudArtifactForPublicationWithRetry(date, slot);
+    shutdown.signal.throwIfAborted();
     if (!artifact) {
       if (slot === "daily_rollup_yesterday") {
         const pruned = await dependencies.pruneStoredMessages();
@@ -1029,20 +1034,22 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
 
     const currentCallbacks = callbacks;
     if (!currentCallbacks) return;
-    await retryTask(`publish wordcloud photo ${slot}`, async () => {
-      await currentCallbacks.sendPhoto(
-        dependencies.makeInputFile(artifact.image, artifact.fileName),
-        artifact.caption,
-      );
-    });
+    await retryTask(
+      `publish wordcloud photo ${slot}`,
+      async () => {
+        await currentCallbacks.sendPhoto(
+          dependencies.makeInputFile(artifact.image, artifact.fileName),
+          artifact.caption,
+          shutdown.signal,
+        );
+      },
+      shutdown.signal,
+    );
     await markPublished();
   }
 
   async function generateYesterdayWordcloud(date: string): Promise<void> {
-    if (await dependencies.hasWordcloudRunForDate(date)) {
-      dependencies.logger.info({ date }, "wordcloud: skipped already-published day");
-      return;
-    }
+    if (await dependencies.hasWordcloudRunForDate(date)) return;
     await publishWordcloudForDate({
       date,
       slot: "daily_rollup_yesterday",
@@ -1055,59 +1062,49 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
   }
 
   function checkAndGenerateWordcloud(): void {
+    if (shutdown.signal.aborted) return;
     const today = dependencies.todayDateStr();
-    if (lastDate === null) {
-      const current = dependencies.now();
-      if (current.hour() > 0 || (current.hour() === 0 && current.minute() >= 2)) {
-        const yesterdayDate = dependencies.yesterdayDateStr();
-        lastDate = today;
-        generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
-          dependencies.logger.error({ err, yesterdayDate }, "wordcloud: startup catch-up failed");
-        });
-      }
-      lastDate = today;
+    const current = dependencies.now();
+    if (current.hour() > 0 || current.minute() >= 2) {
+      const date = dependencies.yesterdayDateStr();
+      schedulePublication(date, "daily_rollup_yesterday", () => generateYesterdayWordcloud(date));
     }
 
-    const hour = dependencies.now().hour();
+    const hour = current.hour();
     const slot: WordcloudPublicationSlot | null =
       hour >= 18 ? "same_day_evening" : hour >= 12 ? "same_day_noon" : null;
     if (slot) {
-      const sameDayCheckKey = `${today}:${slot}`;
-      if (!sameDayPublishInFlight.has(sameDayCheckKey)) {
-        sameDayPublishInFlight.add(sameDayCheckKey);
-        dependencies
-          .hasWordcloudPublication(today, slot)
-          .then((published) => {
-            if (published) return;
-            return publishWordcloudForDate({
-              date: today,
-              slot,
-              markPublished: () => dependencies.markWordcloudPublication(today, slot),
-            });
-          })
-          .catch((err: unknown) => {
-            dependencies.logger.error({ err, today, slot }, "wordcloud: same-day publish failed");
-          })
-          .finally(() => {
-            sameDayPublishInFlight.delete(sameDayCheckKey);
-          });
-      }
+      schedulePublication(today, slot, async () => {
+        if (await dependencies.hasWordcloudPublication(today, slot)) return;
+        await publishWordcloudForDate({
+          date: today,
+          slot,
+          markPublished: () => dependencies.markWordcloudPublication(today, slot),
+        });
+      });
     }
+  }
 
-    if (lastDate === today) return;
-    const rolloverTime = dependencies.now();
-    if (!(rolloverTime.hour() > 0 || (rolloverTime.hour() === 0 && rolloverTime.minute() >= 2)))
-      return;
+  function schedulePublication(
+    date: string,
+    slot: WordcloudPublicationSlot,
+    run: () => Promise<void>,
+  ): void {
+    const key = `${date}:${slot}`;
+    if (publicationsInFlight.has(key)) return;
+    const task = run()
+      .catch((err: unknown) => {
+        if (!shutdown.signal.aborted)
+          dependencies.logger.error({ err, date, slot }, "wordcloud: publication failed");
+      })
+      .finally(() => publicationsInFlight.delete(key))
+      .then(() => undefined);
+    publicationsInFlight.set(key, task);
+  }
 
-    const yesterdayDate = lastDate;
-    lastDate = today;
-
-    generateYesterdayWordcloud(yesterdayDate).catch((err: unknown) => {
-      dependencies.logger.error(
-        { err, yesterdayDate },
-        "wordcloud: checkAndGenerateWordcloud failed",
-      );
-    });
+  async function stopWordcloudService(): Promise<void> {
+    shutdown.abort();
+    await Promise.all(publicationsInFlight.values());
   }
 
   return {
@@ -1118,6 +1115,7 @@ export function createWordcloudService(overrides: Partial<WordcloudDependencies>
     ensureWordcloudArtifactForDateWithRetry,
     publishWordcloudForDate,
     checkAndGenerateWordcloud,
+    stopWordcloudService,
   };
 }
 
@@ -1132,3 +1130,4 @@ export const ensureWordcloudArtifactForDate =
 export const ensureWordcloudArtifactForDateWithRetry =
   defaultWordcloudService.ensureWordcloudArtifactForDateWithRetry;
 export const checkAndGenerateWordcloud = defaultWordcloudService.checkAndGenerateWordcloud;
+export const stopWordcloudService = defaultWordcloudService.stopWordcloudService;

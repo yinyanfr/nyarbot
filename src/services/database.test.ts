@@ -79,7 +79,7 @@ test("database adopts legacy metadata and rejects newer schemas", async () => {
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run("2026-08-12", "2026-08-12", "existing diary", 123, "{}");
-    legacy.exec("DROP TABLE diary_notification_deliveries");
+    legacy.exec("DROP TABLE diary_publications; DROP TABLE diary_notification_deliveries");
     legacy.prepare("UPDATE schema_metadata SET value = '1' WHERE key = 'schema_version'").run();
     legacy.pragma("user_version = 1");
     databaseModule.closeDatabase();
@@ -94,6 +94,16 @@ test("database adopts legacy metadata and rejects newer schemas", async () => {
         .pluck()
         .get("2026-08-12"),
       123,
+    );
+    assert.deepEqual(
+      databaseModule
+        .getDatabase()
+        .prepare("SELECT destination, detail FROM diary_publications ORDER BY destination")
+        .all(),
+      [
+        { destination: "channel", detail: "legacy" },
+        { destination: "github", detail: "legacy" },
+      ],
     );
     databaseModule.closeDatabase();
 
@@ -114,7 +124,7 @@ test("v2 memory migration preserves unknown time and minimum importance, is repe
   const databaseModule = await import("./database.js");
   try {
     const old = databaseModule.initDatabase(databasePath);
-    old.exec("DROP TABLE user_memory_records");
+    old.exec("DROP TABLE diary_publications; DROP TABLE user_memory_records");
     old
       .prepare("INSERT INTO users (firestore_id, uid, nickname, source_json) VALUES (?, ?, ?, ?)")
       .run("firestore-alice", "42", "大姐姐", JSON.stringify({ uid: "42", memories: ["旧事实"] }));

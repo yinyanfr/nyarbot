@@ -1,6 +1,7 @@
 import config from "../configs/env.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import { logger } from "../libs/logger.js";
+import { withTimeout } from "../libs/abort.js";
 
 const API_BASE = config.githubApiBase;
 const API_VERSION = config.githubApiVersion;
@@ -457,9 +458,20 @@ async function waitForGithubPagesPublishWithDependencies(
   pushResult: GithubDiaryPushResult,
   dependencies: GithubDependencies = productionDependencies,
   abortSignal?: AbortSignal,
+  singleCheck = false,
 ): Promise<GithubPagesPublishStatus> {
   const token = dependencies.token;
   if (!token) return { ready: false, state: "skipped", detail: "github_token_missing" };
+  if (singleCheck) {
+    return getPagesDeploymentStatus(
+      pushResult.owner,
+      pushResult.repo,
+      token,
+      pushResult.commitSha,
+      dependencies,
+      withTimeout(abortSignal, 10_000),
+    );
+  }
 
   const deadline = dependencies.now() + dependencies.pagesPollTimeoutMs;
   while (dependencies.now() < deadline) {
@@ -498,8 +510,12 @@ export function createGithubService(overrides: Partial<GithubDependencies> = {})
       options?: { imageAsset?: GithubDiaryImageAsset },
       abortSignal?: AbortSignal,
     ) => pushDiaryToGithubWithDependencies(date, content, options, dependencies, abortSignal),
-    waitForGithubPagesPublish: (pushResult: GithubDiaryPushResult, abortSignal?: AbortSignal) =>
-      waitForGithubPagesPublishWithDependencies(pushResult, dependencies, abortSignal),
+    waitForGithubPagesPublish: (
+      pushResult: GithubDiaryPushResult,
+      abortSignal?: AbortSignal,
+      singleCheck?: boolean,
+    ) =>
+      waitForGithubPagesPublishWithDependencies(pushResult, dependencies, abortSignal, singleCheck),
   };
 }
 

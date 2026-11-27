@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { GrammyError, InputFile } from "grammy";
 
 const requiredEnv = {
   BOT_USERNAME: "test_bot",
@@ -199,6 +200,7 @@ function createProductionDependencies(): {
     sendChatAction(chatId: string, action: string): Promise<unknown>;
     getFile(fileId: string): Promise<{ file_path?: string }>;
     sendPhoto(chatId: string, photo: unknown, options?: unknown): Promise<unknown>;
+    sendDocument(chatId: string, document: InputFile, options?: unknown): Promise<unknown>;
   };
 } {
   const calls: string[] = [];
@@ -227,6 +229,10 @@ function createProductionDependencies(): {
     },
     async sendPhoto(chatId: string, _photo: unknown, options?: unknown) {
       calls.push(`photo:${chatId}:${JSON.stringify(options)}`);
+      return {};
+    },
+    async sendDocument(chatId: string, document: InputFile) {
+      calls.push(`document:${chatId}:${document.filename}`);
       return {};
     },
   };
@@ -278,6 +284,7 @@ function createProductionDependencies(): {
         callbacks.proactive = value;
       },
       stopProactiveChecker: () => void calls.push("proactive.stop"),
+      stopGroupRuntime: async () => void calls.push("runtime.stop"),
       initDiaryCallbacks: (value) => {
         callbacks.diary = value;
       },
@@ -285,6 +292,7 @@ function createProductionDependencies(): {
       initWordcloudCallbacks: (value) => {
         callbacks.wordcloud = value;
       },
+      stopWordcloudService: async () => void calls.push("wordcloud.stop"),
       checkAndGenerateDiary: async () => void calls.push("diary.check"),
       checkAndGenerateWordcloud: () => void calls.push("wordcloud.check"),
       formatForTelegramHtml: (text) => `<b>${text}</b>`,
@@ -348,7 +356,17 @@ test("production callback wiring handles Telegram and persistence failures offli
   let messageFailures = 0;
   fixture.api.sendMessage = async (chatId, text, options) => {
     fixture.sentMessages.push({ chatId, text, ...(options === undefined ? {} : { options }) });
-    if (messageFailures-- > 0) throw new Error("send failed");
+    if (messageFailures-- > 0) {
+      if ((options as { parse_mode?: string } | undefined)?.parse_mode === "HTML") {
+        throw new GrammyError(
+          "send failed",
+          { ok: false, error_code: 400, description: "can't parse entities" },
+          "sendMessage",
+          {},
+        );
+      }
+      throw new Error("send failed");
+    }
     return {};
   };
   fixture.api.sendSticker = async () => Promise.reject(new Error("sticker failed"));
@@ -384,7 +402,7 @@ test("production callback wiring handles Telegram and persistence failures offli
   assert.ok(fixture.calls.includes("warn:proactive: sticker dispatch failed"));
   assert.ok(fixture.calls.includes("warn:proactive: resolveTelegramFileAsDataUrl failed"));
   assert.ok(fixture.calls.includes("warn:diary: runtime bot event persist failed"));
-  assert.ok(fixture.calls.includes("error:diary: channel plain-text publish failed"));
+  assert.ok(fixture.calls.includes("error:diary: channel text publish failed"));
   assert.ok(fixture.calls.includes("error:diary: channel photo publish failed"));
   assert.ok(fixture.calls.includes("error:wordcloud: group photo publish failed"));
 });
@@ -402,6 +420,19 @@ test("production diary callbacks skip channel delivery when no channel is config
   await app.shutdown();
   assert.ok(!fixture.sentMessages.some((message) => message.text.includes("ignored")));
   assert.ok(!fixture.calls.some((call) => call.startsWith("photo:")));
+});
+
+test("channel delivers an oversized diary as a single document", async () => {
+  const fixture = createProductionDependencies();
+  const app = createProductionApplication(fixture.dependencies);
+  await app.start();
+  await fixture.callbacks.diary!.sendChannelText("长".repeat(4097), undefined, "2026-08-11");
+  assert.deepEqual(fixture.sentMessages, []);
+  assert.deepEqual(
+    fixture.calls.filter((call) => call.startsWith("document:")),
+    ["document:-2:2026-08-11-diary.txt"],
+  );
+  await app.shutdown();
 });
 
 test("production default application adapters are offline-safe", async () => {

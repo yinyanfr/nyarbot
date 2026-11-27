@@ -1,4 +1,5 @@
 import { Bot, InputFile } from "grammy";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Message } from "grammy/types";
 import config from "../configs/env.js";
 import {
@@ -48,13 +49,18 @@ import { extractContent } from "./extract-content.js";
 import type { MediaRef } from "./extract-content.js";
 import { replyAndTrack } from "./reply-and-track.js";
 import { isDuplicateUpdate } from "./update-dedup.js";
-import { formatForTelegramHtml } from "../libs/format-telegram.js";
+import {
+  formatForTelegramHtml,
+  splitTelegramText,
+  telegramMessageParts,
+} from "../libs/format-telegram.js";
 import { getPersonaLabel } from "../libs/persona.js";
 import { downloadTelegramFileAsDataUrl } from "../libs/telegram-image.js";
 import { groupRuntime } from "../libs/group-runtime.js";
 import type { DiaryObservationDraft } from "../libs/diary-observations.js";
 import { decideLocalAiRoute } from "./ai-routing.js";
 import { getDismissRetryCount } from "./ai-dispatch.js";
+import { telegramSignal } from "../libs/abort.js";
 import {
   formatRollResult,
   parseRollCommand,
@@ -133,17 +139,19 @@ async function sendTextMessageWithReplyFallback(params: {
   ctx: BotContext;
   chatId: number;
   text: string;
-  formatted: string;
+  formatted?: string;
   replyToMessageId?: number;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { ctx, chatId, text, formatted, replyToMessageId } = params;
+  const { ctx, chatId, text, formatted, replyToMessageId, signal } = params;
 
   const sendPlain = async (withReply: boolean): Promise<void> => {
     const sendParams: Record<string, unknown> = {};
     if (withReply && replyToMessageId !== undefined) {
       sendParams.reply_parameters = { message_id: replyToMessageId };
     }
-    await ctx.api.sendMessage(chatId, text, sendParams);
+    signal?.throwIfAborted();
+    await ctx.api.sendMessage(chatId, text, sendParams, telegramSignal(signal));
   };
 
   try {
@@ -151,8 +159,10 @@ async function sendTextMessageWithReplyFallback(params: {
     if (replyToMessageId !== undefined) {
       sendParams.reply_parameters = { message_id: replyToMessageId };
     }
-    await ctx.api.sendMessage(chatId, formatted, sendParams);
-    return;
+    if (formatted !== undefined) {
+      await ctx.api.sendMessage(chatId, formatted, sendParams, telegramSignal(signal));
+      return;
+    }
   } catch (err) {
     if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
       logger.info(
@@ -160,7 +170,12 @@ async function sendTextMessageWithReplyFallback(params: {
         "sendAiMessages: reply target missing, retrying without reply",
       );
       try {
-        await ctx.api.sendMessage(chatId, formatted, { parse_mode: "HTML" });
+        await ctx.api.sendMessage(
+          chatId,
+          formatted!,
+          { parse_mode: "HTML" },
+          telegramSignal(signal),
+        );
         return;
       } catch {
         await sendPlain(false);
@@ -189,23 +204,29 @@ async function sendStickerWithReplyFallback(params: {
   chatId: number;
   stickerFileId: string;
   replyToMessageId?: number;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { ctx, chatId, stickerFileId, replyToMessageId } = params;
+  const { ctx, chatId, stickerFileId, replyToMessageId, signal } = params;
   try {
     if (replyToMessageId === undefined) {
-      await ctx.api.sendSticker(chatId, stickerFileId);
+      await ctx.api.sendSticker(chatId, stickerFileId, undefined, telegramSignal(signal));
       return;
     }
-    await ctx.api.sendSticker(chatId, stickerFileId, {
-      reply_parameters: { message_id: replyToMessageId },
-    });
+    await ctx.api.sendSticker(
+      chatId,
+      stickerFileId,
+      {
+        reply_parameters: { message_id: replyToMessageId },
+      },
+      telegramSignal(signal),
+    );
   } catch (err) {
     if (isReplyTargetMissingError(err) && replyToMessageId !== undefined) {
       logger.info(
         { replyToMessageId },
         "sendAiMessages: sticker reply target missing, retrying without reply",
       );
-      await ctx.api.sendSticker(chatId, stickerFileId);
+      await ctx.api.sendSticker(chatId, stickerFileId, undefined, telegramSignal(signal));
       return;
     }
     throw err;
@@ -536,7 +557,7 @@ export interface AiTurnDependencies {
   formatForTelegramHtml: typeof formatForTelegramHtml;
   replyAndTrack: typeof replyAndTrack;
   runtime: Pick<typeof groupRuntime, "loadContext" | "recordBotMessages" | "recordTurn">;
-  delay: (ms: number) => Promise<void>;
+  delay: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const defaultAiTurnDependencies: AiTurnDependencies = {
@@ -554,7 +575,7 @@ const defaultAiTurnDependencies: AiTurnDependencies = {
   formatForTelegramHtml,
   replyAndTrack,
   runtime: groupRuntime,
-  delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  delay: (ms, signal) => sleep(ms, undefined, { signal }),
 };
 
 async function sendAiMessages(
@@ -564,10 +585,11 @@ async function sendAiMessages(
     replyToMessageId: number;
     messages: string[];
     stickerFileId: string | null;
+    signal?: AbortSignal;
   },
   dependencies: AiTurnDependencies,
 ): Promise<{ messages: string[]; stickerFileId: string | null }> {
-  const { ctx, chatId, replyToMessageId, messages, stickerFileId } = params;
+  const { ctx, chatId, replyToMessageId, messages, stickerFileId, signal } = params;
   const sentMessages: string[] = [];
   let sentStickerFileId: string | null = null;
 
@@ -603,6 +625,7 @@ async function sendAiMessages(
           chatId,
           stickerFileId,
           replyToMessageId,
+          ...(signal ? { signal } : {}),
         });
         sentStickerFileId = stickerFileId;
         await trackSticker(stickerFileId);
@@ -621,15 +644,20 @@ async function sendAiMessages(
     const formatted = dependencies.formatForTelegramHtml(text);
 
     try {
-      await sendTextMessageWithReplyFallback({
-        ctx,
-        chatId,
-        text,
-        formatted,
-        ...(i === 0 ? { replyToMessageId } : {}),
-      });
-      sentMessages.push(text);
-      await trackText(text);
+      const parts = telegramMessageParts(text, formatted);
+      for (const [index, part] of parts.entries()) {
+        signal?.throwIfAborted();
+        await sendTextMessageWithReplyFallback({
+          ctx,
+          chatId,
+          text: part.text,
+          ...(part.html !== undefined ? { formatted: part.html } : {}),
+          ...(i === 0 && index === 0 ? { replyToMessageId } : {}),
+          ...(signal ? { signal } : {}),
+        });
+        sentMessages.push(part.text);
+        await trackText(part.text);
+      }
     } catch (err) {
       logger.warn({ err, i }, "sendAiMessages: failed to send message");
       textDispatchFailed = true;
@@ -638,14 +666,14 @@ async function sendAiMessages(
 
     // Stagger messages to mimic human typing rhythm, but not after the last one
     if (i < messages.length - 1) {
-      await dependencies.delay(MESSAGE_DELAY_MS);
+      await dependencies.delay(MESSAGE_DELAY_MS, signal);
     }
   }
 
   // Dispatch sticker after all text messages, if any
   if (stickerFileId && !textDispatchFailed) {
     try {
-      await ctx.api.sendSticker(chatId, stickerFileId);
+      await ctx.api.sendSticker(chatId, stickerFileId, undefined, telegramSignal(signal));
       sentStickerFileId = stickerFileId;
       await trackSticker(stickerFileId);
     } catch (err) {
@@ -688,6 +716,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
     memoryCandidateHints?: string[];
     forceReply?: boolean;
     dismissFallbackMessages?: string[];
+    abortSignal?: AbortSignal;
   }): Promise<void> {
     const {
       ctx,
@@ -707,6 +736,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
       memoryCandidateHints,
       forceReply,
       dismissFallbackMessages,
+      abortSignal,
     } = params;
 
     const chatId = ctx.chatId;
@@ -715,72 +745,81 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
     // Signal "typing..." while the AI generates.
     // Because DeepSeek can take 10-20s, refresh the typing action every 4.5s.
     const typingTimer = setInterval(() => {
-      ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+      ctx.api
+        .sendChatAction(chatId, "typing", undefined, telegramSignal(abortSignal))
+        .catch(() => void 0);
     }, 4500);
-    await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
-
-    const history = dependencies.getHistory(config.tgGroupId);
-    const runtimeContext = await dependencies.runtime.loadContext().catch((err: unknown) => {
-      logger.warn({ err }, "load runtime context failed, falling back to buffer");
-      return null;
-    });
-    const recentConversation =
-      runtimeContext?.recentEventsText || dependencies.formatHistoryAsContext(history);
-    const { recentMembers } = collectRecentMembers(config.tgGroupId, dependencies.getHistory);
-    if (!recentMembers.some((m) => m.uid === user.uid)) {
-      recentMembers.push({
-        uid: user.uid,
-        name: user.nickname || "大哥哥",
-        ...(senderUsername ? { username: senderUsername } : {}),
-      });
-    }
-    const replyTo = ctx.msg?.reply_to_message;
-    if (replyTo) {
-      const sender = getMessageSender(replyTo);
-      const replyUid = sender.uid;
-      if (
-        (replyTo.sender_chat || replyTo.from?.id !== ctx.me.id) &&
-        replyUid &&
-        !recentMembers.some((m) => m.uid === replyUid)
-      ) {
-        recentMembers.push(sender);
-      }
-    }
-
-    const recentBotMessages = collectRecentBotMessages(
-      config.tgGroupId,
-      5,
-      dependencies.getHistory,
-    );
-
-    const localRoute = decideLocalAiRoute({
-      rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
-      isMentioned,
-      isRepliedToBot,
-      urls: urls ?? [],
-      mediaRefs: (mediaRefs ?? []) as MediaRef[],
-    });
-    const { tier, needsSearch } = localRoute ?? (await dependencies.classifyMessage(userMessage));
-    if (localRoute) {
-      logger.info(
-        {
-          tier: localRoute.tier,
-          needsSearch: localRoute.needsSearch,
-          preferAdvisor: localRoute.preferAdvisor,
-          allowPersistentTools: localRoute.allowPersistentTools,
-          reason: localRoute.reason,
-        },
-        "handleAiTurn: applied local AI routing",
-      );
-    }
-    const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
-
     try {
-      const resolveTelegramFileAsDataUrl = async (fileId: string): Promise<string | null> => {
+      abortSignal?.throwIfAborted();
+      await ctx.api
+        .sendChatAction(chatId, "typing", undefined, telegramSignal(abortSignal))
+        .catch(() => void 0);
+
+      const history = dependencies.getHistory(config.tgGroupId);
+      const runtimeContext = await dependencies.runtime.loadContext().catch((err: unknown) => {
+        logger.warn({ err }, "load runtime context failed, falling back to buffer");
+        return null;
+      });
+      const recentConversation =
+        runtimeContext?.recentEventsText || dependencies.formatHistoryAsContext(history);
+      const { recentMembers } = collectRecentMembers(config.tgGroupId, dependencies.getHistory);
+      if (!recentMembers.some((m) => m.uid === user.uid)) {
+        recentMembers.push({
+          uid: user.uid,
+          name: user.nickname || "大哥哥",
+          ...(senderUsername ? { username: senderUsername } : {}),
+        });
+      }
+      const replyTo = ctx.msg?.reply_to_message;
+      if (replyTo) {
+        const sender = getMessageSender(replyTo);
+        const replyUid = sender.uid;
+        if (
+          (replyTo.sender_chat || replyTo.from?.id !== ctx.me.id) &&
+          replyUid &&
+          !recentMembers.some((m) => m.uid === replyUid)
+        ) {
+          recentMembers.push(sender);
+        }
+      }
+
+      const recentBotMessages = collectRecentBotMessages(
+        config.tgGroupId,
+        5,
+        dependencies.getHistory,
+      );
+
+      const localRoute = decideLocalAiRoute({
+        rawText: ctx.msg?.text ?? ctx.msg?.caption ?? "",
+        isMentioned,
+        isRepliedToBot,
+        urls: urls ?? [],
+        mediaRefs: (mediaRefs ?? []) as MediaRef[],
+      });
+      const { tier, needsSearch } =
+        localRoute ?? (await dependencies.classifyMessage(userMessage, undefined, abortSignal));
+      if (localRoute) {
+        logger.info(
+          {
+            tier: localRoute.tier,
+            needsSearch: localRoute.needsSearch,
+            preferAdvisor: localRoute.preferAdvisor,
+            allowPersistentTools: localRoute.allowPersistentTools,
+            reason: localRoute.reason,
+          },
+          "handleAiTurn: applied local AI routing",
+        );
+      }
+      const isTriggered = isMentioned || isRepliedToBot || forceReply === true;
+
+      const resolveTelegramFileAsDataUrl = async (
+        fileId: string,
+        signal?: AbortSignal,
+      ): Promise<string | null> => {
         try {
-          const file = await ctx.api.getFile(fileId);
+          const file = await ctx.api.getFile(fileId, telegramSignal(signal));
           if (!file.file_path) return null;
-          return await dependencies.downloadTelegramFileAsDataUrl(file.file_path);
+          return await dependencies.downloadTelegramFileAsDataUrl(file.file_path, signal);
         } catch (err) {
           logger.warn({ err, fileId }, "resolveTelegramFileAsDataUrl failed");
           return null;
@@ -812,6 +851,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
         ...(allowMediaTools != null ? { allowMediaTools } : {}),
         ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
         isRetryTurn: false,
+        ...(abortSignal ? { abortSignal } : {}),
         allowPersistentTools: localRoute?.allowPersistentTools ?? true,
         ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
       });
@@ -836,7 +876,9 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
           retries++;
           logger.info({ retries, tier }, "handleAiTurn: dismissing, retrying");
 
-          await ctx.api.sendChatAction(chatId, "typing").catch(() => void 0);
+          await ctx.api
+            .sendChatAction(chatId, "typing", undefined, telegramSignal(abortSignal))
+            .catch(() => void 0);
 
           currentHint = currentHint
             ? `${currentHint}\n${MANDATORY_REPLY_HINT}`
@@ -864,6 +906,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
             ...(allowMediaTools != null ? { allowMediaTools } : {}),
             ...(memoryCandidateHints?.length ? { memoryCandidateHints } : {}),
             isRetryTurn: true,
+            ...(abortSignal ? { abortSignal } : {}),
             allowPersistentTools: localRoute?.allowPersistentTools ?? true,
             ...(localRoute?.preferAdvisor ? { preferAdvisor: true } : {}),
           });
@@ -894,6 +937,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
                 replyToMessageId,
                 messages: dismissFallbackMessages,
                 stickerFileId: null,
+                ...(abortSignal ? { signal: abortSignal } : {}),
               },
               dependencies,
             );
@@ -905,8 +949,9 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
               recentMembers,
               recentBotMessages,
               rawDraft: result.rawText,
+              ...(abortSignal ? { abortSignal } : {}),
             });
-            const fallbackMessages = rescued?.messages.length ? rescued.messages : [result.rawText];
+            const fallbackMessages = rescued?.messages ?? [];
             if (rescued?.messages.length) {
               finalFallbackToolCalls = [...finalFallbackToolCalls, ...rescued.toolCalls];
               logger.info(
@@ -926,6 +971,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
                 stickerFileId: rescued?.messages.length
                   ? null
                   : dependencies.getStickerFileId(fallbackEmoji),
+                ...(abortSignal ? { signal: abortSignal } : {}),
               },
               dependencies,
             );
@@ -938,6 +984,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
                 replyToMessageId,
                 messages: [],
                 stickerFileId,
+                ...(abortSignal ? { signal: abortSignal } : {}),
               },
               dependencies,
             );
@@ -1013,6 +1060,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
           replyToMessageId,
           messages: result.messages,
           stickerFileId: result.stickerFileId,
+          ...(abortSignal ? { signal: abortSignal } : {}),
         },
         dependencies,
       );
@@ -1039,7 +1087,7 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
         ...(result.metrics?.latencyMs != null ? { latencyMs: result.metrics.latencyMs } : {}),
       });
     } catch (err) {
-      clearInterval(typingTimer);
+      if (abortSignal?.aborted) return;
       logger.error({ err }, "handleAiTurn: AI turn failed");
       await dependencies.replyAndTrack(ctx, "呜喵...出了点问题喵...", replyToMessageId);
       await dependencies.runtime.recordTurn({
@@ -1053,6 +1101,8 @@ export function createHandleAiTurn(dependencies: AiTurnDependencies = defaultAiT
         messages: [],
         error: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      clearInterval(typingTimer);
     }
   };
 }
@@ -1194,6 +1244,42 @@ export function setupHandlers(
   const botUsername = botInfo.username || config.botUsername;
   const botId = botInfo.id;
 
+  async function queueCommand(
+    ctx: BotContext,
+    messageId: number,
+    turn: Parameters<HandlerDependencies["runtime"]["scheduleCommandTurn"]>[0],
+  ): Promise<void> {
+    const accepted = dependencies.runtime.scheduleCommandTurn({
+      ...turn,
+      onExpired: (signal) =>
+        dependencies.replyAndTrack(
+          ctx,
+          "刚才排队太久了，可以再试一次喵。",
+          messageId,
+          false,
+          "normal",
+          signal,
+        ),
+    });
+    if (!accepted) await dependencies.replyAndTrack(ctx, "现在有点忙，稍后再试喵。", messageId);
+  }
+
+  function queueReply(
+    ctx: BotContext,
+    messageId: number,
+    kind: "command_love" | "command_shock" | "command_stroke",
+    generate: (signal: AbortSignal) => Promise<string>,
+  ): Promise<void> {
+    return queueCommand(ctx, messageId, {
+      label: `${kind}:${messageId}`,
+      async execute(signal) {
+        const text = await generate(signal);
+        signal.throwIfAborted();
+        await dependencies.replyAndTrack(ctx, text, messageId, true, kind, signal);
+      },
+    });
+  }
+
   bot.use(async (ctx, next) => {
     const groupUpdate = ctx.update.message ?? ctx.update.edited_message;
     if (groupUpdate?.chat.id.toString() !== config.tgGroupId) {
@@ -1246,7 +1332,7 @@ export function setupHandlers(
             await ctx.reply("今天还没有日记记录喵~");
             return;
           }
-          await ctx.reply(diary);
+          for (const part of splitTelegramText(diary)) await ctx.reply(part);
         } catch (err) {
           logger.error({ err }, "private /diary failed");
           await ctx.reply("生成日记时出错了喵...").catch(() => void 0);
@@ -1281,7 +1367,8 @@ export function setupHandlers(
         const date = privText.replace(/^\/diaryobs(?:@\w+)?\s*/u, "").trim() || todayDateStr();
         try {
           const observations = await dependencies.listDiaryObservationsByDate(date);
-          await ctx.reply(formatDiaryObservationSummary(date, observations));
+          for (const part of splitTelegramText(formatDiaryObservationSummary(date, observations)))
+            await ctx.reply(part);
         } catch (err) {
           logger.error({ err, date }, "private /diaryobs failed");
           await ctx.reply("查看 observation 失败了喵...").catch(() => void 0);
@@ -1356,7 +1443,8 @@ export function setupHandlers(
             await ctx.reply("没找到这条 observation").catch(() => void 0);
             return;
           }
-          await ctx.reply(JSON.stringify(item, null, 2)).catch(() => void 0);
+          for (const part of splitTelegramText(JSON.stringify(item, null, 2)))
+            await ctx.reply(part);
         } catch (err) {
           logger.error({ err, targetId }, "private /diaryshow failed");
           await ctx.reply("查看 observation 详情失败了喵...").catch(() => void 0);
@@ -1365,21 +1453,35 @@ export function setupHandlers(
       }
 
       if (matchCommand(privEntities, privText, "/diaryretry", botUsername)) {
-        const date =
-          privText.replace(/^\/diaryretry(?:@\w+)?\s*/u, "").trim() || yesterdayDateStr();
-        await ctx.reply(`正在补生成并发布日记 ${date}...`).catch(() => void 0);
+        const args = privText.replace(/^\/diaryretry(?:@\w+)?\s*/u, "").trim();
+        const [date = yesterdayDateStr(), destination, ...extra] = args ? args.split(/\s+/u) : [];
+        const usage =
+          "用法: /diaryretry [YYYY-MM-DD [channel|github]]，日期须为昨天或更早，默认昨天。";
+        if (
+          extra.length ||
+          (destination !== undefined && destination !== "channel" && destination !== "github")
+        ) {
+          await ctx.reply(usage).catch(() => void 0);
+          return;
+        }
+        await ctx.reply(`正在补生成或补发日记 ${date}...`).catch(() => void 0);
         try {
-          const result = await dependencies.retryAndPublishDiary(date);
+          const result = await dependencies.retryAndPublishDiary(date, destination);
           const messages = {
-            published: `${date} 日记已生成、保存，并完成配置的发布流程。`,
+            published: destination
+              ? `${date} 日记的 ${destination} 发布已完成。`
+              : `${date} 日记已保存，并完成配置的发布流程。`,
             no_material: "这一天没有可用的日记素材，未生成或发布。",
             failed: "日记生成失败，未发布；可稍后再次使用 /diaryretry 重试。",
             publish_incomplete:
-              "日记流程未全部完成，请检查日志；如已保存日记，将不会重复生成或发布。",
-            invalid_date: "用法: /diaryretry [YYYY-MM-DD]，仅支持昨天及更早的有效日期，默认昨天。",
+              "日记流程未全部完成，请检查日志；可再次使用 /diaryretry 补齐未完成的发布。",
+            invalid_date: usage,
             busy: "日记任务正在执行，请完成后再试。",
-            already_generated:
-              "这一天已有保存的日记，不会覆盖或重复发布；未发送的群通知由定时任务补发。",
+            already_generated: "这一天的日记已保存并发布，无需重复发布。",
+            legacy_unverified:
+              "这一天已有历史日记，但旧版本未记录完整发布状态。请先核对；确认缺失后，可指定 channel 或 github 补发。",
+            destination_unconfigured: "这个发布目的地未配置。",
+            no_saved_diary: "这一天还没有保存的日记，请先不指定目的地运行 /diaryretry。",
             stopped: "日记发布服务未就绪或已停止。",
           };
           await ctx.reply(messages[result]).catch(() => void 0);
@@ -1395,7 +1497,8 @@ export function setupHandlers(
         await ctx.reply(`正在重生日记 ${date}...`).catch(() => void 0);
         try {
           const diary = await dependencies.generateDiaryForDate(date);
-          await ctx.reply(diary ?? "生成失败或返回空内容").catch(() => void 0);
+          for (const part of splitTelegramText(diary ?? "生成失败或返回空内容"))
+            await ctx.reply(part);
         } catch (err) {
           logger.error({ err, date }, "private /diaryregen failed");
           await ctx.reply("重生日记失败了喵...").catch(() => void 0);
@@ -1460,8 +1563,7 @@ export function setupHandlers(
 
       await dependencies.replyAndTrack(ctx, resultText, msg.message_id, false, "command_roll");
 
-      const releaseRollActivity = dependencies.runtime.beginIncomingActivity();
-      void (async () => {
+      try {
         const sender = getMessageSender(msg);
         const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
         const displayName = msg.sender_chat ? sender.name : user.nickname || sender.name;
@@ -1507,6 +1609,7 @@ export function setupHandlers(
           ts: Date.now(),
           triggered: true,
         });
+        if (!runtimeDecision.allowAiTrigger) return;
 
         const userMessage = buildUserMessage({
           rawText,
@@ -1519,9 +1622,9 @@ export function setupHandlers(
           urls,
         });
 
-        dependencies.runtime.scheduleCommandTurn({
+        await queueCommand(ctx, msg.message_id, {
           label: `roll:${msg.message_id}`,
-          execute: () =>
+          execute: (abortSignal) =>
             dependencies.handleAiTurn({
               ctx,
               replyToMessageId: msg.message_id,
@@ -1541,13 +1644,12 @@ export function setupHandlers(
               allowMediaTools: runtimeDecision.allowMediaTools,
               forceReply: true,
               dismissFallbackMessages,
+              abortSignal,
             }),
         });
-      })()
-        .catch((err: unknown) => {
-          logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
-        })
-        .finally(releaseRollActivity);
+      } catch (err) {
+        logger.warn({ err, messageId: msg.message_id }, "failed to schedule /roll follow-up");
+      }
       return;
     }
 
@@ -1595,6 +1697,9 @@ export function setupHandlers(
       ...(replyToInfo ? { replyToInfo } : {}),
     });
     const isCommandMessage = isCommandLikeMessage(entities);
+    const isLoveCommand = matchCommand(entities, rawText, "/love", botUsername);
+    const shockArgs = parseShockCommand(entities, rawText, botUsername);
+    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
     if (!from.is_bot && !isCommandMessage) {
       await persistWordcloudMessage(
         {
@@ -1636,7 +1741,7 @@ export function setupHandlers(
           }
         : {}),
       ts: Date.now(),
-      triggered: isMentioned || isRepliedToBot,
+      triggered: isMentioned || isRepliedToBot || isLoveCommand || !!shockArgs || !!strokeArgs,
     });
 
     if (bufferLine && runtimeDecision.accepted) {
@@ -1673,23 +1778,27 @@ export function setupHandlers(
     }
 
     // 6. /love — public
-    if (matchCommand(entities, rawText, "/love", botUsername)) {
-      const rejection = await dependencies.generateLoveResponse(user);
-      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+    if (isLoveCommand) {
+      if (runtimeDecision.allowAiTrigger)
+        await queueReply(ctx, msg.message_id, "command_love", (signal) =>
+          dependencies.generateLoveResponse(user, undefined, signal),
+        );
       return;
     }
 
-    const shockArgs = parseShockCommand(entities, rawText, botUsername);
     if (shockArgs) {
-      const shocked = await dependencies.generateShockResponse(user, shockArgs);
-      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
+      if (runtimeDecision.allowAiTrigger)
+        await queueReply(ctx, msg.message_id, "command_shock", (signal) =>
+          dependencies.generateShockResponse(user, shockArgs, undefined, signal),
+        );
       return;
     }
 
-    const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
     if (strokeArgs) {
-      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
-      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
+      if (runtimeDecision.allowAiTrigger)
+        await queueReply(ctx, msg.message_id, "command_stroke", (signal) =>
+          dependencies.generateStrokeResponse(user, strokeArgs, undefined, signal),
+        );
       return;
     }
 
@@ -1767,8 +1876,9 @@ export function setupHandlers(
 
     // 12. Love confession → memory-based affection scoring
     if (LOVE_REGEX.test(rawText)) {
-      const rejection = await dependencies.generateLoveResponse(user);
-      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
+      await queueReply(ctx, msg.message_id, "command_love", (signal) =>
+        dependencies.generateLoveResponse(user, undefined, signal),
+      );
       return;
     }
 
@@ -1787,7 +1897,7 @@ export function setupHandlers(
 
     dependencies.runtime.schedulePassiveTurn({
       label: `message:${msg.message_id}`,
-      execute: () =>
+      execute: (abortSignal) =>
         dependencies.handleAiTurn({
           ctx,
           replyToMessageId: msg.message_id,
@@ -1805,6 +1915,7 @@ export function setupHandlers(
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          abortSignal,
           ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });
@@ -1877,14 +1988,7 @@ export function setupHandlers(
     });
 
     const strokeArgs = parseStrokeCommand(entities, rawText, botUsername);
-    if (strokeArgs) {
-      const user = await dependencies.getOrCreateUser(from.id.toString(), from.first_name);
-      const stroked = await dependencies.generateStrokeResponse(user, strokeArgs);
-      await dependencies.replyAndTrack(ctx, stroked, msg.message_id, true, "command_stroke");
-      return;
-    }
-
-    if (!isMentioned && !isRepliedToBot) return;
+    if (!isMentioned && !isRepliedToBot && !strokeArgs) return;
 
     const sender = getMessageSender(msg);
     const user = await dependencies.getOrCreateUser(sender.uid, sender.name);
@@ -1937,7 +2041,7 @@ export function setupHandlers(
           }
         : {}),
       ts: Date.now(),
-      triggered: isMentioned || isRepliedToBot,
+      triggered: isMentioned || isRepliedToBot || !!strokeArgs,
     });
     if (runtimeDecision.ignoredReason === "non_content_edit") return;
 
@@ -1953,20 +2057,6 @@ export function setupHandlers(
       );
     }
 
-    // Love confession in edit
-    if (LOVE_REGEX.test(rawText)) {
-      const rejection = await dependencies.generateLoveResponse(user);
-      await dependencies.replyAndTrack(ctx, rejection, msg.message_id, true, "command_love");
-      return;
-    }
-
-    const shockArgs = parseShockCommand(entities, rawText, botUsername);
-    if (shockArgs) {
-      const shocked = await dependencies.generateShockResponse(user, shockArgs);
-      await dependencies.replyAndTrack(ctx, shocked, msg.message_id, true, "command_shock");
-      return;
-    }
-
     if (!runtimeDecision.allowAiTrigger) {
       logger.info(
         {
@@ -1974,6 +2064,26 @@ export function setupHandlers(
           runtimeStatus: runtimeDecision.lateBindingStatus,
         },
         "runtime blocked edited-message AI trigger",
+      );
+      return;
+    }
+
+    if (strokeArgs) {
+      await queueReply(ctx, msg.message_id, "command_stroke", (signal) =>
+        dependencies.generateStrokeResponse(user, strokeArgs, undefined, signal),
+      );
+      return;
+    }
+    if (LOVE_REGEX.test(rawText)) {
+      await queueReply(ctx, msg.message_id, "command_love", (signal) =>
+        dependencies.generateLoveResponse(user, undefined, signal),
+      );
+      return;
+    }
+    const shockArgs = parseShockCommand(entities, rawText, botUsername);
+    if (shockArgs) {
+      await queueReply(ctx, msg.message_id, "command_shock", (signal) =>
+        dependencies.generateShockResponse(user, shockArgs, undefined, signal),
       );
       return;
     }
@@ -1994,7 +2104,7 @@ export function setupHandlers(
 
     dependencies.runtime.schedulePassiveTurn({
       label: `edited:${msg.message_id}`,
-      execute: () =>
+      execute: (abortSignal) =>
         dependencies.handleAiTurn({
           ctx,
           replyToMessageId: msg.message_id,
@@ -2012,6 +2122,7 @@ export function setupHandlers(
             : {}),
           allowWebSearch: runtimeDecision.allowWebSearch,
           allowMediaTools: runtimeDecision.allowMediaTools,
+          abortSignal,
           ...(memoryCandidateHints.length ? { memoryCandidateHints } : {}),
         }),
     });

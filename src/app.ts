@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { pathToFileURL } from "node:url";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import { autoRetry } from "@grammyjs/auto-retry";
 import { setupHandlers } from "./handlers/index.js";
 import config from "./configs/env.js";
@@ -9,10 +9,14 @@ import { startMemoryEmbeddingIndex } from "./services/memory-embeddings.js";
 import { startProactiveChecker, stopProactiveChecker, touchBotActivity } from "./libs/proactive.js";
 import type { ProactiveCallbacks } from "./libs/proactive.js";
 import { logger, initAdminNotify } from "./libs/logger.js";
-import { formatForTelegramHtml } from "./libs/format-telegram.js";
+import { formatForTelegramHtml, telegramMessageParts } from "./libs/format-telegram.js";
 import { checkAndGenerateDiary, initDiaryCallbacks, stopDiaryService } from "./libs/diary.js";
 import type { DiaryCallbacks } from "./libs/diary.js";
-import { checkAndGenerateWordcloud, initWordcloudCallbacks } from "./libs/wordcloud.js";
+import {
+  checkAndGenerateWordcloud,
+  initWordcloudCallbacks,
+  stopWordcloudService,
+} from "./libs/wordcloud.js";
 import type { WordcloudCallbacks } from "./libs/wordcloud.js";
 import { saveConversationBuffer, loadConversationBuffer } from "./libs/conversation-buffer.js";
 import { pushMessage, type HistoryEntryKind } from "./libs/conversation-buffer.js";
@@ -20,6 +24,7 @@ import { groupRuntime } from "./libs/group-runtime.js";
 import { downloadTelegramFileAsDataUrl } from "./libs/telegram-image.js";
 import { closeVideoReader } from "./libs/video.js";
 import { DatabaseBackupService } from "./libs/database-backup.js";
+import { telegramSignal } from "./libs/abort.js";
 
 type BotContext = import("./handlers/context.js").BotContext;
 
@@ -54,6 +59,7 @@ export function createApplication(dependencies: ApplicationDependencies): {
   let activeMiddleware = 0;
   let resolveMiddlewareDrain: (() => void) | undefined;
   let shuttingDown = false;
+  let shutdownPromise: Promise<void> | undefined;
   let started = false;
 
   dependencies.bot.use(async (_ctx, next) => {
@@ -72,57 +78,51 @@ export function createApplication(dependencies: ApplicationDependencies): {
       started = true;
       const database = dependencies.initDatabase();
       await dependencies.bot.init();
+      if (shuttingDown) return;
       const botInfo = dependencies.bot.botInfo;
       dependencies.logStarting(botInfo.username);
       await dependencies.prepareServices(database);
+      if (shuttingDown) return;
       dependencies.setupHandlers(botInfo);
       await dependencies.loadConversationBuffer();
+      if (shuttingDown) return;
       await dependencies.startBackgroundServices(database);
+      if (shuttingDown) return;
       await dependencies.bot.start({
         onStart(info) {
           dependencies.logPolling(info.username);
         },
       });
     },
-    async shutdown(): Promise<void> {
-      if (shuttingDown) return;
+    shutdown(): Promise<void> {
+      if (shutdownPromise) return shutdownPromise;
       shuttingDown = true;
-      await dependencies.stopBackgroundServices();
-      await dependencies.bot.stop();
-      if (activeMiddleware > 0) {
-        await new Promise<void>((resolve) => {
-          resolveMiddlewareDrain = resolve;
-        });
-        resolveMiddlewareDrain = undefined;
-      }
-      await dependencies.closeBackgroundServices();
-      await dependencies.closeVideoReader();
-      await dependencies.saveConversationBuffer().catch(() => void 0);
-      dependencies.closeDatabase();
+      shutdownPromise = (async () => {
+        const stopping = await Promise.allSettled([
+          dependencies.stopBackgroundServices(),
+          dependencies.bot.stop(),
+        ]);
+        if (activeMiddleware > 0) {
+          await new Promise<void>((resolve) => {
+            resolveMiddlewareDrain = resolve;
+          });
+          resolveMiddlewareDrain = undefined;
+        }
+        const closing = await Promise.allSettled([
+          dependencies.closeBackgroundServices(),
+          dependencies.closeVideoReader(),
+        ]);
+        await dependencies.saveConversationBuffer().catch(() => void 0);
+        dependencies.closeDatabase();
+        const failure = [...stopping, ...closing].find((result) => result.status === "rejected");
+        if (failure) throw failure.reason;
+      })();
+      return shutdownPromise;
     },
   };
 }
 
 type TimerHandle = ReturnType<typeof setInterval>;
-
-function waitForAbort<T>(promise: Promise<T>, abortSignal?: AbortSignal): Promise<T> {
-  if (!abortSignal) return promise;
-  abortSignal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(abortSignal.reason);
-    abortSignal.addEventListener("abort", abort, { once: true });
-    promise.then(
-      (value) => {
-        abortSignal.removeEventListener("abort", abort);
-        resolve(value);
-      },
-      (err: unknown) => {
-        abortSignal.removeEventListener("abort", abort);
-        reject(err);
-      },
-    );
-  });
-}
 
 interface BackgroundCloser {
   start(): void;
@@ -146,13 +146,15 @@ export interface ProductionApplicationDependencies {
   ): BackgroundCloser;
   startProactiveChecker(callbacks: ProactiveCallbacks): void;
   stopProactiveChecker(): void;
+  stopGroupRuntime(): Promise<void>;
   initDiaryCallbacks(callbacks: DiaryCallbacks): void;
   stopDiaryService(): Promise<void>;
   initWordcloudCallbacks(callbacks: WordcloudCallbacks): void;
+  stopWordcloudService(): Promise<void>;
   checkAndGenerateDiary(): Promise<unknown>;
   checkAndGenerateWordcloud(): void;
   formatForTelegramHtml(text: string): string;
-  downloadTelegramFileAsDataUrl(filePath: string): Promise<string | null>;
+  downloadTelegramFileAsDataUrl(filePath: string, signal?: AbortSignal): Promise<string | null>;
   pushMessage: typeof pushMessage;
   recordBotMessages(messages: string[]): Promise<unknown>;
   touchBotActivity(): void;
@@ -169,6 +171,15 @@ export const productionApplicationDependencies: ProductionApplicationDependencie
     new Bot<BotContext>(apiKey, { client: { apiRoot } }),
   configureBot: (bot) => {
     bot.api.config.use(autoRetry({ maxRetryAttempts: 3, maxDelaySeconds: 10 }));
+    bot.catch(({ error, ctx }) => {
+      logger.error(
+        {
+          updateId: ctx.update.update_id,
+          errorType: error instanceof Error ? error.name : typeof error,
+        },
+        "Telegram update handling failed",
+      );
+    });
   },
   initDatabase,
   setupHandlers,
@@ -189,9 +200,11 @@ export const productionApplicationDependencies: ProductionApplicationDependencie
     }),
   startProactiveChecker,
   stopProactiveChecker,
+  stopGroupRuntime: () => groupRuntime.close(),
   initDiaryCallbacks,
   stopDiaryService,
   initWordcloudCallbacks,
+  stopWordcloudService,
   checkAndGenerateDiary,
   checkAndGenerateWordcloud,
   formatForTelegramHtml,
@@ -218,6 +231,41 @@ export function createProductionApplication(
   let bufferSaveTimer: TimerHandle | undefined;
   let databaseBackup: BackgroundCloser | undefined;
   let memoryEmbeddingIndex: Pick<BackgroundCloser, "close"> | undefined;
+  let bufferSave: Promise<void> | undefined;
+
+  async function sendFormatted(
+    chatId: string,
+    text: string,
+    signal?: AbortSignal,
+    keyboard?: InlineKeyboard,
+  ): Promise<void> {
+    const parts = telegramMessageParts(text, dependencies.formatForTelegramHtml(text));
+    for (const [index, part] of parts.entries()) {
+      signal?.throwIfAborted();
+      const options = keyboard && index === parts.length - 1 ? { reply_markup: keyboard } : {};
+      if (part.html !== undefined) {
+        try {
+          await bot.api.sendMessage(
+            chatId,
+            part.html,
+            { ...options, parse_mode: "HTML" },
+            telegramSignal(signal),
+          );
+          continue;
+        } catch (err) {
+          signal?.throwIfAborted();
+          // Network failures can occur after delivery; only retry invalid HTML as plain text.
+          if (
+            !(err instanceof GrammyError) ||
+            err.error_code !== 400 ||
+            !err.description.includes("parse entities")
+          )
+            throw err;
+        }
+      }
+      await bot.api.sendMessage(chatId, part.text, options, telegramSignal(signal));
+    }
+  }
 
   return createApplication({
     bot,
@@ -238,42 +286,46 @@ export function createProductionApplication(
     },
     startBackgroundServices() {
       const proactiveCallbacks: ProactiveCallbacks = {
-        sendText: async (text: string) => {
-          const formatted = dependencies.formatForTelegramHtml(text);
+        sendText: async (text, signal) => {
           try {
-            await bot.api.sendMessage(runtimeConfig.tgGroupId, formatted, { parse_mode: "HTML" });
+            await sendFormatted(runtimeConfig.tgGroupId, text, signal);
             return true;
-          } catch {
-            try {
-              await bot.api.sendMessage(runtimeConfig.tgGroupId, text);
-              return true;
-            } catch (err) {
-              dependencies.logWarn({ err }, "proactive: text dispatch failed");
-              return false;
-            }
+          } catch (err) {
+            if (!signal?.aborted) dependencies.logWarn({ err }, "proactive: text dispatch failed");
+            return false;
           }
         },
-        sendSticker: async (stickerFileId: string) => {
+        sendSticker: async (stickerFileId, signal) => {
           try {
-            await bot.api.sendSticker(runtimeConfig.tgGroupId, stickerFileId);
+            await bot.api.sendSticker(
+              runtimeConfig.tgGroupId,
+              stickerFileId,
+              undefined,
+              telegramSignal(signal),
+            );
             return true;
           } catch (err) {
             dependencies.logWarn({ err, stickerFileId }, "proactive: sticker dispatch failed");
             return false;
           }
         },
-        sendChatAction: async (action) => {
+        sendChatAction: async (action, signal) => {
           try {
-            await bot.api.sendChatAction(runtimeConfig.tgGroupId, action);
+            await bot.api.sendChatAction(
+              runtimeConfig.tgGroupId,
+              action,
+              undefined,
+              telegramSignal(signal),
+            );
           } catch {
             // Best-effort; typing indicators are non-critical
           }
         },
-        resolveTelegramFileAsDataUrl: async (fileId: string) => {
+        resolveTelegramFileAsDataUrl: async (fileId, signal) => {
           try {
-            const file = await bot.api.getFile(fileId);
+            const file = await bot.api.getFile(fileId, telegramSignal(signal));
             if (!file.file_path) return null;
-            return await dependencies.downloadTelegramFileAsDataUrl(file.file_path);
+            return await dependencies.downloadTelegramFileAsDataUrl(file.file_path, signal);
           } catch (err) {
             dependencies.logWarn({ err, fileId }, "proactive: resolveTelegramFileAsDataUrl failed");
             return null;
@@ -285,29 +337,11 @@ export function createProductionApplication(
 
       dependencies.initDiaryCallbacks({
         sendText: async (text, kind: HistoryEntryKind = "normal", options, abortSignal) => {
-          const formatted = dependencies.formatForTelegramHtml(text);
           const reply_markup =
             options?.inlineKeyboardText && options.inlineKeyboardUrl
               ? new InlineKeyboard().url(options.inlineKeyboardText, options.inlineKeyboardUrl)
               : undefined;
-          try {
-            await waitForAbort(
-              bot.api.sendMessage(runtimeConfig.tgGroupId, formatted, {
-                parse_mode: "HTML",
-                ...(reply_markup ? { reply_markup } : {}),
-              }),
-              abortSignal,
-            );
-          } catch {
-            abortSignal?.throwIfAborted();
-            await waitForAbort(
-              bot.api.sendMessage(runtimeConfig.tgGroupId, text, {
-                ...(reply_markup ? { reply_markup } : {}),
-              }),
-              abortSignal,
-            );
-          }
-          abortSignal?.throwIfAborted();
+          await sendFormatted(runtimeConfig.tgGroupId, text, abortSignal, reply_markup);
           dependencies.pushMessage(
             runtimeConfig.tgGroupId,
             "bot",
@@ -316,56 +350,47 @@ export function createProductionApplication(
             undefined,
             kind,
           );
-          dependencies.recordBotMessages([text]).catch((err: unknown) => {
+          await dependencies.recordBotMessages([text]).catch((err: unknown) => {
             dependencies.logWarn({ err }, "diary: runtime bot event persist failed");
           });
           dependencies.touchBotActivity();
         },
-        sendChannelText: async (text, abortSignal) => {
+        sendChannelText: async (text, abortSignal, date) => {
           if (!runtimeConfig.tgDiaryChannelId) return;
-          const formatted = dependencies.formatForTelegramHtml(text);
           try {
-            await waitForAbort(
-              bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, formatted, {
-                parse_mode: "HTML",
-              }),
-              abortSignal,
-            );
+            abortSignal?.throwIfAborted();
+            if (telegramMessageParts(text, dependencies.formatForTelegramHtml(text)).length > 1) {
+              await bot.api.sendDocument(
+                runtimeConfig.tgDiaryChannelId,
+                new InputFile(Buffer.from(text, "utf-8"), date ? `${date}-diary.txt` : "diary.txt"),
+                { caption: date ? `${date} 猫娘日记` : "猫娘日记" },
+                telegramSignal(abortSignal),
+              );
+            } else {
+              await sendFormatted(runtimeConfig.tgDiaryChannelId, text, abortSignal);
+            }
             dependencies.logInfo(
               { chatId: runtimeConfig.tgDiaryChannelId },
-              "diary: channel publish succeeded via HTML",
+              "diary: channel text publish succeeded",
             );
-          } catch (htmlErr) {
-            abortSignal?.throwIfAborted();
-            dependencies.logWarn(
-              { err: htmlErr, chatId: runtimeConfig.tgDiaryChannelId },
-              "diary: channel HTML publish failed, retrying with plain text",
+          } catch (err) {
+            dependencies.logError(
+              { err, chatId: runtimeConfig.tgDiaryChannelId },
+              "diary: channel text publish failed",
             );
-            try {
-              await waitForAbort(
-                bot.api.sendMessage(runtimeConfig.tgDiaryChannelId, text),
-                abortSignal,
-              );
-              dependencies.logInfo(
-                { chatId: runtimeConfig.tgDiaryChannelId },
-                "diary: channel publish succeeded via plain text",
-              );
-            } catch (textErr) {
-              dependencies.logError(
-                { err: textErr, chatId: runtimeConfig.tgDiaryChannelId },
-                "diary: channel plain-text publish failed",
-              );
-              throw textErr;
-            }
+            throw err;
           }
         },
         sendChannelPhoto: async (photo, caption, abortSignal) => {
           if (!runtimeConfig.tgDiaryChannelId) return;
           const options = caption ? { caption } : {};
           try {
-            await waitForAbort(
-              bot.api.sendPhoto(runtimeConfig.tgDiaryChannelId, photo, options),
-              abortSignal,
+            abortSignal?.throwIfAborted();
+            await bot.api.sendPhoto(
+              runtimeConfig.tgDiaryChannelId,
+              photo,
+              options,
+              telegramSignal(abortSignal),
             );
             dependencies.logInfo(
               { chatId: runtimeConfig.tgDiaryChannelId },
@@ -382,9 +407,14 @@ export function createProductionApplication(
       });
 
       dependencies.initWordcloudCallbacks({
-        sendPhoto: async (photo, caption) => {
+        sendPhoto: async (photo, caption, signal) => {
           try {
-            await bot.api.sendPhoto(runtimeConfig.tgGroupId, photo, { caption });
+            await bot.api.sendPhoto(
+              runtimeConfig.tgGroupId,
+              photo,
+              { caption },
+              telegramSignal(signal),
+            );
           } catch (err) {
             dependencies.logError({ err }, "wordcloud: group photo publish failed");
             throw err;
@@ -395,7 +425,7 @@ export function createProductionApplication(
             runtimeConfig.botUsername,
             caption,
           );
-          dependencies.recordBotMessages([caption]).catch((err: unknown) => {
+          await dependencies.recordBotMessages([caption]).catch((err: unknown) => {
             dependencies.logWarn({ err }, "wordcloud: runtime bot event persist failed");
           });
           dependencies.touchBotActivity();
@@ -418,7 +448,13 @@ export function createProductionApplication(
 
       // Periodic buffer save: interval configurable by env
       bufferSaveTimer = dependencies.setInterval(() => {
-        dependencies.saveConversationBuffer().catch(() => void 0);
+        if (bufferSave) return;
+        bufferSave = dependencies
+          .saveConversationBuffer()
+          .catch(() => void 0)
+          .finally(() => {
+            bufferSave = undefined;
+          });
       }, runtimeConfig.bufferSaveIntervalMs);
       bufferSaveTimer.unref?.();
     },
@@ -427,7 +463,12 @@ export function createProductionApplication(
       if (diaryTimer) dependencies.clearInterval(diaryTimer);
       if (wordcloudTimer) dependencies.clearInterval(wordcloudTimer);
       if (bufferSaveTimer) dependencies.clearInterval(bufferSaveTimer);
-      await dependencies.stopDiaryService();
+      await Promise.all([
+        dependencies.stopGroupRuntime(),
+        dependencies.stopDiaryService(),
+        dependencies.stopWordcloudService(),
+        bufferSave,
+      ]);
     },
     async closeBackgroundServices() {
       await Promise.all([databaseBackup?.close(), memoryEmbeddingIndex?.close()]);
@@ -465,8 +506,14 @@ export function runMain(dependencies: MainDependencies = productionMainDependenc
     dependencies.logError(err);
     dependencies.exit(1);
   });
-  dependencies.once("SIGINT", () => void application.shutdown());
-  dependencies.once("SIGTERM", () => void application.shutdown());
+  const shutdown = () => {
+    void application.shutdown().catch((err: unknown) => {
+      dependencies.logError(err);
+      dependencies.exit(1);
+    });
+  };
+  dependencies.once("SIGINT", shutdown);
+  dependencies.once("SIGTERM", shutdown);
   dependencies.once("uncaughtException", (value) => {
     const err = value instanceof Error ? value : new Error(String(value));
     dependencies.closeDatabase();

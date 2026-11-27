@@ -139,8 +139,17 @@ interface UserRuntimeStats {
 
 interface ScheduledTurn {
   label: string;
-  execute: () => Promise<void>;
+  execute: (signal: AbortSignal) => Promise<void>;
+  onExpired?: (signal: AbortSignal) => Promise<void>;
 }
+
+interface QueuedCommand extends ScheduledTurn {
+  expiresAt: number;
+  timer: Timer;
+}
+
+const MAX_QUEUED_COMMANDS = 8;
+const COMMAND_QUEUE_TTL_MS = 60_000;
 
 function pruneOlderThan(values: number[], cutoff: number): number[] {
   return values.filter((value) => value >= cutoff);
@@ -213,13 +222,35 @@ class SingleGroupRuntime {
   private readonly userStats = new Map<string, UserRuntimeStats>();
   private readonly recentRealUserEvents: number[] = [];
   private pendingTurn: ScheduledTurn | null = null;
-  private readonly queuedCommandTurns: ScheduledTurn[] = [];
+  private readonly queuedCommandTurns: QueuedCommand[] = [];
+  private readonly pendingCommandNotices = new Set<Promise<void>>();
+  private readonly shutdown = new AbortController();
+  private runningTurn: Promise<void> | undefined;
   private compacting = false;
   private activityRevision = 0;
   private activeIngestions = 0;
   private initialized = false;
 
   constructor(private readonly dependencies: GroupRuntimeDependencies) {}
+
+  async close(): Promise<void> {
+    this.shutdown.abort();
+    this.clearTimers();
+    this.pendingTurn = null;
+    for (const turn of this.queuedCommandTurns) this.dependencies.clearTimeout(turn.timer);
+    this.queuedCommandTurns.length = 0;
+    await Promise.all([this.runningTurn, ...this.pendingCommandNotices]);
+  }
+
+  private runTurn(execute: ScheduledTurn["execute"]): Promise<void> {
+    this.shutdown.signal.throwIfAborted();
+    const turn = execute(this.shutdown.signal);
+    this.runningTurn = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    return turn;
+  }
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -468,6 +499,7 @@ class SingleGroupRuntime {
   }
 
   schedulePassiveTurn(turn: ScheduledTurn): void {
+    if (this.shutdown.signal.aborted) return;
     this.pendingTurn = turn;
     if (this.state.running) {
       this.state.dirty = true;
@@ -476,20 +508,52 @@ class SingleGroupRuntime {
     this.scheduleDebounce();
   }
 
-  scheduleCommandTurn(turn: ScheduledTurn): void {
-    this.queuedCommandTurns.push(turn);
-    if (this.state.running) return;
-    if (this.pendingTurn || this.state.debounceTimer !== null || this.state.maxDelayTimer !== null)
-      return;
-    this.dependencies.queueMicrotask(() => {
-      void this.runQueuedCommandTurn();
-    });
+  scheduleCommandTurn(turn: ScheduledTurn): boolean {
+    if (this.shutdown.signal.aborted || this.queuedCommandTurns.length >= MAX_QUEUED_COMMANDS)
+      return false;
+    const queued: QueuedCommand = {
+      ...turn,
+      expiresAt: this.dependencies.now() + COMMAND_QUEUE_TTL_MS,
+      timer: this.dependencies.setTimeout(() => {
+        const index = this.queuedCommandTurns.indexOf(queued);
+        if (index < 0) return;
+        this.queuedCommandTurns.splice(index, 1);
+        if (!queued.onExpired || this.shutdown.signal.aborted) return;
+        const notice = queued
+          .onExpired(this.shutdown.signal)
+          .catch((err: unknown) => {
+            if (!this.shutdown.signal.aborted)
+              this.dependencies.logger.warn(
+                { err, label: queued.label },
+                "command expiry notice failed",
+              );
+          })
+          .finally(() => {
+            this.pendingCommandNotices.delete(notice);
+          });
+        this.pendingCommandNotices.add(notice);
+      }, COMMAND_QUEUE_TTL_MS),
+    };
+    queued.timer.unref?.();
+    this.queuedCommandTurns.push(queued);
+    if (
+      !this.state.running &&
+      !this.pendingTurn &&
+      this.state.debounceTimer === null &&
+      this.state.maxDelayTimer === null
+    ) {
+      this.dependencies.queueMicrotask(() => {
+        void this.runQueuedCommandTurn();
+      });
+    }
+    return true;
   }
 
   canRunProactive(): boolean {
     const now = this.dependencies.now();
     return (
       !this.state.running &&
+      !this.shutdown.signal.aborted &&
       this.state.debounceTimer === null &&
       this.state.maxDelayTimer === null &&
       this.queuedCommandTurns.length === 0 &&
@@ -513,11 +577,11 @@ class SingleGroupRuntime {
     };
   }
 
-  async runProactiveTurn(execute: () => Promise<void>): Promise<boolean> {
+  async runProactiveTurn(execute: ScheduledTurn["execute"]): Promise<boolean> {
     if (!this.canRunProactive()) return false;
     this.state.running = true;
     try {
-      await execute();
+      await this.runTurn(execute);
       return true;
     } finally {
       this.state.running = false;
@@ -536,7 +600,7 @@ class SingleGroupRuntime {
   }
 
   async maybeCompact(): Promise<void> {
-    if (this.compacting) return;
+    if (this.compacting || this.shutdown.signal.aborted) return;
     this.compacting = true;
     try {
       const runtime = await this.dependencies.loadRuntimeGroupState();
@@ -557,10 +621,14 @@ class SingleGroupRuntime {
       )
         return;
 
-      const compactUntilIndex = Math.max(
+      let compactUntilIndex = Math.max(
         0,
         recentEvents.length - this.dependencies.config.runtimeRetainRecentEvents,
       );
+      const firstRetainedTs = recentEvents[compactUntilIndex]?.ts;
+      while (compactUntilIndex > 0 && recentEvents[compactUntilIndex - 1]?.ts === firstRetainedTs) {
+        compactUntilIndex--;
+      }
       const eventsToCompact = recentEvents.slice(0, compactUntilIndex);
       const newCursorTs = eventsToCompact.at(-1)?.ts;
       if (!newCursorTs) return;
@@ -581,8 +649,10 @@ class SingleGroupRuntime {
           previousSummary: runtime.summary,
           eventText,
           turnText,
+          abortSignal: this.shutdown.signal,
         });
       } catch (err) {
+        if (this.shutdown.signal.aborted) return;
         this.dependencies.logger.warn(
           {
             oldCursorTs: runtime.summaryCursorTs,
@@ -606,8 +676,9 @@ class SingleGroupRuntime {
         throw err;
       }
 
+      if (this.shutdown.signal.aborted || !result.summary.trim()) return;
       const completedAt = this.dependencies.now();
-      await this.dependencies.commitRuntimeCompaction(
+      const committed = await this.dependencies.commitRuntimeCompaction(
         {
           oldCursorTs: runtime.summaryCursorTs,
           newCursorTs,
@@ -622,6 +693,7 @@ class SingleGroupRuntime {
           lastCompactedAt: completedAt,
         },
       );
+      if (!committed) return;
       this.dependencies.logger.info(
         {
           oldCursorTs: runtime.summaryCursorTs,
@@ -686,6 +758,7 @@ class SingleGroupRuntime {
   }
 
   private async runPendingTurn(): Promise<void> {
+    if (this.shutdown.signal.aborted) return;
     if (this.state.running) {
       this.state.dirty = true;
       return;
@@ -701,8 +774,9 @@ class SingleGroupRuntime {
     this.state.running = true;
     try {
       this.dependencies.logger.info({ label: turn.label }, "group runtime starting AI turn");
-      await turn.execute();
+      await this.runTurn(turn.execute);
     } catch (err) {
+      if (this.shutdown.signal.aborted) return;
       this.dependencies.logger.error(
         { err, label: turn.label },
         "group runtime scheduled turn failed",
@@ -722,17 +796,23 @@ class SingleGroupRuntime {
   }
 
   private async runQueuedCommandTurn(): Promise<void> {
-    if (this.state.running) return;
+    if (this.state.running || this.shutdown.signal.aborted) return;
     if (this.pendingTurn || this.state.debounceTimer !== null || this.state.maxDelayTimer !== null)
       return;
     const turn = this.queuedCommandTurns.shift();
     if (!turn) return;
+    this.dependencies.clearTimeout(turn.timer);
 
     this.state.running = true;
     try {
+      if (turn.expiresAt <= this.dependencies.now()) {
+        if (turn.onExpired) await this.runTurn(turn.onExpired);
+        return;
+      }
       this.dependencies.logger.info({ label: turn.label }, "group runtime starting command turn");
-      await turn.execute();
+      await this.runTurn(turn.execute);
     } catch (err) {
+      if (this.shutdown.signal.aborted) return;
       this.dependencies.logger.error(
         { err, label: turn.label },
         "group runtime command turn failed",

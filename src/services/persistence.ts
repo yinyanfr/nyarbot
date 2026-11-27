@@ -357,6 +357,31 @@ export async function markDiaryNotificationSent(date: string): Promise<void> {
   })();
 }
 
+type DiaryDestination = "channel" | "channel_photo" | "github" | "github_pages";
+
+export async function getDiaryPublication(
+  date: string,
+  destination: DiaryDestination,
+): Promise<string | null> {
+  const row = getDatabase()
+    .prepare("SELECT detail FROM diary_publications WHERE date = ? AND destination = ?")
+    .get(date, destination) as { detail: string } | undefined;
+  return row?.detail ?? null;
+}
+
+export async function markDiaryPublication(
+  date: string,
+  destination: DiaryDestination,
+  detail: string,
+): Promise<void> {
+  getDatabase()
+    .prepare(
+      `INSERT INTO diary_publications VALUES (?, ?, ?)
+       ON CONFLICT(date, destination) DO UPDATE SET detail = excluded.detail`,
+    )
+    .run(date, destination, detail);
+}
+
 export async function getDiaryObservation(id: string): Promise<DiaryObservationV2 | null> {
   const row = getDatabase()
     .prepare(`SELECT source_json FROM diary_observations WHERE firestore_id = ?`)
@@ -954,9 +979,14 @@ function insertCompactionRecord(record: RuntimeCompactionRecord): void {
 export async function commitRuntimeCompaction(
   record: RuntimeCompactionRecord,
   state: Pick<RuntimeGroupStateDoc, "summary" | "summaryCursorTs" | "lastCompactedAt">,
-): Promise<void> {
-  getDatabase().transaction(() => {
+): Promise<boolean> {
+  return getDatabase().transaction(() => {
+    const cursor = getDatabase()
+      .prepare("SELECT summary_cursor_ts FROM runtime_group WHERE firestore_id = 'group'")
+      .get() as { summary_cursor_ts: number } | undefined;
+    if ((cursor?.summary_cursor_ts ?? 0) !== record.oldCursorTs) return false;
     insertCompactionRecord(record);
     writeRuntimeGroupStateSync(state);
+    return true;
   })();
 }

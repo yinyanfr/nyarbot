@@ -12,6 +12,7 @@ import { z } from "zod/v4";
 import config from "../configs/env.js";
 import { logger } from "./logger.js";
 import { quoteAsUntrustedData, safePromptValue } from "./prompt-safety.js";
+import { waitForAbort, withTimeout } from "./abort.js";
 
 const YOUTUBE_ID_REGEX = /^[A-Za-z0-9_-]{11}$/;
 const BILIBILI_BVID_REGEX = /\/video\/(BV[A-Za-z0-9]{10})(?:\/|$)/i;
@@ -159,7 +160,13 @@ async function resolveAidToBvid(
 
 function isBilibiliRedirectHost(url: URL): boolean {
   const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  return host === "b23.tv" || host === "bilibili.com" || host === "m.bilibili.com";
+  return (
+    (url.protocol === "https:" || url.protocol === "http:") &&
+    !url.port &&
+    !url.username &&
+    !url.password &&
+    (host === "b23.tv" || host === "bilibili.com" || host === "m.bilibili.com")
+  );
 }
 
 async function resolveBilibiliVideoUrl(
@@ -169,6 +176,7 @@ async function resolveBilibiliVideoUrl(
 ): Promise<URL> {
   let current = new URL(rawUrl);
   for (let redirects = 0; redirects <= 3; redirects++) {
+    if (!isBilibiliRedirectHost(current)) break;
     if (parseBilibiliVideoUrl(current)) return current;
     const host = current.hostname.toLowerCase().replace(/^www\./, "");
     if (host !== "b23.tv") break;
@@ -437,7 +445,9 @@ async function readBilibiliVideoInternal(
   const startedAt = Date.now();
 
   try {
-    const client = await dependencies.getBilibiliClient();
+    abortSignal?.throwIfAborted();
+    const connecting = dependencies.getBilibiliClient();
+    const client = await (abortSignal ? waitForAbort(connecting, abortSignal) : connecting);
     let validTranscript: z.infer<typeof bilibiliTranscriptSchema> | null = null;
     try {
       const transcriptResult = await callBilibiliTool(
@@ -459,6 +469,7 @@ async function readBilibiliVideoInternal(
         validTranscript = transcript.data;
       }
     } catch (error) {
+      abortSignal?.throwIfAborted();
       logger.info(
         {
           bvid,
@@ -529,7 +540,12 @@ async function readBilibiliVideo(
   dependencies: VideoReaderDependencies,
   abortSignal?: AbortSignal,
 ): Promise<string> {
-  return enqueueBilibiliRead(() => readBilibiliVideoInternal(rawUrl, dependencies, abortSignal));
+  const signal = withTimeout(abortSignal, config.videoReadTimeoutMs);
+  const scheduled = enqueueBilibiliRead(() => {
+    signal.throwIfAborted();
+    return readBilibiliVideoInternal(rawUrl, dependencies, signal);
+  });
+  return waitForAbort(scheduled, signal);
 }
 
 export function createVideoReader(overrides: Partial<VideoReaderDependencies> = {}) {

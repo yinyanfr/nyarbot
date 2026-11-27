@@ -276,6 +276,15 @@ describe("classification and lightweight generators", () => {
       }),
       false,
     );
+    assert.equal(
+      await probeGate({
+        recentConversation: "聊天",
+        candidateConversation: "候选",
+        recentMembers: [],
+        dependencies: scripted([() => result("only a draft")]).dependencies,
+      }),
+      false,
+    );
   });
 });
 
@@ -458,6 +467,53 @@ describe("main turn architecture", () => {
     assert.equal(writes, 0);
   });
 
+  test("profile tools cannot change another user's nickname or time zone", async () => {
+    const fake = scripted([
+      async (call) => {
+        assert.match(
+          String(await runTool(call, "setNickname", { uid: "2", nickname: "猫" })),
+          /自己的/,
+        );
+        assert.match(
+          String(await runTool(call, "setTimezone", { uid: "2", timeZone: "Asia/Tokyo" })),
+          /自己的/,
+        );
+        return result();
+      },
+    ]);
+    fake.dependencies.updateUserNickname = async () => assert.fail("unexpected profile write");
+    fake.dependencies.updateUserTimeZone = async () => assert.fail("unexpected profile write");
+    await turn(fake.dependencies, { recentMembers: [{ uid: "2", name: "Other" }] });
+  });
+
+  test("caller cancellation reaches prefetch and prevents model generation", async () => {
+    const controller = new AbortController();
+    const fake = scripted([]);
+    fake.dependencies.performWebSearch = async (_query, _options, signal) => {
+      assert.ok(signal);
+      controller.abort(new Error("turn cancelled"));
+      signal.throwIfAborted();
+      assert.fail("prefetch was not cancelled");
+    };
+    await assert.rejects(
+      turn(fake.dependencies, {
+        needsSearch: true,
+        abortSignal: controller.signal,
+      }),
+      /turn cancelled/,
+    );
+    assert.equal(fake.calls.length, 0);
+  });
+
+  test("URL reader denies unsupported protocols before calling network dependencies", async () => {
+    const fake = scripted([]);
+    fake.dependencies.downloadPublic = async () => assert.fail("unexpected public download");
+    fake.dependencies.fetch = async () => assert.fail("unexpected provider fetch");
+    assert.equal(await fetchUrlContent("file:///not-a-web-page", fake.dependencies), null);
+    assert.equal(await fetchUrlContent("data:text/html,example", fake.dependencies), null);
+    assert.equal(fake.calls.length, 0);
+  });
+
   test("routes tiers, preserves stable tools, token limits and caller abort", async () => {
     for (const [tier, expectedModel, expectedTokens] of [
       ["simple", models.replyDeepseekFlash, 200],
@@ -470,7 +526,9 @@ describe("main turn architecture", () => {
       const call = fake.calls[0]!;
       assert.equal(call.model, expectedModel);
       assert.equal(call.maxOutputTokens, expectedTokens);
-      assert.equal(call.abortSignal, controller.signal);
+      assert.ok(call.abortSignal instanceof AbortSignal);
+      controller.abort();
+      assert.ok(call.abortSignal.aborted);
       assert.deepEqual(Object.keys(call.tools ?? {}), [
         "send_message",
         "dismiss",
@@ -705,9 +763,9 @@ describe("main turn architecture", () => {
         return result();
       },
     ]);
-    fake.dependencies.fetch = async () => {
+    fake.dependencies.downloadPublic = async () => {
       fetches++;
-      return new Response("<title>Page</title>", { headers: { "content-type": "text/html" } });
+      return new Blob(["<title>Page</title>"], { type: "text/html" });
     };
     fake.dependencies.isSupportedVideoUrl = (url) => url.includes("video");
     fake.dependencies.readVideoContent = async () => {
@@ -860,8 +918,8 @@ describe("main turn architecture", () => {
       },
       () => result("封面描述"),
     ]);
-    fake.dependencies.fetch = async () =>
-      new Response("<title>Page</title>", { headers: { "content-type": "text/html" } });
+    fake.dependencies.downloadPublic = async () =>
+      new Blob(["<title>Page</title>"], { type: "text/html" });
     await turn(fake.dependencies, {
       userMessage: "普通消息",
       urls: ["https://page.test"],
@@ -1492,11 +1550,15 @@ describe("fallback and URL helpers", () => {
       true,
     );
     assert.equal(isTwitterStatusUrl("https://example.com/status/123"), false);
-    let fetchIndex = 0;
-    const fake = scripted([() => result("一只猫"), () => result("网页摘要")]);
-    fake.dependencies.fetch = async () => {
-      fetchIndex++;
-      if (fetchIndex === 1)
+    const fake = scripted([
+      () => result("一只猫"),
+      (call) => {
+        assert.match(String(call.prompt), /网页正文/);
+        return result("网页摘要");
+      },
+    ]);
+    fake.dependencies.fetch = async (url, init) => {
+      if (String(url).includes("api.fxtwitter.com"))
         return Response.json({
           code: 200,
           status: {
@@ -1506,13 +1568,17 @@ describe("fallback and URL helpers", () => {
             media: { photos: [{ url: "https://img.test/a" }] },
           },
         });
-      if (fetchIndex === 2)
-        return new Response("img", { headers: { "content-type": "image/jpeg" } });
-      if (fetchIndex === 3)
-        return new Response("<title>Hello</title><meta name='description' content='World'>", {
-          headers: { "content-type": "text/html" },
+      assert.equal(String(url), "https://api.tavily.com/extract");
+      assert.deepEqual(JSON.parse(String(init?.body)), { urls: ["https://fallback.test"] });
+      return Response.json({ results: [{ raw_content: "网页正文" }] });
+    };
+    fake.dependencies.downloadPublic = async (url) => {
+      if (url === "https://img.test/a") return new Blob(["img"], { type: "image/jpeg" });
+      if (url === "https://page.test")
+        return new Blob(["<title>Hello</title><meta name='description' content='World'>"], {
+          type: "text/html",
         });
-      return new Response("", { status: 500 });
+      throw new Error("direct request failed");
     };
     assert.match(
       String(await fetchUrlContent("https://x.com/cat/status/123", fake.dependencies)),

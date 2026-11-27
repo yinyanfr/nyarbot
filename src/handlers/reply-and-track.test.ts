@@ -34,7 +34,12 @@ function fixture(reply: (...args: unknown[]) => Promise<unknown>) {
   } as unknown as ReplyAndTrackDependencies;
   return {
     run: createReplyAndTrack(dependencies),
-    ctx: { reply } as unknown as BotContext,
+    ctx: {
+      reply: (...args: unknown[]) => {
+        while (args.length && args.at(-1) === undefined) args.pop();
+        return reply(...args);
+      },
+    } as unknown as BotContext,
     pushed,
     recorded,
     touched: () => touched,

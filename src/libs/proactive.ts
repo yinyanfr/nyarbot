@@ -32,9 +32,9 @@ export interface ProactiveHealthSnapshot {
 
 export interface ProactiveCallbacks {
   /** Send a text message to the group (formatting applied by caller). */
-  sendText: (text: string) => Promise<boolean>;
+  sendText: (text: string, signal?: AbortSignal) => Promise<boolean>;
   /** Send a sticker by its Telegram file_id. */
-  sendSticker: (stickerFileId: string) => Promise<boolean>;
+  sendSticker: (stickerFileId: string, signal?: AbortSignal) => Promise<boolean>;
   /** Send a chat action indicator (e.g. "typing"). */
   sendChatAction: (
     action:
@@ -49,9 +49,10 @@ export interface ProactiveCallbacks {
       | "find_location"
       | "record_video_note"
       | "upload_video_note",
+    signal?: AbortSignal,
   ) => Promise<void>;
   /** Resolve a Telegram file_id to a data URL so proactive turns can inspect images. */
-  resolveTelegramFileAsDataUrl: (fileId: string) => Promise<string | null>;
+  resolveTelegramFileAsDataUrl: (fileId: string, signal?: AbortSignal) => Promise<string | null>;
 }
 
 export interface ProactiveDependencies {
@@ -238,7 +239,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
       if (currentTime - effectiveLastBotMessageTime < cooldown) return;
 
       const activityRevision = runtime.getActivityRevision();
-      const ran = await runtime.runProactiveTurn(async () => {
+      const ran = await runtime.runProactiveTurn(async (signal) => {
         // Collect recent members for the probe gate context
         const memberMap = new Map<string, { name: string; username?: string }>();
         for (const entry of candidateHistory) {
@@ -273,9 +274,10 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             })
             .join("\n"),
           recentMembers,
+          abortSignal: signal,
         });
 
-        if (!shouldProceed) {
+        if (stopped || signal.aborted || !shouldProceed) {
           // Probe decided to stay silent — skip the full model run entirely.
           return;
         }
@@ -295,9 +297,9 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
         // Signal "typing..." to the group while the full model runs
         // Use an interval to keep it alive during long DeepSeek thinking phases
         const typingTimer = dependencies.setInterval(() => {
-          callbacks.sendChatAction("typing").catch(() => void 0);
+          callbacks.sendChatAction("typing", signal).catch(() => void 0);
         }, 4500);
-        await callbacks.sendChatAction("typing").catch(() => void 0);
+        await callbacks.sendChatAction("typing", signal).catch(() => void 0);
 
         const formattedHistory = formatContext(safeReferenceHistory);
         const formattedCandidates = formatContext(candidateHistory);
@@ -327,6 +329,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             wasRepliedTo: false,
             recentBotMessages,
             allowPersistentTools: false,
+            abortSignal: signal,
             ...(recentImageMediaRefs.length > 0 ? { mediaRefs: recentImageMediaRefs } : {}),
             resolveTelegramFileAsDataUrl: callbacks.resolveTelegramFileAsDataUrl,
             allowRichContentTools: recentImageMediaRefs.length > 0,
@@ -336,6 +339,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
           dependencies.clearInterval(typingTimer);
         }
 
+        if (stopped || signal.aborted) return;
         if (result.action === "dismiss") {
           log.info("proactive: full model chose to dismiss after probe activation");
           await runtime.recordTurn({
@@ -363,6 +367,8 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
         }
 
         const conversationChanged = () =>
+          stopped ||
+          signal.aborted ||
           runtime.getActivityRevision() !== activityRevision ||
           lastBotMessageTime !== botActivitySnapshot;
         if (conversationChanged()) {
@@ -388,7 +394,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             break;
           }
           const msg = result.messages[i]!;
-          if (!(await callbacks.sendText(msg))) {
+          if (!(await callbacks.sendText(msg, signal))) {
             dispatchFailed = true;
             break;
           }
@@ -414,7 +420,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
             : null;
         let sentStickerFileId: string | null = null;
         if (stickerFileId) {
-          if (await callbacks.sendSticker(stickerFileId)) {
+          if (await callbacks.sendSticker(stickerFileId, signal)) {
             sentStickerFileId = stickerFileId;
             if (sentMessages.length === 0) {
               const emoji = lookupStickerEmoji(sentStickerFileId) ?? "🐱";
@@ -466,6 +472,7 @@ export function createProactiveChecker(overrides: Partial<ProactiveDependencies>
       });
       if (!ran) return;
     } catch (err) {
+      if (stopped) return;
       failed = true;
       consecutiveFailures++;
       lastFailureAt = now();

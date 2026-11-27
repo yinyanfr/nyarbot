@@ -334,3 +334,72 @@ export function formatForTelegramHtml(text: string): string {
 
   return result;
 }
+
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+export function splitTelegramText(text: string): string[] {
+  const parts: string[] = [];
+  let part = "";
+  for (const character of text) {
+    if (part.length + character.length > TELEGRAM_MESSAGE_LIMIT) {
+      parts.push(part);
+      part = "";
+    }
+    part += character;
+  }
+  if (part) parts.push(part);
+  return parts;
+}
+
+export function splitTelegramHtml(html: string): string[] | null {
+  const parts: string[] = [];
+  const tags: { name: string; opening: string }[] = [];
+  let part = "";
+  let visibleLength = 0;
+  const closingTags = () =>
+    [...tags]
+      .reverse()
+      .map(({ name }) => `</${name}>`)
+      .join("");
+  for (const token of html.match(/<\/?[a-z][^<>]*>|&(?:amp|lt|gt|quot|#\d+);|[\s\S]/gu) ?? []) {
+    if (token.startsWith("<")) {
+      const name = /^<\/?([a-z]+)/u.exec(token)?.[1];
+      if (!name) return null;
+      if (token.startsWith("</")) {
+        if (tags.pop()?.name !== name) return null;
+      } else {
+        tags.push({ name, opening: token });
+      }
+    } else {
+      const length = token.startsWith("&") && token.endsWith(";") ? 1 : token.length;
+      if (visibleLength + length > TELEGRAM_MESSAGE_LIMIT) {
+        parts.push(part + closingTags());
+        part = tags.map(({ opening }) => opening).join("");
+        visibleLength = 0;
+      }
+      visibleLength += length;
+    }
+    part += token;
+  }
+  if (tags.length) return null;
+  if (visibleLength) parts.push(part);
+  return parts;
+}
+
+export function telegramMessageParts(
+  text: string,
+  html: string,
+): { text: string; html?: string }[] {
+  if (text.length <= TELEGRAM_MESSAGE_LIMIT && html.length <= TELEGRAM_MESSAGE_LIMIT) {
+    return [{ text, html }];
+  }
+  const parts = splitTelegramHtml(html);
+  if (!parts?.length) return splitTelegramText(text).map((part) => ({ text: part }));
+  const entities: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"' };
+  return parts.map((part) => ({
+    html: part,
+    text: part
+      .replace(/<\/?[a-z][^<>]*>/gu, "")
+      .replace(/&(amp|lt|gt|quot);/gu, (_, name: string) => entities[name]!),
+  }));
+}
