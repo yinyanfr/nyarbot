@@ -1,38 +1,36 @@
 ---
 title: 从 nyarbot 学 AI 应用工程
-description: 从一条 Telegram 消息出发，沿真实的 TypeScript 源码读懂 Agent、Harness、MCP 和 RAG。
+description: 零 AI 基础入门：用真实 Telegram 机器人学模型、工具、记忆、外部连接与失败恢复。
 template: splash
 hero:
   title: 从一条群消息，读懂 AI 应用
-  tagline: 模型什么时候该回答、查记忆，或者保持沉默？沿着 nyarbot 的真实 TypeScript 源码，把 Agent、Harness、MCP 和 RAG 拆开看。
+  tagline: 从「模型一次调用到底做了什么」开始。用一个真实的 Telegram 机器人，看程序如何让模型回答、查资料，并在失败后恢复。
   actions:
-    - text: 从第一章开始
-      link: ./message-to-reply/
+    - text: 从零开始
+      link: ./ai-basics/
       icon: right-arrow
     - text: 查术语
       link: ./glossary/
       variant: secondary
 ---
 
-import { Card, CardGrid } from "@astrojs/starlight/components";
+## 我们从一个问题开始
 
-## 选一条线索开始
+小林问机器人：「@nyarbot 我以前说过周末喜欢做什么？」假设半年前，他在群里说过「有空爱拿望远镜看星星」，应用当时存下了一条记忆。机器人今天要怎么找到它？如果没找到，是不是该说不知道？如果另一位群友也喜欢观星，机器人又怎么避免把两个人弄混？
 
-<CardGrid>
-  <Card title="谁在做决定？" icon="puzzle">
-    [Agent 与 Harness](./agent-harness/)：模型可以选择工具，程序决定什么时候允许它运行。
-  </Card>
-  <Card title="它怎么想起我说过的话？" icon="magnifier">
-    [Memory 与 RAG](./memory-rag/)：跟一次查询走过关键词、向量和结果回传。
-  </Card>
-  <Card title="它怎样读到视频字幕？" icon="external">
-    [MCP 与多模态](./mcp/)：用同一个视频工具比较两种完全不同的后端。
-  </Card>
-  <Card title="发布到一半失败怎么办？" icon="setting">
-    [日记流水线](./diary/)：看看一次失败如何留下进度，下一次从哪里继续。
-  </Card>
-</CardGrid>
+这是一条虚构的消息，课程用真实项目回答这些问题。**nyarbot** 是一个 Telegram 群聊机器人。它把群消息、程序规则、模型服务和本地数据库连起来。有时它回话，有时会先查资料，也有些消息它根本不需要回复。
 
-## 怎么读这门课
+## 学习路线
 
-懂一点 JavaScript 或 TypeScript 就能跟读。每章用合成场景解释一个工程问题，给出短代码、固定提交的源码链接和一个小练习。只读网页和源码即可；若想运行练习，[源码地图](./source-map/)有测试命令，无需 Telegram 或模型密钥。
+| 阶段           | 章节                                                                                                  | 学完能做什么                                                           |
+| -------------- | ----------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 建立模型概念   | [模型入门](./ai-basics/)、[消息如何变成回复](./message-to-reply/)                                     | 看懂一次模型请求里有什么，追踪消息何时进入 AI 回合。                   |
+| 理解谁在控制   | [Agent、Workflow 与 Harness](./agent-harness/)、[工具调用](./tool-calling/)、[上下文工程](./context/) | 区分模型的选择与程序的职责，画出「调用工具—得到结果—重新生成」的过程。 |
+| 给模型提供证据 | [记忆与 RAG](./memory-rag/)、[MCP 与多模态](./mcp/)                                                   | 解释私人记忆如何召回，区分模型看图、读字幕和搜索网页。                 |
+| 处理真实故障   | [路由与回退](./routing/)、[日记补发](./diary/)、[综合练习](./capstone/)                               | 判断遇到超时、取消或半途失败时，系统应降级、停止，还是在下次继续。     |
+
+## 怎么学
+
+不需要用过 AI API、会写提示词或懂机器学习。先读场景和流程图，再做纸上练习，最后展开参考答案。有一点编程经验，可以沿每章的固定版本链接读 TypeScript；不熟悉代码也可以先跳过代码框。想在电脑上验证推演，再看[源码地图与练习命令](./source-map/)，本课程的测试不需要 Telegram 账号或模型密钥。
+
+遇到陌生词可以查[术语索引](./glossary/)。建议第一次按顺序读，不必一次记住所有缩写。
