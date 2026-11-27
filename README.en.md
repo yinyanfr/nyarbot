@@ -218,6 +218,7 @@ Husky + lint-staged automatically run Prettier and ESLint on staged `.ts` files.
 
 ## Documentation
 
+- [Learn AI application engineering with nyarbot](https://yinyanfr.github.io/nyarbot/) (Chinese)
 - [Architecture](docs/architecture.md)
 - [Prompt XML Schema](docs/prompt-xml-schema.md)
 - [Configuration](docs/configuration.md)

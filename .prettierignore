@@ -1,4 +1,5 @@
 dist/
+website/.astro/
 node_modules/
 .agents/
 package-lock.json

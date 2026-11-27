@@ -3,7 +3,7 @@ import eslintConfigPrettier from "eslint-config-prettier";
 
 export default tseslint.config(
   {
-    ignores: ["dist/", "eslint.config.mjs"],
+    ignores: ["dist/", "website/dist/", "website/.astro/", "eslint.config.mjs"],
   },
   tseslint.configs.recommended,
   tseslint.configs.stylistic,
