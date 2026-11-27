@@ -1,0 +1,13 @@
+---
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
+---
+
+<StarlightPage frontmatter={{ title: "找不到这一页", template: "splash", pagefind: false }}>
+  <p>
+    这条链接可能已失效。你可以<a href={base}>返回课程首页</a>或<a href={`${base}glossary/`}
+      >查阅术语索引</a
+    >。
+  </p>
+</StarlightPage>

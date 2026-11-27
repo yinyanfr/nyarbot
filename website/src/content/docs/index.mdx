@@ -1,0 +1,38 @@
+---
+title: 从 nyarbot 学 AI 应用工程
+description: 从一条 Telegram 消息出发，沿真实的 TypeScript 源码读懂 Agent、Harness、MCP 和 RAG。
+template: splash
+hero:
+  title: 从一条群消息，读懂 AI 应用
+  tagline: 模型什么时候该回答、查记忆，或者保持沉默？沿着 nyarbot 的真实 TypeScript 源码，把 Agent、Harness、MCP 和 RAG 拆开看。
+  actions:
+    - text: 从第一章开始
+      link: ./message-to-reply/
+      icon: right-arrow
+    - text: 查术语
+      link: ./glossary/
+      variant: secondary
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## 选一条线索开始
+
+<CardGrid>
+  <Card title="谁在做决定？" icon="puzzle">
+    [Agent 与 Harness](./agent-harness/)：模型可以选择工具，程序决定什么时候允许它运行。
+  </Card>
+  <Card title="它怎么想起我说过的话？" icon="magnifier">
+    [Memory 与 RAG](./memory-rag/)：跟一次查询走过关键词、向量和结果回传。
+  </Card>
+  <Card title="它怎样读到视频字幕？" icon="external">
+    [MCP 与多模态](./mcp/)：用同一个视频工具比较两种完全不同的后端。
+  </Card>
+  <Card title="发布到一半失败怎么办？" icon="setting">
+    [日记流水线](./diary/)：看看一次失败如何留下进度，下一次从哪里继续。
+  </Card>
+</CardGrid>
+
+## 怎么读这门课
+
+懂一点 JavaScript 或 TypeScript 就能跟读。每章用合成场景解释一个工程问题，给出短代码、固定提交的源码链接和一个小练习。只读网页和源码即可；若想运行练习，[源码地图](./source-map/)有测试命令，无需 Telegram 或模型密钥。

@@ -231,6 +231,7 @@ npm run build      # 编译 src/ → dist/
 
 ## Documentation
 
+- [从 nyarbot 学 AI 应用工程](https://yinyanfr.github.io/nyarbot/) — 用真实代码理解 Agent、Harness、MCP 和 RAG
 - [架构文档](docs/architecture.zh-CN.md)
 - [Prompt XML Schema](docs/prompt-xml-schema.md)
 - [配置文档](docs/configuration.zh-CN.md)
